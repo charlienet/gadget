@@ -1,0 +1,5 @@
+package logurs
+
+func New() {
+
+}
