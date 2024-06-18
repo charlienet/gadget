@@ -1,4 +1,4 @@
-module gadget/redis
+module github.com/charlienet/gadget/redis
 
 go 1.22
 
