@@ -2,7 +2,10 @@ module github.com/charlienet/gadget/redis
 
 go 1.22
 
-require github.com/redis/go-redis/v9 v9.5.3
+require (
+	github.com/hashicorp/go-version v1.7.0
+	github.com/redis/go-redis/v9 v9.5.3
+)
 
 require (
 	github.com/cespare/xxhash/v2 v2.2.0 // indirect
