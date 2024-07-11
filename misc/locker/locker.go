@@ -1,5 +1,7 @@
 package locker
 
+import "sync"
+
 type locker interface {
 	Lock()
 	TryLock() bool
@@ -11,4 +13,16 @@ type rwLocker interface {
 	RLock()
 	RUnlock()
 	TryRLock() bool
+}
+
+func NewLocker() Locker {
+	return Locker{
+		mu: &sync.RWMutex{},
+	}
+}
+
+func NewRWLocker() RWLocker {
+	return RWLocker{
+		mu: &sync.RWMutex{},
+	}
 }

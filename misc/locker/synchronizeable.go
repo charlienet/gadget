@@ -9,12 +9,12 @@ type Locker struct {
 	mu   locker
 }
 
-func (l *Locker) Synchronize() Locker {
-	return Locker{}
-}
+func (l *Locker) Synchronize() *Locker {
+	if l.mu == nil || l.mu == empty {
+		l.mu = &sync.Mutex{}
+	}
 
-func NewLocker() *Locker {
-	return &Locker{}
+	return l
 }
 
 func (l *Locker) Lock() {
@@ -37,10 +37,6 @@ func (l *Locker) ensureLocker() *Locker {
 type RWLocker struct {
 	once sync.Once
 	mu   rwLocker
-}
-
-func NewRWLocker() RWLocker {
-	return RWLocker{}
 }
 
 func (w *RWLocker) Synchronize() *RWLocker {

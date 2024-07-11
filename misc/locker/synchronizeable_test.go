@@ -9,7 +9,7 @@ import (
 )
 
 func TestLocker(t *testing.T) {
-	l := locker.NewRWLocker()
+	l := locker.RWLocker{}
 
 	l.Lock()
 	l.Lock()
@@ -20,7 +20,7 @@ func TestLocker(t *testing.T) {
 }
 
 func TestRWLocker(t *testing.T) {
-	l := locker.NewRWLocker()
+	l := locker.RWLocker{}
 	t.Log(l.TryLock())
 	t.Log(l.TryLock())
 
