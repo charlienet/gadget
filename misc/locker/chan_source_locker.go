@@ -4,43 +4,41 @@ import "sync"
 
 type ChanSourceLocker struct {
 	m       sync.RWMutex
-	context map[string]chan int
+	content map[string]chan int
 }
 
 func NewChanSourceLocker() *ChanSourceLocker {
 	return &ChanSourceLocker{
-		context: make(map[string]chan int),
+		content: make(map[string]chan int),
 	}
 }
 
 func (s *ChanSourceLocker) Lock(key string) (ok bool, ch <-chan int) {
 	s.m.RLock()
-	ch, ok = s.context[key]
+	ch, exist := s.content[key]
 	s.m.RUnlock()
-	if ok {
+	if exist {
 		return
 	}
-
 	s.m.Lock()
-	if ch, ok = s.context[key]; ok {
+	ch, exist = s.content[key]
+	if exist {
 		s.m.Unlock()
 		return
 	}
-
-	s.context[key] = make(chan int)
-	ch = s.context[key]
+	s.content[key] = make(chan int)
+	ch = s.content[key]
+	ok = true
 	s.m.Unlock()
-
 	return
-
 }
 
 func (s *ChanSourceLocker) Unlock(key string) {
 	s.m.Lock()
 	defer s.m.Unlock()
 
-	if ch, ok := s.context[key]; ok {
+	if ch, ok := s.content[key]; ok {
 		close(ch)
-		delete(s.context, key)
+		delete(s.content, key)
 	}
 }
