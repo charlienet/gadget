@@ -11,6 +11,10 @@ const (
 	defaultSlowThreshold = "5000" // 慢查询(单位微秒)
 )
 
+var (
+	NotFound = redis.Nil
+)
+
 var _ Client = redisClient{}
 
 type Client interface {
