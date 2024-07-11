@@ -1,9 +1,14 @@
-go 1.22.4
+go 1.22
 
 use (
 	./cache
 	./config
+	./datastructures
 	./logger
 	./redis
+	./store
+	./client
+	./crypto
+	./misc
 	./test
 )
