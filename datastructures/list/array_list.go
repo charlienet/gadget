@@ -136,6 +136,26 @@ func (l *ArrayList[T]) Back() T {
 	return l.buf[l.tail]
 }
 
+func (l *ArrayList[T]) Forward() func(func(int, T) bool) {
+	return func(yiled func(int, T) bool) {
+		for i := 0; i < l.size; i++ {
+			if !yiled(i, l.buf[i]) {
+				return
+			}
+		}
+	}
+}
+
+func (l *ArrayList[T]) Backward() func(func(int, T) bool) {
+	return func(yiled func(int, T) bool) {
+		for i := l.size - 1; i >= 0; i-- {
+			if !yiled(i, l.buf[i]) {
+				return
+			}
+		}
+	}
+}
+
 func (l *ArrayList[T]) ForEach(fn func(T)) {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
