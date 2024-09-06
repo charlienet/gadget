@@ -1,6 +1,8 @@
 package sets
 
-import "golang.org/x/exp/constraints"
+import (
+	"cmp"
+)
 
 type Set[T comparable] interface {
 	Add(...T) Set[T]
@@ -15,7 +17,7 @@ type Set[T comparable] interface {
 }
 
 // 并集
-func Union[T constraints.Ordered](sets ...Set[T]) Set[T] {
+func Union[T cmp.Ordered](sets ...Set[T]) Set[T] {
 	if len(sets) == 0 {
 		return NewSet[T]()
 	}
@@ -32,7 +34,7 @@ func Union[T constraints.Ordered](sets ...Set[T]) Set[T] {
 }
 
 // 交集
-func Intersection[T constraints.Ordered](sets ...Set[T]) Set[T] {
+func Intersection[T cmp.Ordered](sets ...Set[T]) Set[T] {
 	if len(sets) == 0 {
 		return NewSet[T]()
 	}
@@ -60,7 +62,7 @@ func Intersection[T constraints.Ordered](sets ...Set[T]) Set[T] {
 }
 
 // 差集
-func Difference[T constraints.Ordered](main Set[T], sets ...Set[T]) Set[T] {
+func Difference[T cmp.Ordered](main Set[T], sets ...Set[T]) Set[T] {
 	if len(sets) == 0 {
 		return main
 	}

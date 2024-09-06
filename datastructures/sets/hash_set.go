@@ -2,21 +2,21 @@ package sets
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"maps"
 	"strings"
 
 	"github.com/charlienet/gadget/misc/locker"
-	"golang.org/x/exp/constraints"
 )
 
-type hash_set[T constraints.Ordered] struct {
+type hash_set[T cmp.Ordered] struct {
 	m      map[T]struct{}
 	locker locker.RWLocker
 }
 
-func NewSet[T constraints.Ordered](values ...T) Set[T] {
+func NewSet[T cmp.Ordered](values ...T) Set[T] {
 	set := hash_set[T]{
 		m: make(map[T]struct{}, len(values)),
 	}

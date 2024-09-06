@@ -1,19 +1,22 @@
 package sets
 
 import (
+	"cmp"
+	"encoding/json"
+	"fmt"
 	"slices"
+	"strings"
 
 	"github.com/charlienet/gadget/misc/locker"
-	"golang.org/x/exp/constraints"
 )
 
-type sorted_set[T constraints.Ordered] struct {
+type sorted_set[T cmp.Ordered] struct {
 	sorted []T
 	set    Set[T]
 	locker locker.RWLocker
 }
 
-func NewSortedSet[T constraints.Ordered](t ...T) *sorted_set[T] {
+func NewSortedSet[T cmp.Ordered](t ...T) *sorted_set[T] {
 	return &sorted_set[T]{
 		sorted: t,
 		set:    NewSet(t...),
@@ -128,4 +131,19 @@ func (s *sorted_set[T]) ToSlice() []T {
 	defer s.locker.RUnlock()
 
 	return s.sorted
+}
+
+func (s *sorted_set[T]) MarshalJSON() ([]byte, error) {
+	items := make([]string, 0, len(s.sorted))
+
+	for _, ele := range s.sorted {
+		b, err := json.Marshal(ele)
+		if err != nil {
+			return nil, err
+		}
+
+		items = append(items, string(b))
+	}
+
+	return []byte(fmt.Sprintf("[%s]", strings.Join(items, ", "))), nil
 }
