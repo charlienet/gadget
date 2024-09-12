@@ -1,7 +1,7 @@
 package json
 
 import (
-	"encoding/json"
+	"github.com/charlienet/go-misc/json"
 
 	"github.com/charlienet/gadget/config/encoder"
 )

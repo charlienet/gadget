@@ -1,9 +1,14 @@
 package file
 
 type file struct {
-	path string
+	path     string
+	filetype string
 }
 
-func New() {
+func New() file {
+	return file{}
+}
 
+func (f *file) Watch() (*watcher, error) {
+	return newWatcher(f)
 }

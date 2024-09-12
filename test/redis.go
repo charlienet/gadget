@@ -18,10 +18,13 @@ const (
 func RunOnRedis(t assert.TestingT, fn func(rdb redis.Client), opts ...redis.Option) {
 	run(t, fn, func() (r redis.Client, clean func(), err error) {
 		o := make([]redis.Option, 0, len(opts)+3)
-		o = append(o, redis.WithAddr(addr))
-		o = append(o, redis.WithPassword(password))
-		o = append(o, redis.WithPrefix(prefix))
-		o = append(o, opts...)
+		if len(opts) > 0 {
+			o = opts
+		} else {
+			o = append(o, redis.WithAddr(addr))
+			o = append(o, redis.WithPassword(password))
+			o = append(o, redis.WithPrefix(prefix))
+		}
 
 		rdb := redis.New(o...)
 		if err := rdb.Constraint(redis.Ping()); err != nil {

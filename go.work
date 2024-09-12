@@ -3,12 +3,16 @@ go 1.23
 use (
 	./cache
 	./config
-	./datastructures
+	./id_generator
 	./logger
+	./plugins/cache/redis	
+	./plugins/cache/freecache
+	./plugins/cache/bigcache
+	./plugins/logger/logrus
+	./plugins/config/source/nacos
+	./plugins/config/source/consul
+	./plugins/config/source/etcd
 	./redis
 	./store
-	./client
-	./crypto
-	./misc
 	./test
 )

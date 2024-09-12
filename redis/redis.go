@@ -26,6 +26,7 @@ type Client interface {
 	Separator() string                            // 分隔符
 	AddPrefix(prefix ...string) redisClient       // 添加前缀
 	ServerVersion() string                        // 服务器版本
+	IsStack() bool                                // 服务器环境是否为Redis stack
 }
 
 type redisClient struct {
@@ -84,7 +85,7 @@ func (rdb redisClient) LoadFunction(code string) {
 }
 
 func (rdb redisClient) ServerVersion() string {
-	info, err := rdb.Info(context.Background(), "server").Result()
+	info, err := rdb.Info(context.Background(), "Server").Result()
 	if err != nil {
 		return ""
 	}
@@ -97,6 +98,16 @@ func (rdb redisClient) ServerVersion() string {
 	}
 
 	return ""
+}
+
+func (rdb redisClient) IsStack() bool {
+
+	info, err := rdb.Info(context.Background(), "Modules").Result()
+	if err != nil {
+		return false
+	}
+
+	return len(info) > 20
 }
 
 func new(conf *redis.UniversalOptions, prefix redisPrefix) redisClient {
