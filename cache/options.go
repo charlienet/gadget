@@ -1,64 +1,31 @@
 package cache
 
 import (
-	"time"
-
-	"github.com/charlienet/gadget/cache/bigcache"
-	"github.com/charlienet/gadget/cache/freecache"
-	r "github.com/charlienet/gadget/cache/redis"
-	"github.com/charlienet/gadget/cache/tinylfu"
-	"github.com/charlienet/gadget/redis"
+	"github.com/charlienet/gadget/logger"
 )
 
-type option func(*cache)
+// Options represents the options for the cache.
+type Options struct {
+	stores     []Store
+	serializer Serializer
+	logger     logger.Logger
+}
 
-func WithRedis(rdb redis.Client) option {
-	return func(c *cache) {
-		c.distributed = r.New(rdb)
+func (o *Options) AddStore(s Store) {
+	o.stores = append(o.stores, s)
+}
+
+// Option manipulates the Options passed.
+type Option func(o *Options)
+
+func WithLogger(l logger.Logger) Option {
+	return func(o *Options) {
+		o.logger = l
 	}
 }
 
-func WithRedisPubSub(rdb redis.Client) option {
-	return func(c *cache) {
-	}
-}
-
-func WithTinyLFU(size int, ttl time.Duration) option {
-	return func(c *cache) {
-		c.local = tinylfu.NewTinyLFU(size, ttl)
-	}
-}
-
-func WithFreecache() option {
-	return func(c *cache) {
-		c.local = freecache.New()
-	}
-}
-
-func WithBigcache() option {
-	return func(c *cache) {
-		c.local = bigcache.NewBigCache()
-	}
-}
-
-func WithEmptyToken(empty string) option {
-	return func(c *cache) {
-		c.emptyObjectToken = []byte(empty)
-	}
-}
-
-func WithMaxRetry(retry int) option {
-	return func(c *cache) {
-		if retry <= 1 {
-			c.maxRetry = 1
-		} else {
-			c.maxRetry = retry
-		}
-	}
-}
-
-func Disable() option {
-	return func(c *cache) {
-		c.disable = true
+func WithSerializer(s Serializer) Option {
+	return func(o *Options) {
+		o.serializer = s
 	}
 }

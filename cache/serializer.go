@@ -1,7 +1,7 @@
 package cache
 
 import (
-	"encoding/json"
+	"github.com/charlienet/go-misc/json"
 )
 
 type serializer struct {

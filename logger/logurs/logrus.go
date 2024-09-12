@@ -1,5 +1,0 @@
-package logurs
-
-func New() {
-
-}

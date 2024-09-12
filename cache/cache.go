@@ -6,7 +6,7 @@ import (
 	"errors"
 	"log"
 
-	"github.com/charlienet/gadget/misc/locker"
+	"github.com/charlienet/go-misc/locker"
 )
 
 const (
@@ -21,11 +21,18 @@ var (
 	ErrTimeout        = errors.New("load from source timeout")
 )
 
+// Store is the interface that wraps the cache store.
 type Store interface {
+	// Get gets a cached value by key.
 	Get(ctx context.Context, key string) ([]byte, bool, error)
-	Set(ctx context.Context, key string, v []byte, expireSecond int) error
+	// Put stores a key-value pair into cache.
+	Put(ctx context.Context, key string, v []byte, expireSecond int) error
+	// Delete removes a key from cache.
 	Delete(ctx context.Context, key ...string) error
+	// String returns the name of the implementation.
 	Name() string
+	//  is remote storage
+	IsRemote() bool
 }
 
 type PubSubChannel interface {
@@ -42,7 +49,7 @@ type Cache interface {
 	BatchGet(ctx context.Context, keys []string, loadFn BatchLoadFn, expirSecond int) error
 	Get(ctx context.Context, key string, v any) error
 	Getfn(ctx context.Context, key string, v any, fn LoadFn, expireSeconds int) error
-	Set(ctx context.Context, key string, v any, expireSecond int) error
+	Put(ctx context.Context, key string, v any, expireSecond int) error
 	Delete(ctx context.Context, keys ...string)
 	Disable()
 	Enable()
@@ -50,13 +57,14 @@ type Cache interface {
 
 type cache struct {
 	local            Store
-	distributed      Store
+	remote           Store
 	stores           []Store
 	pubsub           PubSubChannel
 	serializer       Serializer
 	emptyObjectToken []byte
 	lock             *locker.ChanSourceLocker
 	qps              *qps
+	stats            Stats
 	maxRetry         int
 	disable          bool
 }
@@ -64,19 +72,24 @@ type cache struct {
 type LoadFn func(ctx context.Context, key string, v any) (bool, error)
 type BatchLoadFn func(ctx context.Context, keys ...string) (map[string]any, error)
 
-func New(opts ...option) *cache {
+func New(opts ...Option) *cache {
 	c := acquireDefaultCache()
+
+	opt := Options{}
 	for _, o := range opts {
-		o(c)
+		o(&opt)
 	}
 
-	if c.local != nil {
-		c.stores = append(c.stores, c.local)
+	c.stores = opt.stores
+	for _, s := range opt.stores {
+		if s.IsRemote() {
+			c.remote = s
+		} else {
+			c.local = s
+		}
 	}
 
-	if c.distributed != nil {
-		c.stores = append(c.stores, c.distributed)
-	}
+	c.startWatcher()
 
 	return c
 }
@@ -88,7 +101,7 @@ func (c *cache) BatchGet(ctx context.Context, keys []string, loadFn BatchLoadFn,
 	}
 
 	for key, value := range loaded {
-		if err := c.Set(ctx, key, value, expirSecond); err != nil {
+		if err := c.Put(ctx, key, value, expirSecond); err != nil {
 			return err
 		}
 	}
@@ -106,6 +119,8 @@ func (c *cache) Get(ctx context.Context, key string, v any) error {
 		if err := c.serializer.Unmarshal(data, &v); err != nil {
 			return err
 		}
+
+		return nil
 	}
 
 	return ErrEntityNotExist
@@ -136,15 +151,15 @@ func (c *cache) Getfn(ctx context.Context, key string, v any, fn LoadFn, expireS
 	}
 
 	if !sourceExist {
-		c.Set(ctx, key, c.emptyObjectToken, expireSeconds)
+		c.Put(ctx, key, c.emptyObjectToken, expireSeconds)
 	} else {
-		c.Set(ctx, key, v, expireSeconds)
+		c.Put(ctx, key, v, expireSeconds)
 	}
 
 	return nil
 }
 
-func (c *cache) Set(ctx context.Context, key string, v any, expireSecond int) error {
+func (c *cache) Put(ctx context.Context, key string, v any, expireSecond int) error {
 	b, err := c.serializer.Marshal(v)
 	if err != nil {
 		return err
@@ -169,6 +184,10 @@ func (c *cache) Delete(ctx context.Context, keys ...string) {
 			c.pubsub.Publish(key)
 		}
 	}
+}
+
+func (c *cache) Stats() Stats {
+	return c.stats
 }
 
 func (c *cache) Disable() {
@@ -210,9 +229,9 @@ func (c *cache) getFromSource(ctx context.Context, key string, loadFn LoadFn, v 
 		}
 
 		if exist {
-			c.Set(ctx, key, v, expireSeconds)
+			c.Put(ctx, key, v, expireSeconds)
 		} else {
-			c.Set(ctx, key, c.emptyObjectToken, expireSeconds)
+			c.Put(ctx, key, c.emptyObjectToken, expireSeconds)
 		}
 	}
 
@@ -229,13 +248,21 @@ func (c *cache) getFromSource(ctx context.Context, key string, loadFn LoadFn, v 
 
 func (c *cache) setCache(ctx context.Context, key string, v []byte, expireSecond int) error {
 	for _, c := range c.stores {
-		log.Printf("cache data to: %s cache key:%s", c.Name(), key)
-		if err := c.Set(ctx, key, v, expireSecond); err != nil {
+		log.Printf("cache data to: %s cache key:[%s]", c.Name(), key)
+		if err := c.Put(ctx, key, v, expireSecond); err != nil {
 			return err
 		}
 	}
 
 	return nil
+}
+
+func (c *cache) startWatcher() {
+	if c.pubsub != nil {
+		go func() {
+			c.pubsub.Subscribe("")
+		}()
+	}
 }
 
 func (c *cache) isEmpty(data []byte) bool {

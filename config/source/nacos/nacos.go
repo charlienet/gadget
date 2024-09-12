@@ -1,5 +1,0 @@
-package nacos
-
-func New() {
-
-}
