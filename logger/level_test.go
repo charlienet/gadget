@@ -6,7 +6,6 @@ import (
 	"github.com/charlienet/gadget/logger"
 )
 
-func TestLogger(t *testing.T) {
-	l := logger.DefaultLogger
-	l.Info("trace_msg1")
+func TestLevelEnable(t *testing.T) {
+	t.Log(logger.Debug.Enabled(logger.Error))
 }

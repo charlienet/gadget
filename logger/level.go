@@ -31,7 +31,7 @@ func (l Level) String() string {
 	return ""
 }
 
-func (l Level) Enabled(lvl Level) bool { return lvl > l }
+func (l Level) Enabled(lvl Level) bool { return lvl >= l }
 
 func GetLevel(levelStr string) (Level, error) {
 	switch levelStr {
