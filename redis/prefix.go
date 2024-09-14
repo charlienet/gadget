@@ -34,7 +34,7 @@ func (p *redisPrefix) hasPrefix() bool {
 	return len(p.prefix) > 0
 }
 
-func (p *redisPrefix) join(key ...string) string {
+func (p *redisPrefix) rename(key ...string) string {
 	s := make([]string, 0, len(key)+1)
 	if len(p.prefix) > 0 {
 		s = append(s, p.prefix)
@@ -43,6 +43,15 @@ func (p *redisPrefix) join(key ...string) string {
 	s = append(s, key...)
 
 	return strings.Join(s, p.separator)
+}
+
+func (p *redisPrefix) renames(key ...string) []string {
+	s := make([]string, 0, len(key))
+	for _, k := range key {
+		s = append(s, p.rename(k))
+	}
+
+	return s
 }
 
 func defaultString(cond bool, v, dv string) string {

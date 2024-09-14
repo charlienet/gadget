@@ -83,7 +83,7 @@ func (r renameHook) renameKey(cmd redis.Cmder) {
 func (r renameHook) rename(args []any, indexes ...int) {
 	for _, i := range indexes {
 		if key, ok := args[i].(string); ok {
-			newKey := r.prefix.join(key)
+			newKey := r.prefix.rename(key)
 			args[i] = newKey
 		}
 	}

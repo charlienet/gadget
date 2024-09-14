@@ -44,6 +44,19 @@ func New(opts ...Option) redisClient {
 	return new(&opt.UniversalOptions, newPrefix(opt.separator, opt.perfix))
 }
 
+func (rdb redisClient) Subscribe(ctx context.Context, channels ...string) *redis.PubSub {
+	return rdb.UniversalClient.Subscribe(ctx, rdb.prefix.renames(channels...)...)
+}
+
+func (rdb redisClient) PSubscribe(ctx context.Context, channels ...string) *redis.PubSub {
+	return rdb.UniversalClient.PSubscribe(ctx, rdb.prefix.renames(channels...)...)
+
+}
+
+func (rdb redisClient) SSubscribe(ctx context.Context, channels ...string) *redis.PubSub {
+	return rdb.UniversalClient.SSubscribe(ctx, rdb.prefix.renames(channels...)...)
+}
+
 func (rdb redisClient) Constraint(constraints ...constraintFunc) error {
 	for _, c := range constraints {
 		if err := c(rdb); err != nil {
@@ -64,7 +77,7 @@ func (rdb redisClient) MustConstraint(constraints ...constraintFunc) {
 
 func (rdb redisClient) AddPrefix(prefixes ...string) redisClient {
 	old := rdb.prefix
-	p := newPrefix(old.separator, old.join(prefixes...))
+	p := newPrefix(old.separator, old.rename(prefixes...))
 
 	return new(rdb.conf, p)
 }
