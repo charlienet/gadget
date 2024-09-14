@@ -9,21 +9,42 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-const (
-	addr     = "redis:6379"
-	password = "123456"
-	prefix   = "prefix"
+type redisOption struct {
+	addr     string
+	password string
+	prefix   string
+}
+
+var (
+	redisOptions = map[string]redisOption{
+		"redis":       {addr: "redis:6379"},
+		"redis_stack": {addr: "redis_stack:6380"},
+	}
 )
 
+func RunOnRedisStack(t assert.TestingT, fn func(rdb redis.Client), opts ...redis.Option) {
+	runOnRedis(t, fn, redisOptions["redis_stack"], opts...)
+}
+
 func RunOnRedis(t assert.TestingT, fn func(rdb redis.Client), opts ...redis.Option) {
+	runOnRedis(t, fn, redisOptions["redis"], opts...)
+}
+
+func RunOnMiniRedis(t assert.TestingT, fn func(rdb redis.Client)) {
+	run(t, fn, func() (r redis.Client, clean func(), err error) {
+		return createMiniRedis()
+	})
+}
+
+func runOnRedis(t assert.TestingT, fn func(rdb redis.Client), opt redisOption, opts ...redis.Option) {
 	run(t, fn, func() (r redis.Client, clean func(), err error) {
 		o := make([]redis.Option, 0, len(opts)+3)
 		if len(opts) > 0 {
 			o = opts
 		} else {
-			o = append(o, redis.WithAddr(addr))
-			o = append(o, redis.WithPassword(password))
-			o = append(o, redis.WithPrefix(prefix))
+			o = append(o, redis.WithAddr(opt.addr))
+			o = append(o, redis.WithPassword(opt.password))
+			o = append(o, redis.WithPrefix(opt.prefix))
 		}
 
 		rdb := redis.New(o...)
@@ -32,12 +53,6 @@ func RunOnRedis(t assert.TestingT, fn func(rdb redis.Client), opts ...redis.Opti
 		}
 
 		return rdb, func() { rdb.Close() }, nil
-	})
-}
-
-func RunOnMiniRedis(t assert.TestingT, fn func(rdb redis.Client)) {
-	run(t, fn, func() (r redis.Client, clean func(), err error) {
-		return createMiniRedis()
 	})
 }
 
