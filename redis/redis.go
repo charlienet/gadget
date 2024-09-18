@@ -24,6 +24,7 @@ type Client interface {
 	LoadFunction(f string)                        // 加载函数脚本
 	Prefix() string                               // 统一前缀
 	Separator() string                            // 分隔符
+	JoinKeys(key ...string) string                // 连接键
 	AddPrefix(prefix ...string) redisClient       // 添加前缀
 	ServerVersion() string                        // 服务器版本
 	IsStack() bool                                // 服务器环境是否为Redis stack
@@ -88,6 +89,10 @@ func (rdb redisClient) Prefix() string {
 
 func (rdb redisClient) Separator() string {
 	return rdb.prefix.separator
+}
+
+func (rdb redisClient) JoinKeys(key ...string) string {
+	return rdb.prefix.rename(key...)
 }
 
 func (rdb redisClient) LoadFunction(code string) {

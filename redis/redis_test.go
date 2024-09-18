@@ -8,6 +8,7 @@ import (
 
 	"github.com/charlienet/gadget/redis"
 	"github.com/charlienet/gadget/test"
+	"github.com/charlienet/go-misc/random"
 	"github.com/go-redis/redis_rate/v10"
 	"github.com/stretchr/testify/assert"
 )
@@ -75,6 +76,22 @@ func TestBf(t *testing.T) {
 			rdb.BFAdd(context.Background(), "ffff", i)
 		}
 	})
+}
+
+func BenchmarkBF(b *testing.B) {
+	key := "abcdef"
+
+	test.RunOnRedisStack(b, func(rdb redis.Client) {
+		rdb.BFReserve(context.Background(), key, 0.0001, 100000)
+		ctx := context.Background()
+
+		b.Run("bf", func(b *testing.B) {
+			for i := 0; i < b.N; i++ {
+				rdb.BFExists(ctx, key, random.Hex.Generate(1))
+			}
+		})
+	})
+
 }
 
 func TestRateLimiter(t *testing.T) {
