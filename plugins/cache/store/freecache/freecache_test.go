@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/charlienet/gadget/cache"
-	"github.com/charlienet/gadget/plugins/cache/freecache"
+	"github.com/charlienet/gadget/plugins/cache/store/freecache"
 	"github.com/stretchr/testify/assert"
 )
 

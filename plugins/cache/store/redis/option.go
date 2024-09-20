@@ -10,7 +10,7 @@ type option func(*redis_store)
 func New(rdb redis.Client, opts ...option) cache.Option {
 	return func(o *cache.Options) {
 		s := new(rdb, opts...)
-		o.AddStore(s)
+		o.WithStore(s)
 	}
 }
 

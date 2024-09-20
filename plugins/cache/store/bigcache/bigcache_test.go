@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	"github.com/charlienet/gadget/cache"
-	"github.com/charlienet/gadget/plugins/cache/bigcache"
+	"github.com/charlienet/gadget/plugins/cache/store/bigcache"
 	"github.com/stretchr/testify/assert"
 )
 

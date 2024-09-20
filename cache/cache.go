@@ -3,47 +3,23 @@ package cache
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
-	"log"
 
+	"github.com/charlienet/gadget/logger"
 	"github.com/charlienet/go-misc/locker"
 )
 
 const (
-	defaultRedisEmpty     = "object-empty"
-	defaultRedisTtlFactor = 20
+	defaultObjectNotExist = "OBJECT-DOES-NOT-EXIST"
+	defaultExpiresSeconds = 60
 	defaultMaxRetry       = 2
 )
 
 var (
-	ErrNotFound       = errors.New("not found")
 	ErrEntityNotExist = errors.New("entity does not exist")
 	ErrTimeout        = errors.New("load from source timeout")
 )
-
-// Store is the interface that wraps the cache store.
-type Store interface {
-	// Get gets a cached value by key.
-	Get(ctx context.Context, key string) ([]byte, bool, error)
-	// Put stores a key-value pair into cache.
-	Put(ctx context.Context, key string, v []byte, expireSecond int) error
-	// Delete removes a key from cache.
-	Delete(ctx context.Context, key ...string) error
-	// String returns the name of the implementation.
-	Name() string
-	//  is remote storage
-	IsRemote() bool
-}
-
-type PubSubChannel interface {
-	Subscribe(key string)
-	Publish(key string) error
-}
-
-type Serializer interface {
-	Marshal(v any) ([]byte, error)
-	Unmarshal(b []byte, v any) error
-}
 
 type Cache interface {
 	BatchGet(ctx context.Context, keys []string, loadFn BatchLoadFn, expirSecond int) error
@@ -56,21 +32,24 @@ type Cache interface {
 }
 
 type cache struct {
-	local            Store
-	remote           Store
-	stores           []Store
-	pubsub           PubSubChannel
-	serializer       Serializer
-	emptyObjectToken []byte
-	lock             *locker.ChanSourceLocker
+	localStore       Store                    // 堆缓存
+	remoteStore      Store                    // 远程缓存
+	pubsub           Listener                 // 异步消息通知
+	serializer       Serializer               // 序列化
+	emptyObjectToken []byte                   // 缓存击穿空对象
+	logger           logger.Logger            // 日志
+	locker           *locker.ChanSourceLocker // 资源锁
 	qps              *qps
 	stats            Stats
+	ttl              int
 	maxRetry         int
 	disable          bool
+	stop             chan bool
 }
 
 type LoadFn func(ctx context.Context, key string, v any) (bool, error)
 type BatchLoadFn func(ctx context.Context, keys ...string) (map[string]any, error)
+type UpdateFn func(ctx context.Context, key string) error
 
 func New(opts ...Option) *cache {
 	c := acquireDefaultCache()
@@ -80,14 +59,8 @@ func New(opts ...Option) *cache {
 		o(&opt)
 	}
 
-	c.stores = opt.stores
-	for _, s := range opt.stores {
-		if s.IsRemote() {
-			c.remote = s
-		} else {
-			c.local = s
-		}
-	}
+	c.localStore = opt.localStore
+	c.remoteStore = opt.remoteStore
 
 	c.startWatcher()
 
@@ -95,6 +68,9 @@ func New(opts ...Option) *cache {
 }
 
 func (c *cache) BatchGet(ctx context.Context, keys []string, loadFn BatchLoadFn, expirSecond int) error {
+	c.lockMultiple(keys...)
+	defer c.unlockMultiple(keys...)
+
 	loaded, err := loadFn(ctx, keys...)
 	if err != nil {
 		return err
@@ -115,12 +91,8 @@ func (c *cache) Get(ctx context.Context, key string, v any) error {
 		return err
 	}
 
-	if exist {
-		if err := c.serializer.Unmarshal(data, &v); err != nil {
-			return err
-		}
-
-		return nil
+	if exist && !c.isEmptyObject(data) {
+		return c.serializer.Unmarshal(data, &v)
 	}
 
 	return ErrEntityNotExist
@@ -131,32 +103,19 @@ func (c *cache) Getfn(ctx context.Context, key string, v any, fn LoadFn, expireS
 		return c.getFromSource(ctx, key, fn, v, expireSeconds)
 	}
 
+	// Load data from the cache
 	data, exist, err := c.getFromCache(ctx, key)
 	if err != nil {
 		return err
 	}
 
-	if c.isEmpty(data) {
-		return ErrEntityNotExist
+	// Exists and is not an empty object
+	if exist && !c.isEmptyObject(data) {
+		return c.serializer.Unmarshal(data, v)
 	}
 
-	if exist {
-		err := c.serializer.Unmarshal(data, v)
-		return err
-	}
-
-	sourceExist, err := fn(ctx, key, v)
-	if err != nil {
-		return err
-	}
-
-	if !sourceExist {
-		c.Put(ctx, key, c.emptyObjectToken, expireSeconds)
-	} else {
-		c.Put(ctx, key, v, expireSeconds)
-	}
-
-	return nil
+	// Load from data source
+	return c.getFromSource(ctx, key, fn, v, expireSeconds)
 }
 
 func (c *cache) Put(ctx context.Context, key string, v any, expireSecond int) error {
@@ -172,14 +131,38 @@ func (c *cache) Put(ctx context.Context, key string, v any, expireSecond int) er
 	return nil
 }
 
+func (c *cache) Update(ctx context.Context, key string, updateFn UpdateFn) error {
+	c.locker.Lock(key)
+	defer c.locker.Unlock(key)
+
+	return updateFn(ctx, key)
+}
+
 func (c *cache) Delete(ctx context.Context, keys ...string) {
-	for _, c := range c.stores {
-		c.Delete(ctx, keys...)
+	c.lockMultiple(keys...)
+	defer c.unlockMultiple(keys...)
+
+	c.logger.Debug("delete cache key:", keys)
+	c.localStore.Delete(ctx, keys...)
+	c.remoteStore.Delete(ctx, keys...)
+
+	c.noticeHasBeenRemoved(keys...)
+}
+
+func (c *cache) lockMultiple(keys ...string) {
+	for _, k := range keys {
+		c.locker.Lock(k)
 	}
+}
 
-	log.Println("delete cache key:", keys)
+func (c *cache) unlockMultiple(keys ...string) {
+	for _, k := range keys {
+		c.locker.Unlock(k)
+	}
+}
 
-	if c.pubsub != nil {
+func (c *cache) noticeHasBeenRemoved(keys ...string) {
+	if c.pubsub != nil && len(keys) > 0 {
 		for _, key := range keys {
 			c.pubsub.Publish(key)
 		}
@@ -198,60 +181,97 @@ func (c *cache) Enable() {
 	c.disable = false
 }
 
-func (c *cache) getFromCache(ctx context.Context, key string) ([]byte, bool, error) {
-	for _, s := range c.stores {
-		log.Printf("get the value from the cache: %s", s.Name())
-		data, exist, err := s.Get(ctx, key)
-		if err != nil {
-			return []byte{}, false, err
-		}
-
-		if exist {
-			return data, exist, nil
-		}
+func (c *cache) getFromCache(ctx context.Context, key string) (b []byte, exist bool, err error) {
+	b, exist, err = c.getFromStore(ctx, c.localStore, key)
+	if err != nil {
+		return []byte{}, false, err
 	}
 
-	return []byte{}, false, nil
+	// exists in the local cache, returned
+	if exist {
+		return
+	}
+
+	b, exist, err = c.getFromStore(ctx, c.remoteStore, key)
+	if err != nil {
+		return
+	}
+
+	// exists in remote storage
+	if exist {
+		// put the data from the remote cache locally
+		c.putInStore(ctx, c.localStore, key, b, c.ttl)
+	}
+
+	return
 }
 
 func (c *cache) getFromSource(ctx context.Context, key string, loadFn LoadFn, v any, expireSeconds int) error {
-	replyNum := 1
-	_ = replyNum
-
-	owner, ch := c.lock.Lock(key)
-	if owner {
-		defer c.lock.Unlock(key)
+	ok, ch := c.locker.Lock(key)
+	if ok {
+		defer c.locker.Unlock(key)
 
 		exist, err := loadFn(ctx, key, v)
-		log.Println("load from source:", exist, err)
+		c.logger.Debug("load from source:", exist, err)
+
 		if err != nil {
 			return err
 		}
 
+		// 异步方式放入
 		if exist {
 			c.Put(ctx, key, v, expireSeconds)
 		} else {
 			c.Put(ctx, key, c.emptyObjectToken, expireSeconds)
 		}
+
+		return nil
 	}
 
 	<-ch
-	return nil
+	b, exist, err := c.getFromStore(ctx, c.localStore, key)
+	if err != nil {
+		return err
+	}
 
-	// select {
-	// case <-ch:
-	// 	return nil
-	// }
+	if exist && !c.isEmptyObject(b) {
+		return json.Unmarshal(b, &v)
+	}
 
-	// return nil
+	return ErrEntityNotExist
+}
+
+func (c *cache) deleteLocalCache(ctx context.Context, key string) {
+	if c.localStore != nil {
+		c.localStore.Delete(ctx, key)
+	}
 }
 
 func (c *cache) setCache(ctx context.Context, key string, v []byte, expireSecond int) error {
-	for _, c := range c.stores {
-		log.Printf("cache data to: %s cache key:[%s]", c.Name(), key)
-		if err := c.Put(ctx, key, v, expireSecond); err != nil {
-			return err
-		}
+	if err := c.putInStore(ctx, c.localStore, key, v, expireSecond); err != nil {
+		return err
+	}
+
+	if err := c.putInStore(ctx, c.remoteStore, key, v, expireSecond); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (c *cache) getFromStore(ctx context.Context, s Store, key string) ([]byte, bool, error) {
+	if s != nil {
+		c.logger.Debugf("get data from: %s, key:[%s]", s.Name(), key)
+		return s.Get(ctx, key)
+	}
+
+	return []byte{}, false, nil
+}
+
+func (c *cache) putInStore(ctx context.Context, s Store, key string, b []byte, expireSecond int) error {
+	if s != nil {
+		c.logger.Debugf("cache data to: %s cache key:[%s]", s.Name(), key)
+		return s.Put(ctx, key, b, expireSecond)
 	}
 
 	return nil
@@ -259,22 +279,33 @@ func (c *cache) setCache(ctx context.Context, key string, v []byte, expireSecond
 
 func (c *cache) startWatcher() {
 	if c.pubsub != nil {
-		go func() {
-			c.pubsub.Subscribe("")
-		}()
+		c.pubsub.Subscribe("notice")
+
+		cc := make(chan string)
+		for {
+			select {
+			case key := <-cc:
+				c.deleteLocalCache(context.Background(), key)
+			case <-c.stop:
+				return
+			}
+		}
 	}
 }
 
-func (c *cache) isEmpty(data []byte) bool {
-	return bytes.Equal(data, c.emptyObjectToken)
+func (c *cache) isEmptyObject(data []byte) bool {
+	return len(data) == len(c.emptyObjectToken) && bytes.Equal(data, c.emptyObjectToken)
 }
 
 func acquireDefaultCache() *cache {
 	return &cache{
-		emptyObjectToken: []byte(defaultRedisEmpty),
-		serializer:       serializer{},
-		lock:             locker.NewChanSourceLocker(),
+		emptyObjectToken: []byte(defaultObjectNotExist),
+		serializer:       jsonSerializer{},
+		logger:           logger.DefaultLogger,
+		locker:           locker.NewChanSourceLocker(),
 		qps:              &qps{},
+		ttl:              defaultExpiresSeconds,
 		maxRetry:         defaultMaxRetry,
+		stop:             make(chan bool),
 	}
 }

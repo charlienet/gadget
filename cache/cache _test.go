@@ -2,12 +2,15 @@ package cache_test
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"reflect"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/charlienet/gadget/cache"
+	"github.com/charlienet/go-misc/json"
+	"github.com/stretchr/testify/assert"
 )
 
 type cacheItem struct {
@@ -40,9 +43,47 @@ func TestLoadFromFunc(t *testing.T) {
 
 	b, _ := json.Marshal(v)
 
-	t.Log(v.Name)
+	assert.Equal(t, "test", v.Name)
 	t.Log(string(b))
 
+}
+
+type User struct {
+	Id   int
+	Name string
+}
+
+func TestGetFromFn(t *testing.T) {
+	var key = "abc"
+	c := cache.New(cache.WithMemStore())
+
+	j := `{"Id":1,"Name":"Test"}`
+
+	fn := func(ctx context.Context, key string, v any) (bool, error) {
+		if err := json.Unmarshal([]byte(j), &v); err != nil {
+			return false, err
+		}
+
+		time.Sleep(time.Second)
+		return true, nil
+	}
+
+	var wg = new(sync.WaitGroup)
+	ctx := context.Background()
+
+	g := 10
+	wg.Add(g)
+	for i := 0; i < g; i++ {
+		go func() {
+			defer wg.Done()
+
+			u := User{}
+			assert.Nil(t, c.Getfn(ctx, key, &u, fn, 30))
+			assert.Equal(t, j, json.Struct2Json(u))
+		}()
+	}
+
+	wg.Wait()
 }
 
 func TestNoCache(t *testing.T) {

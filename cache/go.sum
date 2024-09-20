@@ -1,10 +1,10 @@
 github.com/cespare/xxhash/v2 v2.1.1/go.mod h1:VGX0DQ3Q6kWi7AoAeZDth3/j3BFtOZR5XLFGgcrjCOs=
 github.com/cespare/xxhash/v2 v2.3.0 h1:UL815xU9SqsFlibzuggzjXhog7bL6oX9BbNZnL2UFvs=
 github.com/cespare/xxhash/v2 v2.3.0/go.mod h1:VGX0DQ3Q6kWi7AoAeZDth3/j3BFtOZR5XLFGgcrjCOs=
-github.com/charlienet/gadget/logger v0.0.0-20240910075122-40e63647fad1 h1:RBx7kRrfTicmMxZ7eBpN5fUx9pDQG+ABDea27LPeosU=
-github.com/charlienet/gadget/logger v0.0.0-20240910075122-40e63647fad1/go.mod h1:f3I+2aUFh4wmNgthEndiwZMCpgZeK9KliX7jAt+KUkQ=
-github.com/charlienet/go-misc v0.0.0-20240911064214-e5f4643869eb h1:lnEHQjgr2ebE8+GDeyb5XrBdqu/JMZLVmSl/936AQZQ=
-github.com/charlienet/go-misc v0.0.0-20240911064214-e5f4643869eb/go.mod h1:yaYg1OQDM7i2maB3I1tfAr/NG/qwZyCycIamMPziyWc=
+github.com/charlienet/gadget/logger v0.0.0-20240918014731-f2f481d7fa6b h1:xbnOoqBdkjPRXOPP9fQ4qtwqaaqidgpw2JgVxj3yubc=
+github.com/charlienet/gadget/logger v0.0.0-20240918014731-f2f481d7fa6b/go.mod h1:06wslHeRuggqvY9QDU2kh6syCWxVpfOPIWu5A1ULO30=
+github.com/charlienet/go-misc v0.0.0-20240914071023-031d8c89490b h1:+D0Gc0Q13Hg+W7lB7LfN4xTFPiEtYBkvtN2HS9MJFHo=
+github.com/charlienet/go-misc v0.0.0-20240914071023-031d8c89490b/go.mod h1:yaYg1OQDM7i2maB3I1tfAr/NG/qwZyCycIamMPziyWc=
 github.com/davecgh/go-spew v1.1.0/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=

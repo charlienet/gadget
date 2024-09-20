@@ -1,17 +1,20 @@
 go 1.23
 
 use (
+	./bloom
 	./cache
 	./config
 	./id_generator
 	./logger
-	./plugins/cache/redis	
-	./plugins/cache/freecache
-	./plugins/cache/bigcache
-	./plugins/logger/logrus
-	./plugins/config/source/nacos
+	./plugins/bloom/redis
+	./plugins/cache/store/bigcache
+	./plugins/cache/store/freecache
+	./plugins/cache/store/redis
+	./plugins/cache/listener/redis
 	./plugins/config/source/consul
 	./plugins/config/source/etcd
+	./plugins/config/source/nacos
+	./plugins/logger/logrus
 	./redis
 	./store
 	./test

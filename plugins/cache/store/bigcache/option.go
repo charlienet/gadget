@@ -5,6 +5,6 @@ import "github.com/charlienet/gadget/cache"
 func New() cache.Option {
 	return func(o *cache.Options) {
 		b := NewBigCache()
-		o.AddStore(b)
+		o.WithStore(b)
 	}
 }

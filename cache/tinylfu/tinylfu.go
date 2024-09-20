@@ -63,6 +63,7 @@ func (f *TinyLFU) Delete(ctx context.Context, key ...string) error {
 }
 
 func (f *TinyLFU) Clear() {
+
 }
 
 func (*TinyLFU) Name() string { return "TinyLfu" }

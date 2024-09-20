@@ -3,8 +3,8 @@ module github.com/charlienet/gadget/cache
 go 1.23
 
 require (
-	github.com/charlienet/gadget/logger v0.0.0-20240910075122-40e63647fad1
-	github.com/charlienet/go-misc v0.0.0-20240911064214-e5f4643869eb
+	github.com/charlienet/gadget/logger v0.0.0-20240918014731-f2f481d7fa6b
+	github.com/charlienet/go-misc v0.0.0-20240914071023-031d8c89490b
 	github.com/vmihailenco/go-tinylfu v0.2.2
 )
 
