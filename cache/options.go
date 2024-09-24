@@ -8,10 +8,27 @@ import (
 type Options struct {
 	localStore  Store
 	remoteStore Store
+	listener    Listener
 	serializer  Serializer
-	logger      logger.Logger
-	ttl         int
-	// bloom      bloom.BloomFilter
+	Logger      logger.Logger
+	TTL         int
+	Name        string
+}
+
+func (o Options) init() {
+	o.initActual(o.localStore)
+	o.initActual(o.remoteStore)
+	o.initActual(o.listener)
+}
+
+func (o Options) initActual(v any) {
+	if v == nil {
+		return
+	}
+
+	if i, ok := v.(interface{ Initialize(Options) }); ok {
+		i.Initialize(o)
+	}
 }
 
 func (o *Options) WithStore(s Store) {
@@ -22,12 +39,22 @@ func (o *Options) WithStore(s Store) {
 	}
 }
 
+func (o *Options) WithListener(l Listener) {
+	o.listener = l
+}
+
 // Option manipulates the Options passed.
 type Option func(o *Options)
 
+func WithName(name string) Option {
+	return func(o *Options) {
+		o.Name = name
+	}
+}
+
 func WithMemStore() Option {
 	return func(o *Options) {
-		o.WithStore(NewStore())
+		o.WithStore(newMemStore())
 	}
 }
 
@@ -37,9 +64,9 @@ func WithStore(s Store) Option {
 	}
 }
 
-func WithLogger(l logger.Logger) Option {
+func WithListener(lis Listener) Option {
 	return func(o *Options) {
-		o.logger = l
+		o.listener = lis
 	}
 }
 
@@ -51,6 +78,12 @@ func WithSerializer(s Serializer) Option {
 
 func WithTTL(ttl int) Option {
 	return func(o *Options) {
-		o.ttl = ttl
+		o.TTL = ttl
+	}
+}
+
+func WithLogger(l logger.Logger) Option {
+	return func(o *Options) {
+		o.Logger = l
 	}
 }

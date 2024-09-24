@@ -17,7 +17,7 @@ func TestGetSet(t *testing.T) {
 	t.Log(c.Get(context.TODO(), "abc"))
 
 	v := []byte("abc")
-	c.Set(context.Background(), "abc", v, 20)
+	c.Put(context.Background(), "abc", v, 20)
 
 	data, exist, err := c.Get(context.Background(), "abc")
 	t.Log(string(data), exist, err)
@@ -29,7 +29,7 @@ func TestCache(t *testing.T) {
 
 	ctx := context.Background()
 	for _, key := range keys {
-		cache.Set(ctx, key, []byte(key), 0)
+		cache.Put(ctx, key, []byte(key), 0)
 
 		got, ok, _ := cache.Get(ctx, key)
 		require.True(t, ok)
@@ -41,7 +41,7 @@ func TestCache(t *testing.T) {
 		require.True(t, ok)
 		require.Equal(t, []byte(key), got)
 
-		cache.Set(ctx, key, []byte(key+key), 0)
+		cache.Put(ctx, key, []byte(key+key), 0)
 	}
 
 	for _, key := range keys {

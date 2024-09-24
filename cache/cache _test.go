@@ -37,15 +37,13 @@ func TestLoadFromFunc(t *testing.T) {
 
 	c.Getfn(ctx, "dummy-key", &v, loadfn, 2)
 
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		c.Getfn(ctx, "dummy-key", &v, loadfn, 2)
+		b, _ := json.Marshal(v)
+
+		assert.Equal(t, "test", v.Name)
+		t.Log(string(b))
 	}
-
-	b, _ := json.Marshal(v)
-
-	assert.Equal(t, "test", v.Name)
-	t.Log(string(b))
-
 }
 
 type User struct {
@@ -71,24 +69,44 @@ func TestGetFromFn(t *testing.T) {
 	var wg = new(sync.WaitGroup)
 	ctx := context.Background()
 
+	errors.Is(nil, nil)
+
+	u := User{}
+
 	g := 10
 	wg.Add(g)
-	for i := 0; i < g; i++ {
+	for range g {
 		go func() {
 			defer wg.Done()
 
-			u := User{}
+			assert.Nil(t, c.Getfn(ctx, key, &u, fn, 30))
 			assert.Nil(t, c.Getfn(ctx, key, &u, fn, 30))
 			assert.Equal(t, j, json.Struct2Json(u))
 		}()
 	}
 
 	wg.Wait()
+	t.Log("shared:", c.Stats().Shared)
+}
+
+func TestNotExistEntity(t *testing.T) {
+	var key = "abc"
+	c := cache.New(cache.WithMemStore())
+	var s string
+
+	f := func() error {
+		return c.Getfn(context.Background(), key, &s, func(ctx context.Context, key string, v any) (bool, error) {
+			return false, nil
+		}, 100)
+	}
+
+	for range 5 {
+		t.Log(f())
+	}
 }
 
 func TestNoCache(t *testing.T) {
 	c := cache.New()
-	c.Disable()
 
 	ctx := context.Background()
 	var item cacheItem
@@ -98,7 +116,6 @@ func TestNoCache(t *testing.T) {
 		_ = typ
 
 		if value, ok := v.(*cacheItem); ok {
-			t.Log("is here")
 			value.Name = "cccccccc"
 		}
 		return true, nil
@@ -113,4 +130,6 @@ func TestSourceError(t *testing.T) {
 	t.Log(c.Getfn(context.Background(), "abc", map[string]any{}, func(ctx context.Context, key string, v any) (bool, error) {
 		return false, errors.New("data source load error")
 	}, 20))
+
+	assert.Equal(t, uint64(1), c.Stats().QueryFail)
 }

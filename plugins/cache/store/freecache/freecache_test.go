@@ -53,3 +53,16 @@ func TestCache(t *testing.T) {
 		}
 	})
 }
+
+func BenchmarkFreecache(b *testing.B) {
+	key := "key"
+
+	c := cache.New(freecache.New(1000))
+
+	b.Run("b", func(b *testing.B) {
+		for range b.N {
+			c.Get(context.Background(), key, "abc")
+		}
+	})
+
+}

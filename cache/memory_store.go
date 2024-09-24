@@ -11,7 +11,7 @@ type mem_store struct {
 	sync.RWMutex
 }
 
-func NewStore() Store {
+func newMemStore() Store {
 	return &mem_store{
 		items: make(map[string]item),
 	}

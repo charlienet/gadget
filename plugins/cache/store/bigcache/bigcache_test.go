@@ -37,3 +37,16 @@ func TestCache(t *testing.T) {
 		assert.Equal(t, val, s)
 	})
 }
+
+func BenchmarkBigcache(b *testing.B) {
+	key := "key"
+
+	c := cache.New(bigcache.New())
+
+	b.Run("b", func(b *testing.B) {
+		for range b.N {
+			c.Get(context.Background(), key, "abc")
+		}
+	})
+
+}

@@ -1,7 +1,7 @@
 package cache
 
 type Listener interface {
-	Subscribe(key string) chan string
+	Subscribe() chan string
 	Publish(key string) error
 	Close()
 }

@@ -1,7 +1,6 @@
 package redis
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"time"
@@ -13,17 +12,11 @@ import (
 
 const (
 	defaultRedisTTLFactor = 30
-	defaultRedisEmpty     = "REDIS-OBJECT-EMPTY"
-)
-
-var (
-	emptyBytes = []byte{}
 )
 
 type redis_store struct {
-	rdb         redis.Client
-	emptyObject []byte
-	ttlFactor   int
+	rdb       redis.Client
+	ttlFactor int
 }
 
 func new(rdb redis.Client, opts ...option) cache.Store {
@@ -35,24 +28,26 @@ func new(rdb redis.Client, opts ...option) cache.Store {
 	return s
 }
 
+func (f *redis_store) Initialize(opt cache.Options) {
+	if len(opt.Name) > 0 {
+		f.rdb = f.rdb.AddPrefix(opt.Name)
+	}
+}
+
 func (f *redis_store) Get(ctx context.Context, key string) ([]byte, bool, error) {
 	data, err := f.rdb.Get(ctx, key).Bytes()
 	if err != nil {
 		if errors.Is(err, redis.NotFound) {
-			return emptyBytes, false, nil
+			return []byte{}, false, nil
 		}
 
-		return emptyBytes, false, err
-	}
-
-	if bytes.EqualFold(f.emptyObject, data) {
-		return emptyBytes, false, nil
+		return []byte{}, false, err
 	}
 
 	return data, true, nil
 }
 
-func (r *redis_store) Put(ctx context.Context, key string, v []byte, expireSeconds int) error {
+func (r *redis_store) Put(ctx context.Context, key string, data []byte, expireSeconds int) error {
 	// 超时时间添加随机秒数
 	factor := 0
 	if r.ttlFactor > 1 {
@@ -60,7 +55,7 @@ func (r *redis_store) Put(ctx context.Context, key string, v []byte, expireSecon
 	}
 
 	expire := time.Second * time.Duration(expireSeconds+factor)
-	return r.rdb.Set(ctx, key, v, expire).Err()
+	return r.rdb.Set(ctx, key, data, expire).Err()
 }
 
 func (r *redis_store) Delete(ctx context.Context, key ...string) error {

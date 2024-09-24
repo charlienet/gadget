@@ -2,14 +2,12 @@ package tinylfu
 
 import (
 	"context"
-	"sync"
 	"time"
 
 	"github.com/vmihailenco/go-tinylfu"
 )
 
 type TinyLFU struct {
-	sync.RWMutex
 	lfu *tinylfu.T
 	ttl time.Duration
 }
@@ -38,7 +36,7 @@ func (f *TinyLFU) Get(ctx context.Context, key string) ([]byte, bool, error) {
 	return []byte{}, false, nil
 }
 
-func (f *TinyLFU) Set(ctx context.Context, key string, v []byte, expirSecond int) error {
+func (f *TinyLFU) Put(ctx context.Context, key string, v []byte, expirSecond int) error {
 	expireAt := time.Time{}
 	if expirSecond > 0 {
 		expireAt = time.Now().Add(time.Second * time.Duration(expirSecond))

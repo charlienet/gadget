@@ -19,9 +19,3 @@ func WithTTLFactor(factor int) option {
 		r.ttlFactor = factor
 	}
 }
-
-func WithEmptyObject(empty string) option {
-	return func(r *redis_store) {
-		r.emptyObject = []byte(empty)
-	}
-}
