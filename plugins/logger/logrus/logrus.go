@@ -39,9 +39,9 @@ func (l *logrusLogger) Init(opt logger.Options) {
 	}
 }
 
-func setOptions(ll *logrus.Logger, opt logger.Options) {
-	ll.SetLevel(loggerToLogrusLevel(opt.Level))
-	ll.SetOutput(opt.Out)
+func setOptions(l *logrus.Logger, opt logger.Options) {
+	l.SetLevel(loggerToLogrusLevel(opt.Level))
+	l.SetOutput(opt.Out)
 }
 
 func (l *logrusLogger) Fields(fields map[string]any) logger.LogRecorder {

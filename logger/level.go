@@ -16,17 +16,17 @@ const (
 func (l Level) String() string {
 	switch l {
 	case Trace:
-		return "trace"
+		return "TRACE"
 	case Debug:
-		return "debug"
+		return "DEBUG"
 	case Info:
-		return "info"
+		return "INFO"
 	case Warn:
-		return "warn"
+		return "WARN"
 	case Error:
-		return "error"
+		return "ERROR"
 	case Fatal:
-		return "fatal"
+		return "FATAL"
 	}
 	return ""
 }

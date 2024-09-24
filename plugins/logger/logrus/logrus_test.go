@@ -6,15 +6,18 @@ import (
 
 	"github.com/charlienet/gadget/logger"
 	"github.com/charlienet/gadget/plugins/logger/logrus"
+
 	log "github.com/sirupsen/logrus"
 )
 
 func TestLogger(t *testing.T) {
+	// c := log.StandardLogger()
+
 	write := func(l logger.Logger) {
-		l.Debug("abc", fmt.Errorf("db error"))
-		l.Info("abc", fmt.Errorf("db error"))
-		l.Warn("abc", fmt.Errorf("db error"))
-		l.Error("abc", fmt.Errorf("db error"))
+		l.Debug("abc:", fmt.Errorf("db error"))
+		l.Info("abc:", fmt.Errorf("db error"))
+		l.Warn("abc:", fmt.Errorf("db error"))
+		l.Error("abc:", fmt.Errorf("db error"))
 	}
 
 	write(logrus.DefaultLogger)
@@ -28,6 +31,8 @@ func TestLogger(t *testing.T) {
 	), logger.WithLevel(logger.Debug)))
 
 	write(logger.New(logrus.New(
-		logrus.WithNestedFormatter(),
-	)))
+		logrus.WithNestedFormatter()),
+		logger.WithLevel(logger.Debug)).
+		WithField("req", "sdssssssssssss").
+		WithField("bcd", "bcd"))
 }

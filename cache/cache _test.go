@@ -101,7 +101,7 @@ func TestNotExistEntity(t *testing.T) {
 	}
 
 	for range 5 {
-		t.Log(f())
+		assert.ErrorIs(t, cache.ErrEntityNotExist, f())
 	}
 }
 
