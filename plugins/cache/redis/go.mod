@@ -1,4 +1,4 @@
-module github.com/charlienet/gadget/plugins/cache/store/redis
+module github.com/charlienet/gadget/plugins/cache/redis
 
 go 1.23
 

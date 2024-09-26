@@ -2,14 +2,21 @@ go 1.23
 
 use (
 	./bloom
+	./broker
 	./cache
 	./config
 	./id_generator
 	./logger
 	./plugins/bloom/redis
-	./plugins/cache/store/bigcache
-	./plugins/cache/store/freecache
-	./plugins/cache/store/redis
+	./plugins/broker/kafka
+	./plugins/broker/nats
+	./plugins/broker/rabbitmq
+	./plugins/broker/redis
+	./plugins/cache/bigcache
+	./plugins/cache/freecache
+	./plugins/cache/gcache
+	./plugins/cache/memcached
+	./plugins/cache/redis
 	./plugins/cache/listener/redis
 	./plugins/config/source/consul
 	./plugins/config/source/etcd

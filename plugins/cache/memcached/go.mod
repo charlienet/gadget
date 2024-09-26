@@ -1,4 +1,4 @@
-module github.com/charlienet/gadget/plugins/cache/store/memcached
+module github.com/charlienet/gadget/plugins/cache/memcached
 
 go 1.23
 

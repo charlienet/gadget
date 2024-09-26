@@ -3,6 +3,7 @@ package cache_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"sync"
 	"testing"
@@ -132,4 +133,30 @@ func TestSourceError(t *testing.T) {
 	}, 20))
 
 	assert.Equal(t, uint64(1), c.Stats().QueryFail)
+}
+
+func TestChan(t *testing.T) {
+	c := make(chan int)
+	go func() {
+		time.Sleep(time.Second)
+		c <- 1
+		c <- 1
+		close(c)
+	}()
+
+	var wg = new(sync.WaitGroup)
+	for range 5 {
+		wg.Add(1)
+
+		go func() {
+			defer wg.Done()
+
+			fmt.Println("开始等待")
+
+			cc := <-c
+			fmt.Println("获取值:", cc)
+		}()
+	}
+
+	wg.Wait()
 }

@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"github.com/charlienet/gadget/broker"
 	"github.com/charlienet/gadget/logger"
 )
 
@@ -9,6 +10,7 @@ type Options struct {
 	localStore  Store
 	remoteStore Store
 	listener    Listener
+	broker      broker.Broker
 	serializer  Serializer
 	Logger      logger.Logger
 	TTL         int
@@ -67,6 +69,12 @@ func WithStore(s Store) Option {
 func WithListener(lis Listener) Option {
 	return func(o *Options) {
 		o.listener = lis
+	}
+}
+
+func (o *Options) WithBroker(b broker.Broker) Option {
+	return func(o *Options) {
+		o.broker = b
 	}
 }
 
