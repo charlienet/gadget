@@ -63,7 +63,7 @@ func TestRedisStackStore(t *testing.T) {
 func TestRedisStack(t *testing.T) {
 	test.RunOnRedisStack(t, func(rdb redis.Client) {
 		store := r.New(rdb, "tessss")
-		bf := bloom.New(10000, 0.00001, bloom.WithStore(store))
+		bf := bloom.NewOptimal(10000, 0.00001, bloom.WithStore(store))
 
 		ctx := context.Background()
 
@@ -83,7 +83,7 @@ func TestRedisStack(t *testing.T) {
 func BenchmarkRedis(b *testing.B) {
 	test.RunOnRedisStack(b, func(rdb redis.Client) {
 		store := r.New(rdb, "tessss")
-		bf := bloom.New(10000, 0.00001, bloom.WithStore(store))
+		bf := bloom.NewOptimal(10000, 0.00001, bloom.WithStore(store))
 		ctx := context.Background()
 
 		for i := 0; i < 1000; i++ {
