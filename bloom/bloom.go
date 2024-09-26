@@ -82,7 +82,7 @@ func (bf *bloom_filter) Clear(ctx context.Context) {
 	}
 }
 
-var p = pool.New(func() []uint64 { return make([]uint64, 20) })
+var p = pool.New(10, func() []uint64 { return make([]uint64, 20) })
 
 func (bf *bloom_filter) getOffsets(data string) []uint64 {
 	// offsets := make([]uint64, bf.hashSize)

@@ -9,6 +9,8 @@ github.com/charlienet/go-crypto v0.0.0-20240914082323-49984dda5b5c h1:fhZ5xTBsBd
 github.com/charlienet/go-crypto v0.0.0-20240914082323-49984dda5b5c/go.mod h1:XXT039biIaqe52c0qVwuhTbpwaTxUDPzXYFZR6LQTw8=
 github.com/charlienet/go-misc v0.0.0-20240914071023-031d8c89490b h1:+D0Gc0Q13Hg+W7lB7LfN4xTFPiEtYBkvtN2HS9MJFHo=
 github.com/charlienet/go-misc v0.0.0-20240914071023-031d8c89490b/go.mod h1:yaYg1OQDM7i2maB3I1tfAr/NG/qwZyCycIamMPziyWc=
+github.com/charlienet/go-misc v0.0.0-20240926090254-ef4f304f3a2c h1:41PqprzLLEdEZXHdJD/WlGOIEaiePiALkndw8jD6ScE=
+github.com/charlienet/go-misc v0.0.0-20240926090254-ef4f304f3a2c/go.mod h1:yaYg1OQDM7i2maB3I1tfAr/NG/qwZyCycIamMPziyWc=
 github.com/client9/misspell v0.3.4/go.mod h1:qj6jICC3Q7zFZvVWo7KLAzC3yx5G7kyvSDkc90ppPyw=
 github.com/cncf/udpa/go v0.0.0-20191209042840-269d4d468f6f/go.mod h1:M8M6+tZqaGXZJjfX53e64911xZQV5JYwmTeXPW+k8Sc=
 github.com/envoyproxy/go-control-plane v0.9.0/go.mod h1:YTl/9mNaCwkRvm6d1a2C3ymFceY/DCBVvsKhRF0iEA4=
