@@ -8,7 +8,7 @@ import (
 )
 
 func TestBloom(t *testing.T) {
-	bf := New(1000, 0.0001)
+	bf := NewOptimal(1000, 0.0001)
 
 	ctx := context.Background()
 	bf.Add(ctx, "abc")
@@ -25,7 +25,7 @@ func TestBloom(t *testing.T) {
 }
 
 func BenchmarkBloom(b *testing.B) {
-	bf := New(10000, 0.0001)
+	bf := NewOptimal(10000, 0.0001)
 	ctx := context.Background()
 	b.Run("r", func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
@@ -35,7 +35,7 @@ func BenchmarkBloom(b *testing.B) {
 }
 
 func BenchmarkHash(b *testing.B) {
-	bf := New(1000, 0.0001)
+	bf := NewOptimal(1000, 0.0001)
 	b.Run("r", func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
 			bf.getOffsets("abc")

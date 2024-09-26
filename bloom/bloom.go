@@ -21,7 +21,7 @@ type bloom_filter struct {
 	hashSize int
 }
 
-func New(capacity uint, fpp float64, opts ...option) *bloom_filter {
+func NewOptimal(capacity uint, fpp float64, opts ...option) *bloom_filter {
 	m, k := optimalK(capacity, fpp)
 	keys := make([]uint64, k)
 	if err := binary.Read(rand.Reader, binary.LittleEndian, keys); err != nil {
