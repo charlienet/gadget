@@ -2,6 +2,7 @@ package test
 
 import (
 	"log"
+	"os"
 	"time"
 
 	"github.com/alicebob/miniredis"
@@ -9,25 +10,20 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-type redisOption struct {
-	addr     string
-	password string
-	prefix   string
-}
-
-var (
-	redisOptions = map[string]redisOption{
-		"redis":       {addr: "redis:6379"},
-		"redis_stack": {addr: "redis_stack:6380"},
-	}
-)
-
 func RunOnRedisStack(t assert.TestingT, fn func(rdb redis.Client), opts ...redis.Option) {
-	runOnRedis(t, fn, redisOptions["redis_stack"], opts...)
+	url := os.Getenv("REDIS_STACK_URL")
+	if len(url) == 0 {
+		assert.Fail(t, "REDIS_URL not defined")
+	}
+
+	runOnRedis(t, fn, url, opts...)
 }
 
 func RunOnRedis(t assert.TestingT, fn func(rdb redis.Client), opts ...redis.Option) {
-	runOnRedis(t, fn, redisOptions["redis"], opts...)
+	url := os.Getenv("REDIS_URL")
+	assert.NotEmpty(t, url)
+
+	runOnRedis(t, fn, url, opts...)
 }
 
 func RunOnMiniRedis(t assert.TestingT, fn func(rdb redis.Client)) {
@@ -36,18 +32,11 @@ func RunOnMiniRedis(t assert.TestingT, fn func(rdb redis.Client)) {
 	})
 }
 
-func runOnRedis(t assert.TestingT, fn func(rdb redis.Client), opt redisOption, opts ...redis.Option) {
+func runOnRedis(t assert.TestingT, fn func(rdb redis.Client), url string, opts ...redis.Option) {
 	run(t, fn, func() (r redis.Client, clean func(), err error) {
-		o := make([]redis.Option, 0, len(opts)+3)
-		if len(opts) > 0 {
-			o = opts
-		} else {
-			o = append(o, redis.WithAddr(opt.addr))
-			o = append(o, redis.WithPassword(opt.password))
-			o = append(o, redis.WithPrefix(opt.prefix))
-		}
+		rdb, err := redis.NewWithUrl(url, opts...)
+		assert.Nil(t, err)
 
-		rdb := redis.New(o...)
 		if err := rdb.Constraint(redis.Ping()); err != nil {
 			return nil, nil, err
 		}

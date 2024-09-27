@@ -15,7 +15,7 @@ var (
 	NotFound = redis.Nil
 )
 
-var _ Client = redisClient{}
+var _ Client = &redisClient{}
 
 type Client interface {
 	redis.UniversalClient
@@ -25,7 +25,7 @@ type Client interface {
 	Prefix() string                               // 统一前缀
 	Separator() string                            // 分隔符
 	JoinKeys(key ...string) string                // 连接键
-	AddPrefix(prefix ...string) redisClient       // 添加前缀
+	AddPrefix(prefix ...string) *redisClient      // 添加前缀
 	ServerVersion() string                        // 服务器版本
 	IsStack() bool                                // 服务器环境是否为Redis stack
 }
@@ -36,12 +36,64 @@ type redisClient struct {
 	conf   *redis.UniversalOptions
 }
 
-func New(opts ...Option) redisClient {
+func ParseURL(redisURL string, opts ...Option) (RedisOptions, error) {
+	ropt, err := redis.ParseClusterURL(redisURL)
+	if err != nil {
+		return RedisOptions{}, err
+	}
+
+	copt := RedisOptions{UniversalOptions: redis.UniversalOptions{
+		Addrs:      ropt.Addrs,
+		ClientName: ropt.ClientName,
+		Dialer:     ropt.Dialer,
+		OnConnect:  ropt.OnConnect,
+
+		Protocol: ropt.Protocol,
+		Username: ropt.Username,
+		Password: ropt.Password,
+
+		MaxRetries:      ropt.MaxRetries,
+		MinRetryBackoff: ropt.MinRetryBackoff,
+		MaxRetryBackoff: ropt.MaxRetryBackoff,
+
+		DialTimeout:           ropt.DialTimeout,
+		ReadTimeout:           ropt.ReadTimeout,
+		WriteTimeout:          ropt.WriteTimeout,
+		ContextTimeoutEnabled: ropt.ContextTimeoutEnabled,
+
+		PoolFIFO:         ropt.PoolFIFO,
+		PoolSize:         ropt.PoolSize,
+		PoolTimeout:      ropt.PoolTimeout,
+		MinIdleConns:     ropt.MinIdleConns,
+		MaxIdleConns:     ropt.MaxIdleConns,
+		MaxActiveConns:   ropt.MaxActiveConns,
+		ConnMaxIdleTime:  ropt.ConnMaxIdleTime,
+		ConnMaxLifetime:  ropt.ConnMaxLifetime,
+		DisableIndentity: ropt.DisableIndentity,
+		IdentitySuffix:   ropt.IdentitySuffix,
+		TLSConfig:        ropt.TLSConfig,
+	}}
+	for _, o := range opts {
+		o(&copt)
+	}
+
+	return copt, nil
+}
+
+func NewWithUrl(url string, opts ...Option) (*redisClient, error) {
+	opt, err := ParseURL(url, opts...)
+	if err != nil {
+		return nil, err
+	}
+
+	return new(&opt.UniversalOptions, newPrefix(opt.separator, opt.perfix)), nil
+}
+
+func New(opts ...Option) *redisClient {
 	opt := defaultOptions
 	for _, o := range opts {
 		o(&opt)
 	}
-
 	return new(&opt.UniversalOptions, newPrefix(opt.separator, opt.perfix))
 }
 
@@ -76,7 +128,7 @@ func (rdb redisClient) MustConstraint(constraints ...constraintFunc) {
 	}
 }
 
-func (rdb redisClient) AddPrefix(prefixes ...string) redisClient {
+func (rdb redisClient) AddPrefix(prefixes ...string) *redisClient {
 	old := rdb.prefix
 	p := newPrefix(old.separator, old.rename(prefixes...))
 
@@ -128,12 +180,12 @@ func (rdb redisClient) IsStack() bool {
 	return len(info) > 20
 }
 
-func new(conf *redis.UniversalOptions, prefix redisPrefix) redisClient {
+func new(conf *redis.UniversalOptions, prefix redisPrefix) *redisClient {
 	rdb := redis.NewUniversalClient(conf)
 	rdb.ConfigSet(context.Background(), "slowlog-log-slower-than", defaultSlowThreshold)
 	rdb.AddHook(renameHook{prefix: prefix})
 
-	return redisClient{
+	return &redisClient{
 		UniversalClient: rdb,
 		prefix:          prefix,
 		conf:            conf,

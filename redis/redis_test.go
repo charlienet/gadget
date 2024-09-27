@@ -40,6 +40,18 @@ func TestPrefix(t *testing.T) {
 	})
 }
 
+func TestParseUrl(t *testing.T) {
+	url1 := `redis://redis-17227.c277.us-east-1-3.ec2.redns.redis-cloud.com:17227`
+	_, err := redis.ParseURL(url1)
+	if err != nil {
+		t.Fatal(err)
+
+		_, err = redis.ParseURL(`redis://redis:6379`)
+		assert.Nil(t, err)
+	}
+
+}
+
 func TestIsStack(t *testing.T) {
 
 	t.Run("is mini redis", func(t *testing.T) {
@@ -55,14 +67,14 @@ func TestIsStack(t *testing.T) {
 	})
 
 	t.Run("is stack", func(t *testing.T) {
-		test.RunOnRedis(t, func(rdb redis.Client) {
+		test.RunOnRedisStack(t, func(rdb redis.Client) {
 			t.Log(rdb.IsStack())
 		}, redis.WithAddr("192.168.3.200:6380"))
 	})
 }
 
 func TestBf(t *testing.T) {
-	test.RunOnRedis(t, func(rdb redis.Client) {
+	test.RunOnRedisStack(t, func(rdb redis.Client) {
 		key := "ffff"
 		rdb.Del(context.Background(), key)
 
