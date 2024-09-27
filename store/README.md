@@ -1,1 +1,1 @@
-键值存储
+object storage.
