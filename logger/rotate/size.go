@@ -1,19 +1,17 @@
 package rotate
 
-import "io"
+import (
+	"io"
 
-// ensure we always implement io.WriteCloser
-var _ io.WriteCloser = (*rotateDateWriter)(nil)
+	"gopkg.in/natefinch/lumberjack.v2"
+)
 
-type rotateSizeWriter struct {
-	MaxAge     int
-	MaxBackups int
-}
-
-func (l *rotateSizeWriter) Write(p []byte) (n int, err error) {
-	return 0, nil
-}
-
-func (l *rotateSizeWriter) Close() error {
-	return nil
+func NewRotateSizeWriter(filename string, size, maxAge, maxBackups int) io.Writer {
+	return &lumberjack.Logger{
+		Filename:   filename,
+		MaxSize:    size,
+		MaxAge:     maxAge,
+		MaxBackups: maxBackups,
+		LocalTime:  true,
+	}
 }
