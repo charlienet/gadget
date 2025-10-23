@@ -1,6 +1,9 @@
 package logger
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 type Level int8
 
@@ -34,7 +37,7 @@ func (l Level) String() string {
 func (l Level) Enabled(lvl Level) bool { return lvl >= l }
 
 func GetLevel(levelStr string) (Level, error) {
-	switch levelStr {
+	switch strings.ToUpper(levelStr) {
 	case Trace.String():
 		return Trace, nil
 	case Debug.String():

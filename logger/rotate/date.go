@@ -11,6 +11,7 @@ import (
 type RotateDateWriter struct {
 	Filename string
 	Layout   string
+	Compress bool
 
 	time string
 	file *os.File
@@ -47,6 +48,14 @@ func (r *RotateDateWriter) rotate(date string) error {
 
 	filename := r.filename(date)
 	fullpath := filepath.Join(dir, filename)
+
+	info, err := os.Stat(fullpath)
+	if err == nil {
+		if err := chown(fullpath, info); err != nil {
+			return err
+		}
+	}
+
 	file, err := os.OpenFile(fullpath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
 	if err != nil {
 		return err

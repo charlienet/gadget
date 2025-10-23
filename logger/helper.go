@@ -1,6 +1,7 @@
 package logger
 
 import (
+	"context"
 	"io"
 	"os"
 )
@@ -125,4 +126,8 @@ func (h *loggerHelper) Fatalf(template string, args ...interface{}) {
 	}
 	h.recorder.Logf(Fatal, template, args...)
 	os.Exit(1)
+}
+
+func (h *loggerHelper) WithContext(parent context.Context) context.Context {
+	return WithLogger(parent, h)
 }

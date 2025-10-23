@@ -2,13 +2,33 @@ package logger
 
 import "context"
 
-type loggerKey struct{}
+type contextKey struct{}
 
-func FromContext(ctx context.Context) (Logger, bool) {
-	l, ok := ctx.Value(loggerKey{}).(Logger)
-	return l, ok
+var loggerContextKey = &contextKey{}
+
+type LoggerContext struct {
+	logger Logger
 }
 
-func WithLogger(ctx context.Context, l Logger) context.Context {
-	return context.WithValue(ctx, loggerKey{}, l)
+func WithLogger(parent context.Context, l Logger) context.Context {
+	return context.WithValue(parent, loggerContextKey, &LoggerContext{
+		logger: l,
+	})
+}
+
+func FromContext(ctx context.Context) Logger {
+	if ctx == nil {
+		return DefaultLogger
+	}
+
+	val := ctx.Value(loggerContextKey)
+	if val == nil {
+		return DefaultLogger
+	}
+
+	if lc, ok := val.(*LoggerContext); ok {
+		return lc.logger
+	}
+
+	return DefaultLogger
 }

@@ -1,6 +1,9 @@
 package logger
 
-import "io"
+import (
+	"context"
+	"io"
+)
 
 type Logger interface {
 	WithField(name string, sss any) Logger
@@ -19,6 +22,7 @@ type Logger interface {
 	Errorf(template string, args ...any)
 	Fatal(args ...any)
 	Fatalf(template string, args ...any)
+	WithContext(ctx context.Context) context.Context
 }
 
 // LogRecorder is a generic logging interface.
