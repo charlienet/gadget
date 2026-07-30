@@ -3,7 +3,7 @@ module git.charlienet.top/go/gadget/plugins/logger/logrus
 go 1.26
 
 require (
-	git.charlienet.top/go/gadget/logger v0.1.0
+	git.charlienet.top/go/gadget/logger v0.1.1
 	github.com/antonfisher/nested-logrus-formatter v1.3.1
 	github.com/sirupsen/logrus v1.9.3
 )

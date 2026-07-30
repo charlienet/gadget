@@ -3,7 +3,7 @@ module git.charlienet.top/go/gadget/cache
 go 1.26
 
 require (
-	git.charlienet.top/go/gadget/logger v0.1.0
+	git.charlienet.top/go/gadget/logger v0.1.1
 	github.com/charlienet/go-misc v0.0.0-20240926090254-ef4f304f3a2c
 	golang.org/x/sync v0.8.0
 )

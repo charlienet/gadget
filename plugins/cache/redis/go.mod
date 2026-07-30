@@ -3,9 +3,9 @@ module git.charlienet.top/go/gadget/plugins/cache/redis
 go 1.26
 
 require (
-	git.charlienet.top/go/gadget/cache v0.1.0
-	git.charlienet.top/go/gadget/redis v0.1.0
-	git.charlienet.top/go/gadget/test v0.1.0
+	git.charlienet.top/go/gadget/cache v0.1.1
+	git.charlienet.top/go/gadget/redis v0.1.1
+	git.charlienet.top/go/gadget/test v0.1.1
 	github.com/redis/go-redis/v9 v9.6.1
 	github.com/stretchr/testify v1.9.0
 )
