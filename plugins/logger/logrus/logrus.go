@@ -1,7 +1,7 @@
 package logrus
 
 import (
-	"github.com/charlienet/gadget/logger"
+	"git.charlienet.top/go/gadget/logger"
 	"github.com/sirupsen/logrus"
 )
 
@@ -18,7 +18,7 @@ type logrusLogger struct {
 	Logger entryLogger
 }
 
-func New(opts ...option) logger.LogRecorder {
+func New(opts ...Option) logger.LogRecorder {
 	opt := Options{Formatter: &logrus.TextFormatter{}}
 	for _, o := range opts {
 		o(&opt)
@@ -26,6 +26,10 @@ func New(opts ...option) logger.LogRecorder {
 
 	l := logrus.New()
 	l.SetFormatter(opt.Formatter)
+	l.SetReportCaller(opt.ReportCaller)
+	for _, hook := range opt.Hooks {
+		l.AddHook(hook)
+	}
 
 	return &logrusLogger{Logger: l}
 }

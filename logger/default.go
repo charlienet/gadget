@@ -20,22 +20,26 @@ type defaultLogger struct {
 }
 
 func (l *defaultLogger) Init(opt Options) {
+	l.Lock()
 	l.level = opt.Level
 	l.out = opt.Out
+	l.Unlock()
 }
 
-func (l *defaultLogger) Fields(fields map[string]interface{}) LogRecorder {
-	l.Lock()
+func (l *defaultLogger) Fields(fields map[string]any) LogRecorder {
+	l.RLock()
 	nfields := maps.Clone(l.fields)
-	l.Unlock()
+	out := l.out
+	level := l.level
+	l.RUnlock()
 
 	for k, v := range fields {
 		nfields[k] = v
 	}
 
 	return &defaultLogger{
-		out:    l.out,
-		level:  l.level,
+		out:    out,
+		level:  level,
 		fields: nfields,
 	}
 }
@@ -52,22 +56,18 @@ func (l *defaultLogger) Logf(level Level, format string, args ...any) {
 
 func (l *defaultLogger) write(level Level, message string) {
 	t := time.Now().Format("2006-01-02 15:04:05")
-	cloned := l.cloneFields()
+
+	l.RLock()
+	out := l.out
+	cloned := maps.Clone(l.fields)
+	l.RUnlock()
+
 	metadata := make([]string, 0, len(cloned))
 	for k, v := range cloned {
 		metadata = append(metadata, fmt.Sprintf("%s:%v", k, v))
 	}
 
-
-	fmt.Fprintf(l.out, "%s [%s] %s %v\n", t, level.String(), metadata, message)
+	fmt.Fprintf(out, "%s [%s] %s %v\n", t, level.String(), metadata, message)
 }
 
 func (*defaultLogger) String() string { return "default" }
-
-func (l *defaultLogger) cloneFields() map[string]any {
-	l.Lock()
-	nfields := maps.Clone(l.fields)
-	l.Unlock()
-
-	return nfields
-}

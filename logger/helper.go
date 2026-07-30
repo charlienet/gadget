@@ -4,9 +4,15 @@ import (
 	"context"
 	"io"
 	"os"
+	"sync"
 )
 
+// ExitFunc is called by Fatal/Fatalf after logging.
+// Override in tests to prevent process termination.
+var ExitFunc = os.Exit
+
 type loggerHelper struct {
+	mu       sync.RWMutex
 	opt      Options
 	recorder LogRecorder
 }
@@ -20,18 +26,26 @@ func (h *loggerHelper) WithField(key string, value any) Logger {
 }
 
 func (h *loggerHelper) WithFields(fields map[string]any) Logger {
+	h.mu.RLock()
+	opt := h.opt
+	h.mu.RUnlock()
+
 	r := h.recorder.Fields(fields)
-	return newHelper(h.opt, r)
+	return newHelper(opt, r)
 }
 
 func (h *loggerHelper) SetLevel(lvl Level) {
+	h.mu.Lock()
 	h.opt.Level = lvl
 	h.recorder.Init(h.opt)
+	h.mu.Unlock()
 }
 
 func (h *loggerHelper) SetOutput(out io.Writer) {
+	h.mu.Lock()
 	h.opt.Out = out
 	h.recorder.Init(h.opt)
+	h.mu.Unlock()
 }
 
 func (h *loggerHelper) Log(level Level, args ...any) {
@@ -43,89 +57,113 @@ func (h *loggerHelper) Logf(level Level, format string, args ...any) {
 }
 
 func (h *loggerHelper) Info(args ...interface{}) {
-	if !h.opt.Level.Enabled(Info) {
-		return
+	h.mu.RLock()
+	enabled := h.opt.Level.Enabled(Info)
+	h.mu.RUnlock()
+	if enabled {
+		h.recorder.Log(Info, args...)
 	}
-	h.recorder.Log(Info, args...)
 }
 
 func (h *loggerHelper) Infof(template string, args ...interface{}) {
-	if !h.opt.Level.Enabled(Info) {
-		return
+	h.mu.RLock()
+	enabled := h.opt.Level.Enabled(Info)
+	h.mu.RUnlock()
+	if enabled {
+		h.recorder.Logf(Info, template, args...)
 	}
-	h.recorder.Logf(Info, template, args...)
 }
 
 func (h *loggerHelper) Trace(args ...interface{}) {
-	if !h.opt.Level.Enabled(Trace) {
-		return
+	h.mu.RLock()
+	enabled := h.opt.Level.Enabled(Trace)
+	h.mu.RUnlock()
+	if enabled {
+		h.recorder.Log(Trace, args...)
 	}
-	h.recorder.Log(Trace, args...)
 }
 
 func (h *loggerHelper) Tracef(template string, args ...interface{}) {
-	if !h.opt.Level.Enabled(Trace) {
-		return
+	h.mu.RLock()
+	enabled := h.opt.Level.Enabled(Trace)
+	h.mu.RUnlock()
+	if enabled {
+		h.recorder.Logf(Trace, template, args...)
 	}
-	h.recorder.Logf(Trace, template, args...)
 }
 
 func (h *loggerHelper) Debug(args ...interface{}) {
-	if !h.opt.Level.Enabled(Debug) {
-		return
+	h.mu.RLock()
+	enabled := h.opt.Level.Enabled(Debug)
+	h.mu.RUnlock()
+	if enabled {
+		h.recorder.Log(Debug, args...)
 	}
-	h.recorder.Log(Debug, args...)
 }
 
 func (h *loggerHelper) Debugf(template string, args ...interface{}) {
-	if !h.opt.Level.Enabled(Debug) {
-		return
+	h.mu.RLock()
+	enabled := h.opt.Level.Enabled(Debug)
+	h.mu.RUnlock()
+	if enabled {
+		h.recorder.Logf(Debug, template, args...)
 	}
-	h.recorder.Logf(Debug, template, args...)
 }
 
 func (h *loggerHelper) Warn(args ...interface{}) {
-	if !h.opt.Level.Enabled(Warn) {
-		return
+	h.mu.RLock()
+	enabled := h.opt.Level.Enabled(Warn)
+	h.mu.RUnlock()
+	if enabled {
+		h.recorder.Log(Warn, args...)
 	}
-	h.recorder.Log(Warn, args...)
 }
 
 func (h *loggerHelper) Warnf(template string, args ...interface{}) {
-	if !h.opt.Level.Enabled(Warn) {
-		return
+	h.mu.RLock()
+	enabled := h.opt.Level.Enabled(Warn)
+	h.mu.RUnlock()
+	if enabled {
+		h.recorder.Logf(Warn, template, args...)
 	}
-	h.recorder.Logf(Warn, template, args...)
 }
 
 func (h *loggerHelper) Error(args ...interface{}) {
-	if !h.opt.Level.Enabled(Error) {
-		return
+	h.mu.RLock()
+	enabled := h.opt.Level.Enabled(Error)
+	h.mu.RUnlock()
+	if enabled {
+		h.recorder.Log(Error, args...)
 	}
-	h.recorder.Log(Error, args...)
 }
 
 func (h *loggerHelper) Errorf(template string, args ...interface{}) {
-	if !h.opt.Level.Enabled(Error) {
-		return
+	h.mu.RLock()
+	enabled := h.opt.Level.Enabled(Error)
+	h.mu.RUnlock()
+	if enabled {
+		h.recorder.Logf(Error, template, args...)
 	}
-	h.recorder.Logf(Error, template, args...)
 }
 
 func (h *loggerHelper) Fatal(args ...interface{}) {
-	if !h.opt.Level.Enabled(Fatal) {
-		return
+	h.mu.RLock()
+	enabled := h.opt.Level.Enabled(Fatal)
+	h.mu.RUnlock()
+	if enabled {
+		h.recorder.Log(Fatal, args...)
+		ExitFunc(1)
 	}
-	h.recorder.Log(Fatal, args...)
-	os.Exit(1)
 }
 
 func (h *loggerHelper) Fatalf(template string, args ...interface{}) {
-	if !h.opt.Level.Enabled(Fatal) {
-		return
+	h.mu.RLock()
+	enabled := h.opt.Level.Enabled(Fatal)
+	h.mu.RUnlock()
+	if enabled {
+		h.recorder.Logf(Fatal, template, args...)
+		ExitFunc(1)
 	}
-	h.recorder.Logf(Fatal, template, args...)
-	os.Exit(1)
 }
 
 func (h *loggerHelper) WithContext(parent context.Context) context.Context {

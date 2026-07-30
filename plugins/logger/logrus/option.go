@@ -6,24 +6,26 @@ import (
 )
 
 type Options struct {
-	Formatter logrus.Formatter
+	Formatter   logrus.Formatter
+	Hooks       []logrus.Hook
+	ReportCaller bool
 }
 
-type option func(*Options)
+type Option func(*Options)
 
-func WithTextFormatter() option {
+func WithTextFormatter() Option {
 	return func(o *Options) {
 		o.Formatter = &logrus.TextFormatter{}
 	}
 }
 
-func WithJSONFormatter() option {
+func WithJSONFormatter() Option {
 	return func(o *Options) {
 		o.Formatter = &logrus.JSONFormatter{}
 	}
 }
 
-func WithNestedFormatter(fieldsOrder ...string) option {
+func WithNestedFormatter(fieldsOrder ...string) Option {
 	return func(o *Options) {
 		o.Formatter = &nested.Formatter{
 			FieldsOrder:     fieldsOrder,
@@ -31,8 +33,22 @@ func WithNestedFormatter(fieldsOrder ...string) option {
 	}
 }
 
-func WithFormatter(formatter logrus.Formatter) option {
+func WithFormatter(formatter logrus.Formatter) Option {
 	return func(o *Options) {
 		o.Formatter = formatter
+	}
+}
+
+// WithReportCaller enables caller reporting in logrus.
+func WithReportCaller() Option {
+	return func(o *Options) {
+		o.ReportCaller = true
+	}
+}
+
+// WithHook attaches a logrus hook to the logger.
+func WithHook(hook logrus.Hook) Option {
+	return func(o *Options) {
+		o.Hooks = append(o.Hooks, hook)
 	}
 }

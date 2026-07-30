@@ -42,7 +42,7 @@ func (r *RotateDateWriter) rotate(date string) error {
 	}
 
 	dir := filepath.Dir(r.Filename)
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := os.MkdirAll(dir, 0750); err != nil {
 		return err
 	}
 
@@ -56,7 +56,7 @@ func (r *RotateDateWriter) rotate(date string) error {
 		}
 	}
 
-	file, err := os.OpenFile(fullpath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+	file, err := os.OpenFile(fullpath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0640)
 	if err != nil {
 		return err
 	}

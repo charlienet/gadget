@@ -1,4 +1,4 @@
-module github.com/charlienet/gadget/logger
+module git.charlienet.top/go/gadget/logger
 
 go 1.26
 
