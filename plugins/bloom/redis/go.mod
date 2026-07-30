@@ -15,8 +15,6 @@ require (
 	github.com/alicebob/miniredis v2.5.0+incompatible // indirect
 	github.com/bits-and-blooms/bitset v1.14.3 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
-	github.com/charlienet/gadget/redis v0.0.0-20251023023942-7db5d9010c73 // indirect
-	github.com/charlienet/gadget/test v0.0.0-20251023023942-7db5d9010c73 // indirect
 	github.com/charlienet/go-crypto v0.0.0-20240914082323-49984dda5b5c // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f // indirect

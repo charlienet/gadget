@@ -8,9 +8,6 @@ require (
 )
 
 require (
-	github.com/charlienet/gadget/broker v0.0.0-20251023023942-7db5d9010c73 // indirect
-	github.com/charlienet/gadget/cache v0.0.0-20251023023942-7db5d9010c73 // indirect
-	github.com/charlienet/gadget/logger v0.0.0-20251023023942-7db5d9010c73 // indirect
 	github.com/charlienet/go-misc v0.0.0-20240926090254-ef4f304f3a2c // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
 	github.com/modern-go/concurrent v0.0.0-20180306012644-bacd9c7ef1dd // indirect

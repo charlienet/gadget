@@ -2,12 +2,6 @@ git.charlienet.top/go/gadget/cache v0.1.5 h1:X4YGv7B2Do52oWsaMQy7kXXs2xrZYYxKC2y
 git.charlienet.top/go/gadget/cache v0.1.5/go.mod h1:lHQBwDkJaarx+dWIE/z2iKLkKJVDt/IC6Fj8KwWCdj8=
 github.com/bradfitz/gomemcache v0.0.0-20230905024940-24af94b03874 h1:N7oVaKyGp8bttX0bfZGmcGkjz7DLQXhAn3DNd3T0ous=
 github.com/bradfitz/gomemcache v0.0.0-20230905024940-24af94b03874/go.mod h1:r5xuitiExdLAJ09PR7vBVENGvp4ZuTBeWTGtxuX3K+c=
-github.com/charlienet/gadget/broker v0.0.0-20251023023942-7db5d9010c73 h1:a3bn89IS7Y6nnadAB7BQSTDLy46PVCSor9+ILl7Y6cM=
-github.com/charlienet/gadget/broker v0.0.0-20251023023942-7db5d9010c73/go.mod h1:PUzST/iQd4jHLeZBTsdfDCrhPvvT8+fp/K7e2ccD1RU=
-github.com/charlienet/gadget/cache v0.0.0-20251023023942-7db5d9010c73 h1:xXRPTC6GBm+6/aSoUT0+txByWYJx3KqN7tC9MKY+y1o=
-github.com/charlienet/gadget/cache v0.0.0-20251023023942-7db5d9010c73/go.mod h1:ZmBzh983xRKdczGsG5qiX/DwKBWsI5dZCfNfTMltVX8=
-github.com/charlienet/gadget/logger v0.0.0-20251023023942-7db5d9010c73 h1:wjsYoYPkyFs8oS0fG2tl66jOOWvq4iR//gN11z9ETyg=
-github.com/charlienet/gadget/logger v0.0.0-20251023023942-7db5d9010c73/go.mod h1:I6W+IFqB4vxNXawhKbcdMBEqSpzv/W2N2CTYxJ/il1M=
 github.com/charlienet/go-misc v0.0.0-20240926090254-ef4f304f3a2c h1:41PqprzLLEdEZXHdJD/WlGOIEaiePiALkndw8jD6ScE=
 github.com/charlienet/go-misc v0.0.0-20240926090254-ef4f304f3a2c/go.mod h1:yaYg1OQDM7i2maB3I1tfAr/NG/qwZyCycIamMPziyWc=
 github.com/davecgh/go-spew v1.1.0/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
