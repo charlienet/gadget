@@ -1,7 +1,7 @@
 package zap
 
 import (
-	"github.com/charlienet/gadget/logger"
+	"git.charlienet.top/go/gadget/logger"
 	"go.uber.org/zap"
 )
 
