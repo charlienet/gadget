@@ -3,8 +3,8 @@ module git.charlienet.top/go/gadget/plugins/logger/logrus
 go 1.26
 
 require (
+	git.charlienet.top/go/gadget/logger v0.1.0
 	github.com/antonfisher/nested-logrus-formatter v1.3.1
-	git.charlienet.top/go/gadget/logger v0.0.0-20240910075122-40e63647fad1
 	github.com/sirupsen/logrus v1.9.3
 )
 
@@ -15,6 +15,4 @@ require (
 	golang.org/x/sys v0.25.0 // indirect
 )
 
-replace (
-	git.charlienet.top/go/gadget/logger => ../../../logger
-)
+replace git.charlienet.top/go/gadget/logger => ../../../logger

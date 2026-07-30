@@ -1,9 +1,9 @@
-module github.com/charlienet/gadget/cache
+module git.charlienet.top/go/gadget/cache
 
 go 1.26
 
 require (
-	github.com/charlienet/gadget/logger v0.0.0-20240918014731-f2f481d7fa6b
+	git.charlienet.top/go/gadget/logger v0.1.0
 	github.com/charlienet/go-misc v0.0.0-20240926090254-ef4f304f3a2c
 	golang.org/x/sync v0.8.0
 )
@@ -23,3 +23,5 @@ require (
 	github.com/stretchr/testify v1.9.0
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
+
+replace git.charlienet.top/go/gadget/logger => ../logger

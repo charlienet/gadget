@@ -1,4 +1,4 @@
-module github.com/charlienet/gadget/config
+module git.charlienet.top/go/gadget/config
 
 go 1.26
 

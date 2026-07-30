@@ -1,4 +1,4 @@
-module github.com/charlienet/gadget/plugins/bloom/redis
+module git.charlienet.top/go/gadget/plugins/bloom/redis
 
 go 1.26
 

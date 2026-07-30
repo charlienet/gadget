@@ -1,4 +1,4 @@
-module github.com/charlienet/gadget/plugins/config/source/etcd
+module git.charlienet.top/go/gadget/plugins/config/source/etcd
 
 go 1.26
 

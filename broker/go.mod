@@ -1,4 +1,4 @@
-module github.com/charlienet/gadget/broker
+module git.charlienet.top/go/gadget/broker
 
 go 1.26
 

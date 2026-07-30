@@ -1,12 +1,11 @@
-module github.com/charlienet/gadget/plugins/cache/redis
+module git.charlienet.top/go/gadget/plugins/cache/redis
 
 go 1.26
 
 require (
-	github.com/charlienet/gadget/cache v0.0.0-20240910075122-40e63647fad1
-	github.com/charlienet/gadget/redis v0.0.0-20240910075122-40e63647fad1
-	github.com/charlienet/gadget/test v0.0.0-20240910075122-40e63647fad1
-	github.com/charlienet/go-misc v0.0.0-20240926090254-ef4f304f3a2c
+	git.charlienet.top/go/gadget/cache v0.1.0
+	git.charlienet.top/go/gadget/redis v0.1.0
+	git.charlienet.top/go/gadget/test v0.1.0
 	github.com/redis/go-redis/v9 v9.6.1
 	github.com/stretchr/testify v1.9.0
 )
@@ -16,7 +15,6 @@ require (
 	github.com/alicebob/miniredis v2.5.0+incompatible // indirect
 	github.com/allegro/bigcache/v3 v3.1.0 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
-	github.com/charlienet/gadget/misc v0.0.0-20240910075122-40e63647fad1 // indirect
 	github.com/coocood/freecache v1.2.4 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f // indirect
@@ -29,4 +27,10 @@ require (
 	github.com/yuin/gopher-lua v1.1.1 // indirect
 	gopkg.in/check.v1 v1.0.0-20201130134442-10cb98267c6c // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
+)
+
+replace (
+	git.charlienet.top/go/gadget/cache => ../../../cache
+	git.charlienet.top/go/gadget/redis => ../../../redis
+	git.charlienet.top/go/gadget/test => ../../../test
 )

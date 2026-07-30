@@ -1,4 +1,4 @@
-module github.com/charlienet/gadget/bloom
+module git.charlienet.top/go/gadget/bloom
 
 go 1.26
 
