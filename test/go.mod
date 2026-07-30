@@ -3,7 +3,7 @@ module git.charlienet.top/go/gadget/test
 go 1.26
 
 require (
-	git.charlienet.top/go/gadget/redis v0.1.2
+	git.charlienet.top/go/gadget/redis v0.1.5
 	github.com/alicebob/miniredis v2.5.0+incompatible
 	github.com/stretchr/testify v1.9.0
 )

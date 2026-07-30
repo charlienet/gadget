@@ -1,8 +1,8 @@
 package redis
 
 import (
-	"github.com/charlienet/gadget/cache"
-	"github.com/charlienet/gadget/redis"
+	"git.charlienet.top/go/gadget/cache"
+	"git.charlienet.top/go/gadget/redis"
 )
 
 type option func(*redis_store)

@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/charlienet/gadget/cache"
+	"git.charlienet.top/go/gadget/cache"
 	"github.com/charlienet/go-misc/json"
 	"github.com/stretchr/testify/assert"
 )

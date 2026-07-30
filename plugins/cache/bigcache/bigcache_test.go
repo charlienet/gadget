@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/charlienet/gadget/cache"
-	"github.com/charlienet/gadget/plugins/cache/bigcache"
+	"git.charlienet.top/go/gadget/cache"
+	"git.charlienet.top/go/gadget/plugins/cache/bigcache"
 	"github.com/stretchr/testify/assert"
 )
 

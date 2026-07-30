@@ -3,24 +3,22 @@ module git.charlienet.top/go/gadget/plugins/cache/freecache
 go 1.26
 
 require (
-	git.charlienet.top/go/gadget/cache v0.1.2
+	git.charlienet.top/go/gadget/cache v0.1.5
 	github.com/coocood/freecache v1.2.4
 	github.com/stretchr/testify v1.9.0
 )
 
 require (
-	github.com/allegro/bigcache/v3 v3.1.0 // indirect
+	git.charlienet.top/go/gadget/logger v0.1.5 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
-	git.charlienet.top/go/gadget/redis v0.1.2 // indirect
+	github.com/charlienet/go-misc v0.0.0-20240926090254-ef4f304f3a2c // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
-	github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f // indirect
-	github.com/hashicorp/go-version v1.7.0 // indirect
-	github.com/kr/pretty v0.3.1 // indirect
+	github.com/json-iterator/go v1.1.12 // indirect
+	github.com/kr/text v0.2.0 // indirect
+	github.com/modern-go/concurrent v0.0.0-20180306012644-bacd9c7ef1dd // indirect
+	github.com/modern-go/reflect2 v1.0.2 // indirect
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
-	github.com/redis/go-redis/v9 v9.5.3 // indirect
-	github.com/rogpeppe/go-internal v1.10.0 // indirect
-	github.com/vmihailenco/go-tinylfu v0.2.2 // indirect
-	gopkg.in/check.v1 v1.0.0-20201130134442-10cb98267c6c // indirect
+	golang.org/x/sync v0.8.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 

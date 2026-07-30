@@ -5,7 +5,7 @@ import (
 	"errors"
 
 	"github.com/bradfitz/gomemcache/memcache"
-	"github.com/charlienet/gadget/cache"
+	"git.charlienet.top/go/gadget/cache"
 )
 
 var _ cache.Store = &memcached{}

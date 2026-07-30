@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/charlienet/gadget/redis"
-	"github.com/charlienet/gadget/test"
+	"git.charlienet.top/go/gadget/redis"
+	"git.charlienet.top/go/gadget/test"
 	"github.com/charlienet/go-misc/random"
 	"github.com/go-redis/redis_rate/v10"
 	"github.com/stretchr/testify/assert"

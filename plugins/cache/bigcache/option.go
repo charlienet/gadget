@@ -1,6 +1,6 @@
 package bigcache
 
-import "github.com/charlienet/gadget/cache"
+import "git.charlienet.top/go/gadget/cache"
 
 func New() cache.Option {
 	return func(o *cache.Options) {

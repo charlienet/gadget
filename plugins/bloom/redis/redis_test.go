@@ -4,10 +4,10 @@ import (
 	"context"
 	"testing"
 
-	"github.com/charlienet/gadget/bloom"
-	r "github.com/charlienet/gadget/plugins/bloom/redis"
-	"github.com/charlienet/gadget/redis"
-	"github.com/charlienet/gadget/test"
+	"git.charlienet.top/go/gadget/bloom"
+	r "git.charlienet.top/go/gadget/plugins/bloom/redis"
+	"git.charlienet.top/go/gadget/redis"
+	"git.charlienet.top/go/gadget/test"
 	"github.com/charlienet/go-misc/random"
 	"github.com/stretchr/testify/assert"
 )

@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/charlienet/gadget/redis"
+	"git.charlienet.top/go/gadget/redis"
 )
 
 const (

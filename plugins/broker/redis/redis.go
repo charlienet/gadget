@@ -3,8 +3,8 @@ package redis
 import (
 	"context"
 
-	"github.com/charlienet/gadget/broker"
-	"github.com/charlienet/gadget/redis"
+	"git.charlienet.top/go/gadget/broker"
+	"git.charlienet.top/go/gadget/redis"
 
 	redisx "github.com/redis/go-redis/v9"
 )

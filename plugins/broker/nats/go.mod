@@ -3,7 +3,7 @@ module git.charlienet.top/go/gadget/plugins/broker/nats
 go 1.26
 
 require (
-	git.charlienet.top/go/gadget/broker v0.1.2
+	git.charlienet.top/go/gadget/broker v0.1.5
 	github.com/nats-io/nats.go v1.37.0
 )
 

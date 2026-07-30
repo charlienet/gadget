@@ -1,6 +1,6 @@
 package gcache
 
-import "github.com/charlienet/gadget/cache"
+import "git.charlienet.top/go/gadget/cache"
 
 func New(size int) cache.Option {
 	return func(o *cache.Options) {

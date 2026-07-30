@@ -3,9 +3,9 @@ package config_test
 import (
 	"testing"
 
-	"github.com/charlienet/gadget/config"
-	"github.com/charlienet/gadget/config/source/env"
-	"github.com/charlienet/gadget/config/source/file"
+	"git.charlienet.top/go/gadget/config"
+	"git.charlienet.top/go/gadget/config/source/env"
+	"git.charlienet.top/go/gadget/config/source/file"
 )
 
 func TestReadFile(t *testing.T) {

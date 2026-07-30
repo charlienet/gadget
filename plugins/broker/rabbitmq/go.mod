@@ -3,7 +3,7 @@ module git.charlienet.top/go/gadget/plugins/broker/rabbitmq
 go 1.26
 
 require (
-	git.charlienet.top/go/gadget/broker v0.1.2
+	git.charlienet.top/go/gadget/broker v0.1.5
 	github.com/rabbitmq/amqp091-go v1.10.0
 )
 

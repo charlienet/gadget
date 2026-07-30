@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/charlienet/gadget/cache"
-	"github.com/charlienet/gadget/redis"
-	"github.com/charlienet/gadget/test"
+	"git.charlienet.top/go/gadget/cache"
+	"git.charlienet.top/go/gadget/redis"
+	"git.charlienet.top/go/gadget/test"
 	"github.com/charlienet/go-misc/random"
 )
 

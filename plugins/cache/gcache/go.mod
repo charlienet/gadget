@@ -3,12 +3,12 @@ module git.charlienet.top/go/gadget/plugins/cache/gcache
 go 1.26
 
 require (
-	git.charlienet.top/go/gadget/cache v0.1.2
+	git.charlienet.top/go/gadget/cache v0.1.5
 	github.com/bluele/gcache v0.0.2
 )
 
 require (
-	git.charlienet.top/go/gadget/logger v0.1.2 // indirect
+	git.charlienet.top/go/gadget/logger v0.1.5 // indirect
 	github.com/charlienet/go-misc v0.0.0-20240926090254-ef4f304f3a2c // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
 	github.com/modern-go/concurrent v0.0.0-20180306012644-bacd9c7ef1dd // indirect

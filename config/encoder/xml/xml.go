@@ -3,7 +3,7 @@ package xml
 import (
 	"encoding/xml"
 
-	"github.com/charlienet/gadget/config/encoder"
+	"git.charlienet.top/go/gadget/config/encoder"
 )
 
 type xmlEncoder struct{}

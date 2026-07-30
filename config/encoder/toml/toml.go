@@ -2,7 +2,7 @@ package toml
 
 import (
 	"bytes"
-	"github.com/charlienet/gadget/config/encoder"
+	"git.charlienet.top/go/gadget/config/encoder"
 
 	"github.com/pelletier/go-toml/v2"
 )

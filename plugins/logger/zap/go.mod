@@ -3,7 +3,7 @@ module git.charlienet.top/go/gadget/plugins/logger/zap
 go 1.26
 
 require (
-	git.charlienet.top/go/gadget/logger v0.1.2
+	git.charlienet.top/go/gadget/logger v0.1.5
 	go.uber.org/zap v1.28.0
 )
 

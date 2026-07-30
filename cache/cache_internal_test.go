@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/charlienet/gadget/logger"
+	"git.charlienet.top/go/gadget/logger"
 	"github.com/stretchr/testify/assert"
 )
 

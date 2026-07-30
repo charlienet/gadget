@@ -1,7 +1,7 @@
 package kafka
 
 import (
-	"github.com/charlienet/gadget/broker"
+	"git.charlienet.top/go/gadget/broker"
 	_ "github.com/segmentio/kafka-go"
 )
 

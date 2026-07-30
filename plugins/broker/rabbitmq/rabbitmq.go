@@ -1,7 +1,7 @@
 package rabbitmq
 
 import (
-	"github.com/charlienet/gadget/broker"
+	"git.charlienet.top/go/gadget/broker"
 	rabbitmq "github.com/rabbitmq/amqp091-go"
 )
 

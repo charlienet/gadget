@@ -1,6 +1,6 @@
 package memcached
 
-import "github.com/charlienet/gadget/cache"
+import "git.charlienet.top/go/gadget/cache"
 
 func New(addrs ...string) cache.Option {
 	return func(o *cache.Options) {

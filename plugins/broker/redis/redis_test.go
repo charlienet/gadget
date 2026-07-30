@@ -3,9 +3,9 @@ package redis_test
 import (
 	"testing"
 
-	b "github.com/charlienet/gadget/plugins/broker/redis"
-	"github.com/charlienet/gadget/redis"
-	"github.com/charlienet/gadget/test"
+	b "git.charlienet.top/go/gadget/plugins/broker/redis"
+	"git.charlienet.top/go/gadget/redis"
+	"git.charlienet.top/go/gadget/test"
 )
 
 func TestRedisBroker(t *testing.T) {

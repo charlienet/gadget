@@ -3,7 +3,7 @@ module git.charlienet.top/go/gadget/redis
 go 1.26
 
 require (
-	git.charlienet.top/go/gadget/test v0.1.2
+	git.charlienet.top/go/gadget/test v0.1.5
 	github.com/charlienet/go-misc v0.0.0-20240926090254-ef4f304f3a2c
 	github.com/go-redis/redis_rate/v10 v10.0.1
 	github.com/hashicorp/go-version v1.7.0
