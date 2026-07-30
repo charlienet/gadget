@@ -2,7 +2,6 @@ package redis
 
 import (
 	"context"
-	"strings"
 
 	"github.com/redis/go-redis/v9"
 )
@@ -21,19 +20,21 @@ type Client interface {
 	redis.UniversalClient
 	Constraint(...constraintFunc) error           // 实例约束
 	MustConstraint(constraints ...constraintFunc) // 强制约束，不符合约束条件时退出应用
-	LoadFunction(f string)                        // 加载函数脚本
+	LoadFunction(f string) error                  // 加载函数脚本
 	Prefix() string                               // 统一前缀
 	Separator() string                            // 分隔符
 	JoinKeys(key ...string) string                // 连接键
 	AddPrefix(prefix ...string) *redisClient      // 添加前缀
 	ServerVersion() string                        // 服务器版本
 	IsStack() bool                                // 服务器环境是否为Redis stack
+	Capability() *Capability                      // 能力探测（版本、模块等）
 }
 
 type redisClient struct {
 	redis.UniversalClient
 	prefix redisPrefix
 	conf   *redis.UniversalOptions
+	cap    *Capability
 }
 
 func ParseURL(redisURL string, opts ...Option) (RedisOptions, error) {
@@ -86,7 +87,7 @@ func NewWithUrl(url string, opts ...Option) (*redisClient, error) {
 		return nil, err
 	}
 
-	return new(&opt.UniversalOptions, newPrefix(opt.separator, opt.perfix)), nil
+	return new(&opt.UniversalOptions, newPrefix(opt.separator, opt.prefix)), nil
 }
 
 func New(opts ...Option) *redisClient {
@@ -94,7 +95,7 @@ func New(opts ...Option) *redisClient {
 	for _, o := range opts {
 		o(&opt)
 	}
-	return new(&opt.UniversalOptions, newPrefix(opt.separator, opt.perfix))
+	return new(&opt.UniversalOptions, newPrefix(opt.separator, opt.prefix))
 }
 
 func (rdb redisClient) Subscribe(ctx context.Context, channels ...string) *redis.PubSub {
@@ -147,37 +148,20 @@ func (rdb redisClient) JoinKeys(key ...string) string {
 	return rdb.prefix.rename(key...)
 }
 
-func (rdb redisClient) LoadFunction(code string) {
-	err := rdb.FunctionLoadReplace(context.Background(), code).Err()
-	if err != nil {
-		panic(err)
-	}
+func (rdb redisClient) LoadFunction(code string) error {
+	return rdb.FunctionLoadReplace(context.Background(), code).Err()
 }
 
 func (rdb redisClient) ServerVersion() string {
-	info, err := rdb.Info(context.Background(), "Server").Result()
-	if err != nil {
-		return ""
-	}
-
-	for _, line := range strings.Split(info, "\r\n") {
-		after, found := strings.CutPrefix(line, "redis_version:")
-		if found {
-			return after
-		}
-	}
-
-	return ""
+	return rdb.cap.Version()
 }
 
 func (rdb redisClient) IsStack() bool {
+	return rdb.cap.IsStack()
+}
 
-	info, err := rdb.Info(context.Background(), "Modules").Result()
-	if err != nil {
-		return false
-	}
-
-	return len(info) > 20
+func (rdb redisClient) Capability() *Capability {
+	return rdb.cap
 }
 
 func new(conf *redis.UniversalOptions, prefix redisPrefix) *redisClient {
@@ -185,9 +169,12 @@ func new(conf *redis.UniversalOptions, prefix redisPrefix) *redisClient {
 	rdb.ConfigSet(context.Background(), "slowlog-log-slower-than", defaultSlowThreshold)
 	rdb.AddHook(renameHook{prefix: prefix})
 
-	return &redisClient{
+	client := &redisClient{
 		UniversalClient: rdb,
 		prefix:          prefix,
 		conf:            conf,
 	}
+	client.cap = newCapability(client)
+
+	return client
 }

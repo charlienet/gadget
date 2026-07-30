@@ -6,7 +6,7 @@ type Option func(*RedisOptions)
 
 type RedisOptions struct {
 	redis.UniversalOptions
-	perfix    string
+	prefix    string
 	separator string
 }
 
@@ -58,6 +58,6 @@ func WithPoolSize(size int) Option {
 
 func WithPrefix(prefix string) Option {
 	return func(o *RedisOptions) {
-		o.perfix = prefix
+		o.prefix = prefix
 	}
 }

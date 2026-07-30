@@ -1,4 +1,4 @@
-package redis
+package pubsub
 
 import (
 	"context"
@@ -18,7 +18,7 @@ func TestSS(t *testing.T) {
 	test.RunOnRedisStack(t, func(rdb redis.Client) {
 		c := "abc"
 		c2 := "abc:dddd"
-		r := NewReidsListener(rdb, c)
+		r := NewListener(rdb, c)
 		defer r.Close()
 
 		count := 0
@@ -46,7 +46,7 @@ func TestSS(t *testing.T) {
 func TestCacheWatch(t *testing.T) {
 	channel := "abcdef"
 	test.RunOnRedis(t, func(rdb redis.Client) {
-		lis := NewReidsListener(rdb, channel)
+		lis := NewListener(rdb, channel)
 		// defer lis.Close()
 
 		lis.Publish("ccc")
@@ -58,5 +58,19 @@ func TestCacheWatch(t *testing.T) {
 
 		c.Delete(context.Background(), key)
 		time.Sleep(time.Second)
+	})
+}
+
+func TestListenerReconnection(t *testing.T) {
+	test.RunOnRedis(t, func(rdb redis.Client) {
+		lis := NewListener(rdb, "test-reconnect-channel")
+		defer lis.Close()
+
+		err := lis.Publish("test-key")
+		if err != nil {
+			t.Fatalf("publish failed: %v", err)
+		}
+
+		time.Sleep(500 * time.Millisecond)
 	})
 }

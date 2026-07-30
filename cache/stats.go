@@ -106,9 +106,6 @@ func (s *Stats) Clear() {
 		atomic.SwapUint64(&v.Miss, 0)
 	}
 
-	query := atomic.SwapUint64(&s.Query, 0)
-	queryFail := atomic.SwapUint64(&s.QueryFail, 0)
-
-	_ = query
-	_ = queryFail
+	atomic.SwapUint64(&s.Query, 0)
+	atomic.SwapUint64(&s.QueryFail, 0)
 }

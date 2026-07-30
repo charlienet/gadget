@@ -55,3 +55,43 @@ func BenchmarkMarshal(b *testing.B) {
 	})
 
 }
+
+func TestSerializerEdgeCases(t *testing.T) {
+	s := &jsonSerializer{}
+
+	// nil value marshaling
+	data, err := s.Marshal(nil)
+	assert.Nil(t, err)
+	assert.Nil(t, data)
+
+	// []byte passthrough
+	original := []byte("rawbytes")
+	data, err = s.Marshal(original)
+	assert.Nil(t, err)
+	assert.Equal(t, original, data)
+
+	// string passthrough
+	data, err = s.Marshal("hello")
+	assert.Nil(t, err)
+	assert.Equal(t, []byte("hello"), data)
+
+	// Unmarshal nil
+	err = s.Unmarshal(nil, nil)
+	assert.Nil(t, err)
+
+	// Unmarshal empty
+	err = s.Unmarshal([]byte{}, nil)
+	assert.Nil(t, err)
+
+	// Unmarshal to *[]byte
+	var b []byte
+	err = s.Unmarshal([]byte("bytes"), &b)
+	assert.Nil(t, err)
+	assert.Equal(t, []byte("bytes"), b)
+
+	// Unmarshal to *string
+	var str string
+	err = s.Unmarshal([]byte("hello"), &str)
+	assert.Nil(t, err)
+	assert.Equal(t, "hello", str)
+}

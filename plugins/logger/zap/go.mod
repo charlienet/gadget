@@ -1,6 +1,6 @@
 module github.com/charlienet/gadget/plugins/logger/zap
 
-go 1.23
+go 1.26
 
 require (
 	github.com/charlienet/gadget/logger v0.0.0-20240924090833-c49aad375a6b

@@ -1,4 +1,4 @@
-go 1.23
+go 1.26
 
 use (
 	./bloom
@@ -15,9 +15,9 @@ use (
 	./plugins/cache/bigcache
 	./plugins/cache/freecache
 	./plugins/cache/gcache
+
 	./plugins/cache/memcached
 	./plugins/cache/redis
-	./plugins/cache/listener/redis
 	./plugins/config/source/consul
 	./plugins/config/source/etcd
 	./plugins/config/source/nacos
