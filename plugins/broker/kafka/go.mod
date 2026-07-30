@@ -3,7 +3,7 @@ module git.charlienet.top/go/gadget/plugins/broker/kafka
 go 1.26
 
 require (
-	git.charlienet.top/go/gadget/broker v0.1.1
+	git.charlienet.top/go/gadget/broker v0.1.2
 	github.com/segmentio/kafka-go v0.4.47
 )
 

@@ -4,13 +4,13 @@ go 1.26
 
 require (
 	github.com/allegro/bigcache/v3 v3.1.0
-	git.charlienet.top/go/gadget/cache v0.1.1
+	git.charlienet.top/go/gadget/cache v0.1.2
 	github.com/stretchr/testify v1.9.0
 )
 
 require (
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
-	git.charlienet.top/go/gadget/redis v0.1.1 // indirect
+	git.charlienet.top/go/gadget/redis v0.1.2 // indirect
 	github.com/coocood/freecache v1.2.4 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f // indirect

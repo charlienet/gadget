@@ -3,9 +3,9 @@ module git.charlienet.top/go/gadget/plugins/broker/redis
 go 1.26
 
 require (
-	git.charlienet.top/go/gadget/broker v0.1.1
-	git.charlienet.top/go/gadget/redis v0.1.1
-	git.charlienet.top/go/gadget/test v0.1.1
+	git.charlienet.top/go/gadget/broker v0.1.2
+	git.charlienet.top/go/gadget/redis v0.1.2
+	git.charlienet.top/go/gadget/test v0.1.2
 	github.com/redis/go-redis/v9 v9.6.1
 )
 
