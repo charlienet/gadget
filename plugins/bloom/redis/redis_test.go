@@ -2,15 +2,25 @@ package redis_test
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"testing"
 
-	"git.charlienet.top/go/gadget/bloom"
-	r "git.charlienet.top/go/gadget/plugins/bloom/redis"
-	"git.charlienet.top/go/gadget/redis"
-	"git.charlienet.top/go/gadget/test"
-	"github.com/charlienet/go-misc/random"
+	"github.com/charlienet/gadget/bloom"
+	r "github.com/charlienet/gadget/plugins/bloom/redis"
+	"github.com/charlienet/gadget/redis"
+	"github.com/charlienet/gadget/test"
 	"github.com/stretchr/testify/assert"
 )
+
+func randomHex(n int) string {
+	bytes := make([]byte, n/2+1) // Generate enough bytes
+	if _, err := rand.Read(bytes); err != nil {
+		panic(err)
+	}
+	hexStr := hex.EncodeToString(bytes)
+	return hexStr[:n] // Return only n characters
+}
 
 func TestRedisMiniStore(t *testing.T) {
 	test.RunOnMiniRedis(t, func(rdb redis.Client) {
@@ -68,14 +78,14 @@ func TestRedisStack(t *testing.T) {
 		ctx := context.Background()
 
 		for i := 0; i < 1000; i++ {
-			store.Add(ctx, random.Hex.Generate(2), []uint64{})
+			store.Add(ctx, randomHex(2), []uint64{})
 		}
 
 		bf.Exist(ctx, "ABC")
 		bf.Exist(ctx, "ABC")
 
 		for i := 0; i < 10000; i++ {
-			bf.Exist(ctx, random.Hex.Generate(2))
+			bf.Exist(ctx, randomHex(2))
 		}
 	})
 }
@@ -87,7 +97,7 @@ func BenchmarkRedis(b *testing.B) {
 		ctx := context.Background()
 
 		for i := 0; i < 1000; i++ {
-			store.Add(ctx, random.Hex.Generate(2), []uint64{})
+			store.Add(ctx, randomHex(2), []uint64{})
 		}
 
 		key := "AB"
@@ -95,7 +105,7 @@ func BenchmarkRedis(b *testing.B) {
 
 		b.Run("redis stack", func(b *testing.B) {
 			for i := 0; i < b.N; i++ {
-				bf.Exist(ctx, random.Hex.Generate(2))
+				bf.Exist(ctx, randomHex(2))
 			}
 		})
 	})

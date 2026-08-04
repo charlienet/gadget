@@ -1,3 +1,3 @@
-module git.charlienet.top/go/gadget/store/redis
+module github.com/charlienet/gadget/store/redis
 
 go 1.26

@@ -1,12 +1,11 @@
-module git.charlienet.top/go/gadget/plugins/bloom/redis
+module github.com/charlienet/gadget/plugins/bloom/redis
 
 go 1.26
 
 require (
-	git.charlienet.top/go/gadget/bloom v0.1.5
-	git.charlienet.top/go/gadget/redis v0.1.5
-	git.charlienet.top/go/gadget/test v0.1.5
-	github.com/charlienet/go-misc v0.0.0-20240926090254-ef4f304f3a2c
+	github.com/charlienet/gadget/bloom v0.1.5
+	github.com/charlienet/gadget/redis v0.1.5
+	github.com/charlienet/gadget/test v0.1.5
 	github.com/stretchr/testify v1.9.0
 )
 
@@ -16,6 +15,7 @@ require (
 	github.com/bits-and-blooms/bitset v1.14.3 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/charlienet/go-crypto v0.0.0-20240914082323-49984dda5b5c // indirect
+	github.com/charlienet/go-misc v0.0.0-20240911064214-e5f4643869eb // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f // indirect
 	github.com/go-redis/redis_rate/v10 v10.0.1 // indirect
@@ -27,4 +27,10 @@ require (
 	github.com/tjfoc/gmsm v1.4.1 // indirect
 	github.com/yuin/gopher-lua v1.1.1 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
+)
+
+replace (
+	github.com/charlienet/gadget/bloom => ../../../bloom
+	github.com/charlienet/gadget/redis => ../../../redis
+	github.com/charlienet/gadget/test => ../../../test
 )

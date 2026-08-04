@@ -1,10 +1,10 @@
-module git.charlienet.top/go/gadget/plugins/logger/logrus
+module github.com/charlienet/gadget/plugins/logger/logrus
 
 go 1.26
 
 require (
-	git.charlienet.top/go/gadget/logger v0.1.5
 	github.com/antonfisher/nested-logrus-formatter v1.3.1
+	github.com/charlienet/gadget/logger v0.1.5
 	github.com/sirupsen/logrus v1.9.3
 )
 
@@ -15,4 +15,4 @@ require (
 	golang.org/x/sys v0.25.0 // indirect
 )
 
-replace git.charlienet.top/go/gadget/logger => ../../../logger
+replace github.com/charlienet/gadget/logger => ../../../logger

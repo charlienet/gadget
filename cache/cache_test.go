@@ -2,6 +2,7 @@ package cache_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
@@ -9,10 +10,14 @@ import (
 	"testing"
 	"time"
 
-	"git.charlienet.top/go/gadget/cache"
-	"github.com/charlienet/go-misc/json"
+	"github.com/charlienet/gadget/cache"
 	"github.com/stretchr/testify/assert"
 )
+
+func struct2Json(v any) string {
+	b, _ := json.Marshal(v)
+	return string(b)
+}
 
 type cacheItem struct {
 	Name string
@@ -82,7 +87,7 @@ func TestGetFromFn(t *testing.T) {
 
 			assert.Nil(t, c.Getfn(ctx, key, &u, fn, 30))
 			assert.Nil(t, c.Getfn(ctx, key, &u, fn, 30))
-			assert.Equal(t, j, json.Struct2Json(u))
+			assert.Equal(t, j, struct2Json(u))
 		}()
 	}
 

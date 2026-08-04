@@ -5,8 +5,8 @@ import (
 	_ "embed"
 	"sync"
 
-	"git.charlienet.top/go/gadget/bloom"
-	"git.charlienet.top/go/gadget/redis"
+	"github.com/charlienet/gadget/bloom"
+	"github.com/charlienet/gadget/redis"
 )
 
 type redis_store struct {

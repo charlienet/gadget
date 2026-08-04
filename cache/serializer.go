@@ -1,9 +1,8 @@
 package cache
 
 import (
+	"encoding/json"
 	"slices"
-
-	"github.com/charlienet/go-misc/json"
 )
 
 type Serializer interface {

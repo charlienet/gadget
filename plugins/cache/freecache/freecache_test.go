@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"git.charlienet.top/go/gadget/cache"
-	"git.charlienet.top/go/gadget/plugins/cache/freecache"
+	"github.com/charlienet/gadget/cache"
+	"github.com/charlienet/gadget/plugins/cache/freecache"
 	"github.com/stretchr/testify/assert"
 )
 

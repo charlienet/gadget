@@ -1,11 +1,11 @@
-module git.charlienet.top/go/gadget/plugins/broker/redis
+module github.com/charlienet/gadget/plugins/broker/redis
 
 go 1.26
 
 require (
-	git.charlienet.top/go/gadget/broker v0.1.5
-	git.charlienet.top/go/gadget/redis v0.1.5
-	git.charlienet.top/go/gadget/test v0.1.5
+	github.com/charlienet/gadget/broker v0.1.5
+	github.com/charlienet/gadget/redis v0.1.5
+	github.com/charlienet/gadget/test v0.1.5
 	github.com/redis/go-redis/v9 v9.6.1
 )
 
@@ -26,7 +26,7 @@ require (
 )
 
 replace (
-	git.charlienet.top/go/gadget/broker => ../../../broker
-	git.charlienet.top/go/gadget/redis => ../../../redis
-	git.charlienet.top/go/gadget/test => ../../../test
+	github.com/charlienet/gadget/broker => ../../../broker
+	github.com/charlienet/gadget/redis => ../../../redis
+	github.com/charlienet/gadget/test => ../../../test
 )

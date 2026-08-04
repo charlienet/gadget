@@ -2,16 +2,26 @@ package redis_test
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"testing"
 	"time"
 
-	"git.charlienet.top/go/gadget/redis"
-	"git.charlienet.top/go/gadget/test"
-	"github.com/charlienet/go-misc/random"
+	"github.com/charlienet/gadget/redis"
+	"github.com/charlienet/gadget/test"
 	"github.com/go-redis/redis_rate/v10"
 	"github.com/stretchr/testify/assert"
 )
+
+func randomHex(n int) string {
+	bytes := make([]byte, n/2+1) // Generate enough bytes
+	if _, err := rand.Read(bytes); err != nil {
+		panic(err)
+	}
+	hexStr := hex.EncodeToString(bytes)
+	return hexStr[:n] // Return only n characters
+}
 
 func TestNewRedis(t *testing.T) {
 	rdb := redis.New(
@@ -99,7 +109,7 @@ func BenchmarkBF(b *testing.B) {
 
 		b.Run("bf", func(b *testing.B) {
 			for i := 0; i < b.N; i++ {
-				rdb.BFExists(ctx, key, random.Hex.Generate(1))
+				rdb.BFExists(ctx, key, randomHex(1))
 			}
 		})
 	})

@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"git.charlienet.top/go/gadget/logger"
-	"git.charlienet.top/go/gadget/plugins/logger/logrus"
+	"github.com/charlienet/gadget/logger"
+	"github.com/charlienet/gadget/plugins/logger/logrus"
 
 	log "github.com/sirupsen/logrus"
 )

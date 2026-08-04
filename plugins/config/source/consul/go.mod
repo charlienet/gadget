@@ -1,4 +1,4 @@
-module git.charlienet.top/go/gadget/plugins/config/source/consul
+module github.com/charlienet/gadget/plugins/config/source/consul
 
 go 1.26
 

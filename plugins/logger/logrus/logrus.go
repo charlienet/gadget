@@ -1,7 +1,7 @@
 package logrus
 
 import (
-	"git.charlienet.top/go/gadget/logger"
+	"github.com/charlienet/gadget/logger"
 	"github.com/sirupsen/logrus"
 )
 

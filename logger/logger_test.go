@@ -8,7 +8,7 @@ import (
 	"sync"
 	"testing"
 
-	"git.charlienet.top/go/gadget/logger"
+	"github.com/charlienet/gadget/logger"
 )
 
 func captureLogger(t *testing.T, level logger.Level) (logger.Logger, *bytes.Buffer) {

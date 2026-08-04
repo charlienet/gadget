@@ -3,11 +3,11 @@ package redis
 import (
 	"context"
 	"errors"
+	"math/rand"
 	"time"
 
-	"git.charlienet.top/go/gadget/cache"
-	"git.charlienet.top/go/gadget/redis"
-	"github.com/charlienet/go-misc/random"
+	"github.com/charlienet/gadget/cache"
+	"github.com/charlienet/gadget/redis"
 )
 
 const (
@@ -51,7 +51,7 @@ func (r *redis_store) Put(ctx context.Context, key string, data []byte, expireSe
 	// 超时时间添加随机秒数
 	factor := 0
 	if r.ttlFactor > 1 {
-		factor = random.IntRange(1, r.ttlFactor)
+		factor = rand.Intn(r.ttlFactor-1) + 1
 	}
 
 	expire := time.Second * time.Duration(expireSeconds+factor)

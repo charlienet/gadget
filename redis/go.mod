@@ -1,10 +1,9 @@
-module git.charlienet.top/go/gadget/redis
+module github.com/charlienet/gadget/redis
 
 go 1.26
 
 require (
-	git.charlienet.top/go/gadget/test v0.1.5
-	github.com/charlienet/go-misc v0.0.0-20240926090254-ef4f304f3a2c
+	github.com/charlienet/gadget/test v0.1.5
 	github.com/go-redis/redis_rate/v10 v10.0.1
 	github.com/hashicorp/go-version v1.7.0
 	github.com/redis/go-redis/v9 v9.6.1
@@ -24,4 +23,4 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
-replace git.charlienet.top/go/gadget/test => ../test
+replace github.com/charlienet/gadget/test => ../test

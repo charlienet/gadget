@@ -6,8 +6,8 @@ import (
 	"context"
 	"time"
 
-	"git.charlienet.top/go/gadget/cache"
-	"git.charlienet.top/go/gadget/redis"
+	"github.com/charlienet/gadget/cache"
+	"github.com/charlienet/gadget/redis"
 )
 
 const (

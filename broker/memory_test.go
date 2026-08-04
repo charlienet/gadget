@@ -4,7 +4,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"git.charlienet.top/go/gadget/broker"
+	"github.com/charlienet/gadget/broker"
 	"github.com/stretchr/testify/assert"
 )
 

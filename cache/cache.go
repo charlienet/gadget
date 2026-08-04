@@ -11,7 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"git.charlienet.top/go/gadget/logger"
+	"github.com/charlienet/gadget/logger"
 	"golang.org/x/sync/singleflight"
 )
 

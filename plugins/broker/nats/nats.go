@@ -3,7 +3,7 @@ package nats
 import (
 	"errors"
 
-	"git.charlienet.top/go/gadget/broker"
+	"github.com/charlienet/gadget/broker"
 	nats "github.com/nats-io/nats.go"
 )
 

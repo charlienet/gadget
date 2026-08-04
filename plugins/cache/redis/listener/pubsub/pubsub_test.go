@@ -2,15 +2,25 @@ package pubsub
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"math"
 	"testing"
 	"time"
 
-	"git.charlienet.top/go/gadget/cache"
-	"git.charlienet.top/go/gadget/redis"
-	"git.charlienet.top/go/gadget/test"
-	"github.com/charlienet/go-misc/random"
+	"github.com/charlienet/gadget/cache"
+	"github.com/charlienet/gadget/redis"
+	"github.com/charlienet/gadget/test"
 )
+
+func randomHex(n int) string {
+	bytes := make([]byte, n/2+1) // Generate enough bytes
+	if _, err := rand.Read(bytes); err != nil {
+		panic(err)
+	}
+	hexStr := hex.EncodeToString(bytes)
+	return hexStr[:n] // Return only n characters
+}
 
 func TestSS(t *testing.T) {
 	println((math.Ln2 * math.Ln2))
@@ -32,7 +42,7 @@ func TestSS(t *testing.T) {
 
 		time.Sleep(time.Second)
 		for range 10 {
-			r.Publish(random.Hex.Generate(12))
+			r.Publish(randomHex(12))
 		}
 
 		for i := 'A'; i < 'Z'; i++ {

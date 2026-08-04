@@ -3,7 +3,7 @@ package logger_test
 import (
 	"testing"
 
-	"git.charlienet.top/go/gadget/logger"
+	"github.com/charlienet/gadget/logger"
 )
 
 func TestLevelString(t *testing.T) {

@@ -1,9 +1,9 @@
-module git.charlienet.top/go/gadget/plugins/broker/kafka
+module github.com/charlienet/gadget/plugins/broker/kafka
 
 go 1.26
 
 require (
-	git.charlienet.top/go/gadget/broker v0.1.5
+	github.com/charlienet/gadget/broker v0.1.5
 	github.com/segmentio/kafka-go v0.4.47
 )
 
@@ -15,4 +15,4 @@ require (
 	golang.org/x/text v0.18.0 // indirect
 )
 
-replace git.charlienet.top/go/gadget/broker => ../../../broker
+replace github.com/charlienet/gadget/broker => ../../../broker

@@ -5,10 +5,10 @@ import (
 	"testing"
 	"time"
 
-	"git.charlienet.top/go/gadget/cache"
-	"git.charlienet.top/go/gadget/plugins/cache/redis"
-	r "git.charlienet.top/go/gadget/redis"
-	"git.charlienet.top/go/gadget/test"
+	"github.com/charlienet/gadget/cache"
+	"github.com/charlienet/gadget/plugins/cache/redis"
+	r "github.com/charlienet/gadget/redis"
+	"github.com/charlienet/gadget/test"
 	"github.com/stretchr/testify/assert"
 )
 

@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/alicebob/miniredis"
-	"git.charlienet.top/go/gadget/redis"
+	"github.com/charlienet/gadget/redis"
 	"github.com/stretchr/testify/assert"
 )
 

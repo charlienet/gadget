@@ -1,3 +1,3 @@
-module git.charlienet.top/go/gadget/store/file
+module github.com/charlienet/gadget/store/file
 
 go 1.26

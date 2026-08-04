@@ -3,7 +3,7 @@ package cache
 import (
 	"time"
 
-	"git.charlienet.top/go/gadget/logger"
+	"github.com/charlienet/gadget/logger"
 )
 
 // Options represents the options for the cache.

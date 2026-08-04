@@ -1,10 +1,10 @@
-module git.charlienet.top/go/gadget/test
+module github.com/charlienet/gadget/test
 
 go 1.26
 
 require (
-	git.charlienet.top/go/gadget/redis v0.1.5
 	github.com/alicebob/miniredis v2.5.0+incompatible
+	github.com/charlienet/gadget/redis v0.1.5
 	github.com/stretchr/testify v1.9.0
 )
 
@@ -25,4 +25,4 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
-replace git.charlienet.top/go/gadget/redis => ../redis
+replace github.com/charlienet/gadget/redis => ../redis

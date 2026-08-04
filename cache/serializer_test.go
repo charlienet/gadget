@@ -1,9 +1,9 @@
 package cache
 
 import (
+	"encoding/json"
 	"testing"
 
-	"github.com/charlienet/go-misc/json"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -18,6 +18,11 @@ type Role struct {
 
 var u = User{Name: "test", Role: Role{Name: "admin"}}
 
+func struct2Json(v any) string {
+	b, _ := json.Marshal(v)
+	return string(b)
+}
+
 func TestJsonSerialize(t *testing.T) {
 	s := &jsonSerializer{}
 	b, err := s.Marshal(u)
@@ -28,7 +33,7 @@ func TestJsonSerialize(t *testing.T) {
 	var un User
 	assert.Nil(t, s.Unmarshal(b, &un))
 
-	t.Log(json.Struct2Json(un))
+	t.Log(struct2Json(un))
 
 	b2, _ := s.Marshal("abc")
 	t.Log(string(b2))

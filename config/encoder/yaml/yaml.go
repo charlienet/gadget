@@ -1,7 +1,7 @@
 package yaml
 
 import (
-	"git.charlienet.top/go/gadget/config/encoder"
+	"github.com/charlienet/gadget/config/encoder"
 
 	"gopkg.in/yaml.v3"
 )

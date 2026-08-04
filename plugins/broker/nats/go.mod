@@ -1,9 +1,9 @@
-module git.charlienet.top/go/gadget/plugins/broker/nats
+module github.com/charlienet/gadget/plugins/broker/nats
 
 go 1.26
 
 require (
-	git.charlienet.top/go/gadget/broker v0.1.5
+	github.com/charlienet/gadget/broker v0.1.5
 	github.com/nats-io/nats.go v1.37.0
 )
 
@@ -16,4 +16,4 @@ require (
 	golang.org/x/sys v0.25.0 // indirect
 )
 
-replace git.charlienet.top/go/gadget/broker => ../../../broker
+replace github.com/charlienet/gadget/broker => ../../../broker

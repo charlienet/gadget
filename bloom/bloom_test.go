@@ -1,11 +1,20 @@
 package bloom
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"context"
 	"testing"
-
-	"github.com/charlienet/go-misc/random"
 )
+
+func randomHex(n int) string {
+	bytes := make([]byte, n/2+1) // Generate enough bytes
+	if _, err := rand.Read(bytes); err != nil {
+		panic(err)
+	}
+	hexStr := hex.EncodeToString(bytes)
+	return hexStr[:n] // Return only n characters
+}
 
 func TestBloom(t *testing.T) {
 	bf := NewOptimal(1000, 0.0001)
@@ -29,7 +38,7 @@ func BenchmarkBloom(b *testing.B) {
 	ctx := context.Background()
 	b.Run("r", func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
-			bf.Exist(ctx, random.Hex.Generate(2))
+			bf.Exist(ctx, randomHex(2))
 		}
 	})
 }

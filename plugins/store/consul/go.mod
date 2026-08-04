@@ -1,3 +1,3 @@
-module git.charlienet.top/go/gadget/store/consul
+module github.com/charlienet/gadget/store/consul
 
 go 1.26

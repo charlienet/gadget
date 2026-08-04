@@ -5,9 +5,9 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"math"
+	"sync"
 
 	"github.com/charlienet/go-crypto/hash"
-	"github.com/charlienet/go-misc/pool"
 )
 
 type BloomFilter interface {
@@ -82,12 +82,14 @@ func (bf *bloom_filter) Clear(ctx context.Context) {
 	}
 }
 
-var p = pool.New(10, func() []uint64 { return make([]uint64, 20) })
+var p = sync.Pool{
+	New: func() any { return make([]uint64, 20) },
+}
 
 func (bf *bloom_filter) getOffsets(data string) []uint64 {
 	// offsets := make([]uint64, bf.hashSize)
 
-	offsets := p.Get()
+	offsets := p.Get().([]uint64)
 	defer p.Put(offsets)
 
 	sum := hash.Murmur3([]byte(data))
