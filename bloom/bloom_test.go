@@ -43,6 +43,67 @@ func BenchmarkBloom(b *testing.B) {
 	})
 }
 
+func TestBloomMulti(t *testing.T) {
+	bf := NewOptimal(1000, 0.0001)
+
+	ctx := context.Background()
+	
+	// Test AddMulti functionality
+	testData := []string{"element1", "element2", "element3", "element4", "element5"}
+	bf.AddMulti(ctx, testData...)
+	
+	// Verify all elements exist
+	for _, element := range testData {
+		if !bf.Exist(ctx, element) {
+			t.Errorf("Expected element %s to exist in bloom filter", element)
+		}
+	}
+	
+	// Verify non-existent element doesn't exist
+	if bf.Exist(ctx, "nonexistent") {
+		t.Error("Expected 'nonexistent' element to not exist in bloom filter")
+	}
+	
+	// Test with empty input
+	bf.AddMulti(ctx)
+	
+	// Test with single element
+	bf.AddMulti(ctx, "single_element")
+	if !bf.Exist(ctx, "single_element") {
+		t.Error("Expected 'single_element' to exist in bloom filter")
+	}
+}
+
+func BenchmarkAddMulti(b *testing.B) {
+	bf := NewOptimal(10000, 0.0001)
+	ctx := context.Background()
+	elements := make([]string, 100)
+	for i := range elements {
+		elements[i] = randomHex(10)
+	}
+	
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		bf.AddMulti(ctx, elements...)
+	}
+}
+
+func BenchmarkAddSingle(b *testing.B) {
+	bf := NewOptimal(10000, 0.0001)
+	ctx := context.Background()
+	elements := make([]string, 100)
+	for i := range elements {
+		elements[i] = randomHex(10)
+	}
+	
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		for _, element := range elements {
+			bf.Add(ctx, element)
+		}
+	}
+}
+
 func BenchmarkHash(b *testing.B) {
 	bf := NewOptimal(1000, 0.0001)
 	b.Run("r", func(b *testing.B) {

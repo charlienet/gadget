@@ -54,6 +54,20 @@ func (r *redis_store) Clear(ctx context.Context) {
 	r.rdb.Del(ctx, r.key)
 }
 
+func (r *redis_store) AddMulti(ctx context.Context, elements []string, offsets [][]uint64) {
+	r.lock.Lock()
+	defer r.lock.Unlock()
+
+	pipe := r.rdb.Pipeline()
+	for _, offsetsForElement := range offsets {
+		for _, p := range offsetsForElement {
+			pipe.SetBit(ctx, r.key, int64(p), 1)
+		}
+	}
+
+	pipe.Exec(ctx)
+}
+
 func createRedisStore(opt options) bloom.Store {
 	// redis stack
 	if opt.rdb.IsStack() {

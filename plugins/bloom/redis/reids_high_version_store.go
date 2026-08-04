@@ -44,3 +44,13 @@ func (r reids_high_version_store) buildOffsetArgs(offsets []uint64) []any {
 
 	return args
 }
+
+func (r reids_high_version_store) AddMulti(ctx context.Context, elements []string, offsets [][]uint64) {
+	pipe := r.rdb.Pipeline()
+	for i := range elements {
+		if i < len(offsets) {
+			pipe.FCall(ctx, "set_bit", []string{r.key}, r.buildOffsetArgs(offsets[i])...)
+		}
+	}
+	pipe.Exec(ctx)
+}

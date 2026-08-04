@@ -56,6 +56,33 @@ func (bf *bloom_filter) Add(ctx context.Context, data string) {
 	}
 }
 
+func (bf *bloom_filter) AddMulti(ctx context.Context, data ...string) {
+	if len(data) == 0 {
+		return
+	}
+
+	// Pre-allocate slices for offsets
+	offsetsList := make([][]uint64, len(data))
+	
+	// Calculate offsets for all elements
+	for i, item := range data {
+		originalOffsets := bf.getOffsets(item)
+		
+		// Make a copy of the offsets slice to avoid pool reuse issues
+		offsetsCopy := make([]uint64, len(originalOffsets))
+		copy(offsetsCopy, originalOffsets)
+		offsetsList[i] = offsetsCopy
+	}
+
+	// Batch set in memory store
+	bf.mem.SetMulti(ctx, offsetsList)
+
+	// If store supports batch operations, use them
+	if bf.store != nil {
+		bf.store.AddMulti(ctx, data, offsetsList)
+	}
+}
+
 func (bf *bloom_filter) Exist(ctx context.Context, data string) bool {
 	if len(data) == 0 {
 		return false

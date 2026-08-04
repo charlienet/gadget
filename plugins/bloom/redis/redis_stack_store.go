@@ -30,6 +30,17 @@ func (r redis_stack_store) Clear(ctx context.Context) {
 	r.rebuild(ctx)
 }
 
+func (r redis_stack_store) AddMulti(ctx context.Context, elements []string, offsets [][]uint64) {
+	if len(elements) == 0 {
+		return
+	}
+	args := make([]interface{}, len(elements))
+	for i, e := range elements {
+		args[i] = e
+	}
+	r.rdb.BFMAdd(ctx, r.key, args...)
+}
+
 func (r redis_stack_store) rebuild(ctx context.Context) {
 	r.rdb.Del(ctx, r.key)
 	r.rdb.BFReserve(ctx, r.key, r.fpp, int64(r.capacity))

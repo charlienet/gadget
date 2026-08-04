@@ -15,13 +15,16 @@ use (
 	./plugins/cache/bigcache
 	./plugins/cache/freecache
 	./plugins/cache/gcache
-
 	./plugins/cache/memcached
 	./plugins/cache/redis
 	./plugins/config/source/consul
 	./plugins/config/source/etcd
 	./plugins/config/source/nacos
 	./plugins/logger/logrus
+	./plugins/logger/zap
+	./plugins/store/consul
+	./plugins/store/file
+	./plugins/store/redis
 	./redis
 	./store
 	./test

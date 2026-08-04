@@ -29,6 +29,17 @@ func (s *mem_store) Set(ctx context.Context, offsets []uint64) {
 	}
 }
 
+func (s *mem_store) SetMulti(ctx context.Context, offsetsList [][]uint64) {
+	s.lock.Lock()
+	defer s.lock.Unlock()
+
+	for _, offsets := range offsetsList {
+		for _, p := range offsets {
+			s.bits.Set(uint(p))
+		}
+	}
+}
+
 func (s *mem_store) Test(ctx context.Context, offsets []uint64) bool {
 	s.lock.RLock()
 	defer s.lock.RUnlock()
