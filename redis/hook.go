@@ -66,14 +66,14 @@ func (r renameHook) renameKey(cmd redis.Cmder) {
 	case
 		"AUTH", "BGREWRITEAOF", "BGSAVE",
 		"CLIENT", "CLUSTER", "COMMAND", "CONFIG",
-		"DBSIZE", "DEBUG",
+		"DBSIZE",
 		"ECHO",
 		"FAILOVER", "FLUSHALL", "FLUSHDB", "FUNCTION",
 		"HELLO",
 		"INFO",
 		"LASTSAVE", "LATENCY", "LOLWUT",
 		"MODULE", "MONITOR",
-		"PING", "POST", "PSYNC", "PUBSUB",
+		"PING", "POST", "PSYNC",
 		"RANDOMKEY", "READONLY", "READWRITE", "REPLCONF", "REPLICAOF", "ROLE",
 		"SAVE", "SCAN", "SCRIPT", "SELECT", "SHUTDOWN", "SLAVEOF", "SLOWLOG",
 		"SUBSCRIBE", "PSUBSCRIBE", "SSUBSCRIBE", "SWAPDB", "SYNC",
@@ -184,12 +184,91 @@ func (r renameHook) renameKey(cmd redis.Cmder) {
 			r.rename(args, createSepuence(2, len(args), 1)...)
 		}
 
-	// 模式I: MIGRATE — args[3]为key
+	// 模式I: MIGRATE — args[3]为key，如果包含KEYS参数则处理后续的keys
 	// MIGRATE host port key|"" db timeout [COPY] [REPLACE] [KEYS key...]
 	case "MIGRATE":
 		if len(args) >= 4 {
-			r.rename(args, 3)
+			// 如果key参数不为空字符串，则重命名
+			if key, ok := args[3].(string); !ok || key != "" {
+				r.rename(args, 3)
+			}
+			
+			// 处理 [KEYS key...] 参数
+			for i := 4; i < len(args); i++ {
+				if str, ok := args[i].(string); ok && strings.ToUpper(str) == "KEYS" && i+1 < len(args) {
+					// 从KEYS之后的所有参数都是key
+					for j := i + 1; j < len(args); j++ {
+						r.rename(args, j)
+					}
+					break
+				}
+			}
 		}
+
+	// 模式J: 特殊命令处理
+	case "XREAD", "XREADGROUP":
+		// XREAD [COUNT count] [BLOCK ms] STREAMS key [key...] id [id...]
+		// XREADGROUP GROUP group consumer [COUNT count] [BLOCK ms] [NOACK] STREAMS key [key...] id [id...]
+		// 找到 STREAMS 关键字的位置，然后重命名其后的 key（前半部分是 key，后半部分是 id）
+		streamsIndex := -1
+		for i, arg := range args {
+			if str, ok := arg.(string); ok && strings.ToUpper(str) == "STREAMS" {
+				streamsIndex = i
+				break
+			}
+		}
+		if streamsIndex != -1 {
+			// 计算有多少个 key（等于 id 的数量）
+			remainingArgs := len(args) - streamsIndex - 1
+			keyCount := remainingArgs / 2 // key 和 id 成对出现
+			if keyCount > 0 {
+				r.rename(args, createSepuence(streamsIndex+1, streamsIndex+1+keyCount, 1)...)
+			}
+		}
+
+	case "SORT":
+		// SORT key [BY pattern] [LIMIT offset count] [GET pattern [GET pattern ...]] [ASC|DESC] [ALPHA] [STORE dest]
+		// args[1] 是 key（已被 default 处理），还需要处理 STORE 后面的 dest key
+		r.rename(args, 1) // 处理主 key
+		storeIndex := -1
+		for i, arg := range args {
+			if str, ok := arg.(string); ok && strings.ToUpper(str) == "STORE" {
+				storeIndex = i
+				break
+			}
+		}
+		if storeIndex != -1 && storeIndex+1 < len(args) {
+			r.rename(args, storeIndex+1) // 重命名 STORE 后的 dest key
+		}
+
+	case "GEORADIUS", "GEORADIUSBYMEMBER":
+		// GEORADIUS key lon lat radius unit [WITHCOORD] [WITHDIST] [WITHHASH] [COUNT count] [ASC|DESC] [STORE key] [STOREDIST key]
+		// GEORADIUSBYMEMBER key member radius unit [STORE key] [STOREDIST key]
+		// args[1] 是 key（已被 default 处理），还需要处理 STORE 和 STOREDIST 后面的 key
+		r.rename(args, 1) // 处理主 key
+		for i := 2; i < len(args)-1; i++ {
+			if str, ok := args[i].(string); ok {
+				upperStr := strings.ToUpper(str)
+				if upperStr == "STORE" || upperStr == "STOREDIST" {
+					r.rename(args, i+1) // 重命名 STORE 或 STOREDIST 后的 key
+				}
+			}
+		}
+
+	case "DEBUG":
+		// DEBUG OBJECT key
+		// 当 args[1] 是 "OBJECT" 时，重命名 args[2]
+		if len(args) >= 3 {
+			if str, ok := args[1].(string); ok && strings.ToUpper(str) == "OBJECT" {
+				r.rename(args, 2)
+			}
+		}
+
+	case "PUBSUB":
+		// PUBSUB CHANNELS [pattern] / PUBSUB NUMSUB [channel [channel ...]] / PUBSUB NUMPAT
+		// channel/pattern 不是 key，不需要添加前缀
+		// 此分支保留以明确处理该命令，但不执行任何重命名操作
+		return
 
 	default:
 		// 默认模式: 第一个参数为键值（覆盖90%+的命令）

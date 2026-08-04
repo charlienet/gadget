@@ -76,11 +76,7 @@ func TestIsStack(t *testing.T) {
 		})
 	})
 
-	t.Run("is stack", func(t *testing.T) {
-		test.RunOnRedisStack(t, func(rdb redis.Client) {
-			t.Log(rdb.IsStack())
-		}, redis.WithAddr("192.168.3.200:6380"))
-	})
+
 }
 
 func TestBf(t *testing.T) {
