@@ -41,6 +41,18 @@ func (r redis_stack_store) AddMulti(ctx context.Context, elements []string, offs
 	r.rdb.BFMAdd(ctx, r.key, args...)
 }
 
+func (r redis_stack_store) TestMulti(ctx context.Context, elements []string, offsets [][]uint64) []bool {
+	if len(elements) == 0 {
+		return []bool{}
+	}
+	args := make([]interface{}, len(elements))
+	for i, e := range elements {
+		args[i] = e
+	}
+	result, _ := r.rdb.BFMExists(ctx, r.key, args...).Result()
+	return result
+}
+
 func (r redis_stack_store) rebuild(ctx context.Context) {
 	r.rdb.Del(ctx, r.key)
 	r.rdb.BFReserve(ctx, r.key, r.fpp, int64(r.capacity))

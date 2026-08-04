@@ -121,6 +121,47 @@ func TestRedisStoreAddMulti(t *testing.T) {
 	})
 }
 
+func TestRedisStoreTestMulti(t *testing.T) {
+	test.RunOnRedis(t, func(rdb redis.Client) {
+		s := r.New(rdb, "test_testmulti")
+		ctx := context.Background()
+
+		// 清理
+		s.Clear(ctx)
+
+		// 批量添加
+		elements := []string{"elem1", "elem2", "elem3"}
+		offsets := [][]uint64{
+			{1, 2, 3},
+			{4, 5, 6},
+			{7, 8, 9},
+		}
+
+		s.AddMulti(ctx, elements, offsets)
+
+		// 测试批量检查
+		checkElements := []string{"elem1", "notexist", "elem2", "elem3"}
+		checkOffsets := [][]uint64{
+			{1, 2, 3},
+			{100, 101, 102},
+			{4, 5, 6},
+			{7, 8, 9},
+		}
+
+		results := s.TestMulti(ctx, checkElements, checkOffsets)
+
+		// 验证结果
+		expected := []bool{true, false, true, true}
+		assert.Equal(t, len(expected), len(results))
+		for i, exp := range expected {
+			assert.Equal(t, exp, results[i], "element %s check failed", checkElements[i])
+		}
+
+		// 清理
+		s.Clear(ctx)
+	})
+}
+
 func TestRedisStackStoreAddMulti(t *testing.T) {
 	test.RunOnRedisStack(t, func(rdb redis.Client) {
 		s := r.New(rdb, "test_stack_addmulti")
@@ -149,6 +190,47 @@ func TestRedisStackStoreAddMulti(t *testing.T) {
 	})
 }
 
+func TestRedisStackStoreTestMulti(t *testing.T) {
+	test.RunOnRedisStack(t, func(rdb redis.Client) {
+		s := r.New(rdb, "test_stack_testmulti")
+		ctx := context.Background()
+
+		// 清理
+		s.Clear(ctx)
+
+		// 批量添加
+		elements := []string{"stack_elem1", "stack_elem2", "stack_elem3"}
+		offsets := [][]uint64{
+			{10, 20, 30},
+			{40, 50, 60},
+			{70, 80, 90},
+		}
+
+		s.AddMulti(ctx, elements, offsets)
+
+		// 测试批量检查
+		checkElements := []string{"stack_elem1", "notexist", "stack_elem2", "stack_elem3"}
+		checkOffsets := [][]uint64{
+			{10, 20, 30},
+			{100, 101, 102},
+			{40, 50, 60},
+			{70, 80, 90},
+		}
+
+		results := s.TestMulti(ctx, checkElements, checkOffsets)
+
+		// 验证结果
+		expected := []bool{true, false, true, true}
+		assert.Equal(t, len(expected), len(results))
+		for i, exp := range expected {
+			assert.Equal(t, exp, results[i], "element %s check failed", checkElements[i])
+		}
+
+		// 清理
+		s.Clear(ctx)
+	})
+}
+
 func TestBloomFilterAddMulti(t *testing.T) {
 	test.RunOnRedisStack(t, func(rdb redis.Client) {
 		store := r.New(rdb, "test_bf_addmulti")
@@ -169,6 +251,35 @@ func TestBloomFilterAddMulti(t *testing.T) {
 
 		// 验证不存在的元素
 		assert.False(t, bf.Exist(ctx, "not_exist_elem"))
+
+		// 清理
+		bf.Clear(ctx)
+	})
+}
+
+func TestBloomFilterExistMulti(t *testing.T) {
+	test.RunOnRedisStack(t, func(rdb redis.Client) {
+		store := r.New(rdb, "test_bf_existmulti")
+		bf := bloom.NewOptimal(10000, 0.001, bloom.WithStore(store))
+		ctx := context.Background()
+
+		// 清理
+		bf.Clear(ctx)
+
+		// 批量添加
+		elements := []string{"apple", "banana", "cherry"}
+		bf.AddMulti(ctx, elements...)
+
+		// 测试批量检查
+		checkElements := []string{"apple", "date", "banana", "elderberry", "cherry"}
+		results := bf.ExistMulti(ctx, checkElements...)
+
+		// 验证结果
+		expected := []bool{true, false, true, false, true}
+		assert.Equal(t, len(expected), len(results))
+		for i, exp := range expected {
+			assert.Equal(t, exp, results[i], "element %s check failed", checkElements[i])
+		}
 
 		// 清理
 		bf.Clear(ctx)

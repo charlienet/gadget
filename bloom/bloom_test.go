@@ -74,6 +74,54 @@ func TestBloomMulti(t *testing.T) {
 	}
 }
 
+func TestBloomExistMulti(t *testing.T) {
+	bf := NewOptimal(100000, 0.0001)
+	ctx := context.Background()
+	
+	// Add some elements
+	testData := []string{"apple", "banana", "cherry", "date", "elderberry"}
+	bf.AddMulti(ctx, testData...)
+	
+	// Test ExistMulti with mixed existing and non-existing elements
+	// Use longer random strings to avoid false positives
+	checkData := []string{"apple", "xyz123abc456def789", "banana", "qwerty987654321", "cherry"}
+	results := bf.ExistMulti(ctx, checkData...)
+	
+	// Verify results
+	expected := []bool{true, false, true, false, true}
+	if len(results) != len(expected) {
+		t.Fatalf("Expected %d results, got %d", len(expected), len(results))
+	}
+	
+	for i, exp := range expected {
+		if results[i] != exp {
+			t.Errorf("Element %s: expected %v, got %v", checkData[i], exp, results[i])
+		}
+	}
+	
+	// Test with empty input
+	emptyResults := bf.ExistMulti(ctx)
+	if len(emptyResults) != 0 {
+		t.Errorf("Expected empty results for empty input, got %d results", len(emptyResults))
+	}
+	
+	// Test with all existing elements
+	allExist := bf.ExistMulti(ctx, "apple", "banana", "cherry")
+	for i, exists := range allExist {
+		if !exists {
+			t.Errorf("Expected element %d to exist", i)
+		}
+	}
+	
+	// Test with all non-existing elements
+	noneExist := bf.ExistMulti(ctx, "fig", "grape", "kiwi")
+	for i, exists := range noneExist {
+		if exists {
+			t.Errorf("Expected element %d to not exist", i)
+		}
+	}
+}
+
 func BenchmarkAddMulti(b *testing.B) {
 	bf := NewOptimal(10000, 0.0001)
 	ctx := context.Background()

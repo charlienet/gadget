@@ -102,6 +102,56 @@ func (bf *bloom_filter) Exist(ctx context.Context, data string) bool {
 	return exist
 }
 
+func (bf *bloom_filter) ExistMulti(ctx context.Context, data ...string) []bool {
+	if len(data) == 0 {
+		return []bool{}
+	}
+
+	// Calculate offsets for all elements
+	// Must copy offsets to avoid pool reuse issues
+	offsetsList := make([][]uint64, len(data))
+	for i, item := range data {
+		originalOffsets := bf.getOffsets(item)
+		// Copy the offsets to avoid pool reuse issues
+		offsetsCopy := make([]uint64, len(originalOffsets))
+		copy(offsetsCopy, originalOffsets)
+		offsetsList[i] = offsetsCopy
+	}
+
+	// Check in memory store first
+	results := bf.mem.TestMulti(ctx, offsetsList)
+
+	// For elements not found in memory, check remote store
+	if bf.store != nil {
+		// Collect elements not found in memory
+		var missingElements []string
+		var missingOffsets [][]uint64
+		var missingIndices []int
+
+		for i, found := range results {
+			if !found {
+				missingElements = append(missingElements, data[i])
+				missingOffsets = append(missingOffsets, offsetsList[i])
+				missingIndices = append(missingIndices, i)
+			}
+		}
+
+		// Check missing elements in remote store
+		if len(missingElements) > 0 {
+			remoteResults := bf.store.TestMulti(ctx, missingElements, missingOffsets)
+			for i, found := range remoteResults {
+				if found {
+					results[missingIndices[i]] = true
+					// Cache in memory
+					bf.mem.Set(ctx, missingOffsets[i])
+				}
+			}
+		}
+	}
+
+	return results
+}
+
 func (bf *bloom_filter) Clear(ctx context.Context) {
 	bf.mem.Clear(ctx)
 	if bf.store != nil {

@@ -53,6 +53,25 @@ func (s *mem_store) Test(ctx context.Context, offsets []uint64) bool {
 	return true
 }
 
+func (s *mem_store) TestMulti(ctx context.Context, offsetsList [][]uint64) []bool {
+	s.lock.RLock()
+	defer s.lock.RUnlock()
+
+	results := make([]bool, len(offsetsList))
+	for i, offsets := range offsetsList {
+		exists := true
+		for _, p := range offsets {
+			if !s.bits.Test(uint(p)) {
+				exists = false
+				break
+			}
+		}
+		results[i] = exists
+	}
+
+	return results
+}
+
 func (s *mem_store) Clear(ctx context.Context) {
 	s.lock.Lock()
 	defer s.lock.Unlock()

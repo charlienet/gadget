@@ -5,6 +5,8 @@ import (
 	_ "embed"
 	"sync"
 
+	goredis "github.com/redis/go-redis/v9"
+
 	"github.com/charlienet/gadget/bloom"
 	"github.com/charlienet/gadget/redis"
 )
@@ -66,6 +68,35 @@ func (r *redis_store) AddMulti(ctx context.Context, elements []string, offsets [
 	}
 
 	pipe.Exec(ctx)
+}
+
+func (r *redis_store) TestMulti(ctx context.Context, elements []string, offsets [][]uint64) []bool {
+	results := make([]bool, len(elements))
+	
+	// Use pipeline to batch GetBit operations
+	pipe := r.rdb.Pipeline()
+	cmds := make([][]*goredis.IntCmd, len(elements))
+	
+	for i, offsetsForElement := range offsets {
+		cmds[i] = make([]*goredis.IntCmd, len(offsetsForElement))
+		for j, p := range offsetsForElement {
+			cmds[i][j] = pipe.GetBit(ctx, r.key, int64(p))
+		}
+	}
+	
+	pipe.Exec(ctx)
+	
+	// Check results: element exists if any bit is 1
+	for i, cmdList := range cmds {
+		for _, cmd := range cmdList {
+			if cmd.Val() == 1 {
+				results[i] = true
+				break
+			}
+		}
+	}
+	
+	return results
 }
 
 func createRedisStore(opt options) bloom.Store {

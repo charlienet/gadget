@@ -8,6 +8,8 @@ type Store interface {
 	Clear(context.Context)
 	
 	// AddMulti adds multiple elements to the store in batch
-	// This is an optional method for stores that support batch operations
 	AddMulti(ctx context.Context, elements []string, offsets [][]uint64)
+	
+	// TestMulti checks multiple elements in batch, returns []bool indicating existence
+	TestMulti(ctx context.Context, elements []string, offsets [][]uint64) []bool
 }

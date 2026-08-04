@@ -3,6 +3,8 @@ package redis
 import (
 	"context"
 	_ "embed"
+
+	goredis "github.com/redis/go-redis/v9"
 )
 
 //go:embed bloom.lua
@@ -53,4 +55,30 @@ func (r reids_high_version_store) AddMulti(ctx context.Context, elements []strin
 		}
 	}
 	pipe.Exec(ctx)
+}
+
+func (r reids_high_version_store) TestMulti(ctx context.Context, elements []string, offsets [][]uint64) []bool {
+	results := make([]bool, len(elements))
+	pipe := r.rdb.Pipeline()
+	cmds := make([]*goredis.Cmd, len(elements))
+	
+	for i := range elements {
+		if i < len(offsets) {
+			cmds[i] = pipe.FCall(ctx, "test_bit", []string{r.key}, r.buildOffsetArgs(offsets[i])...)
+		}
+	}
+	
+	pipe.Exec(ctx)
+	
+	for i, cmd := range cmds {
+		if cmd == nil {
+			continue
+		}
+		resp, _ := cmd.Result()
+		if exists, ok := resp.(int64); ok && exists == 1 {
+			results[i] = true
+		}
+	}
+	
+	return results
 }
