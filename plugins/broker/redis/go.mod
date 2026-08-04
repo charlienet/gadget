@@ -24,9 +24,3 @@ require (
 	github.com/yuin/gopher-lua v1.1.1 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
-
-replace (
-	github.com/charlienet/gadget/broker => ../../../broker
-	github.com/charlienet/gadget/redis => ../../../redis
-	github.com/charlienet/gadget/test => ../../../test
-)

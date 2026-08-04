@@ -1,3 +1,5 @@
+github.com/charlienet/gadget/broker v0.1.5 h1:py4uunod50FBjzMtCPWlDzvzP7lqZxmxZuwTu/iAzTk=
+github.com/charlienet/gadget/broker v0.1.5/go.mod h1:Fv9+Th7/cd5qtpgpvILCOqlovRKjXvhTTsVozWWf0qA=
 github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc h1:U9qPSI2PIWSS1VwoXQT9A3Wy9MM3WgvqSxFWenqJduM=
 github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/google/uuid v1.6.0 h1:NIvaJDMOsjHA8n1jAhLSgzrAzy1Hgr+hNrb57e+94F0=

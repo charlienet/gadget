@@ -1,6 +1,10 @@
 github.com/cespare/xxhash/v2 v2.1.2/go.mod h1:VGX0DQ3Q6kWi7AoAeZDth3/j3BFtOZR5XLFGgcrjCOs=
 github.com/cespare/xxhash/v2 v2.3.0 h1:UL815xU9SqsFlibzuggzjXhog7bL6oX9BbNZnL2UFvs=
 github.com/cespare/xxhash/v2 v2.3.0/go.mod h1:VGX0DQ3Q6kWi7AoAeZDth3/j3BFtOZR5XLFGgcrjCOs=
+github.com/charlienet/gadget/cache v0.1.5 h1:GknmFBcE/JCcfLLs7UyNGog1R/WmvA4WKkFNn6Zxhzg=
+github.com/charlienet/gadget/cache v0.1.5/go.mod h1:5WBuZxiB3oB1PnLG5jnH0PS0YlL/hOpAvRQGjA7u5uw=
+github.com/charlienet/gadget/logger v0.1.5 h1:B4bMA1ykupV488MbePW4+GjXtERZP7d/9lLdd0FAZE8=
+github.com/charlienet/gadget/logger v0.1.5/go.mod h1:y/Pq0DcEJUIXxYxzC0LLXw5afd92CUJThmS9Fotsom8=
 github.com/coocood/freecache v1.2.4 h1:UdR6Yz/X1HW4fZOuH0Z94KwG851GWOSknua5VUbb/5M=
 github.com/coocood/freecache v1.2.4/go.mod h1:RBUWa/Cy+OHdfTGFEhEuE1pMCMX51Ncizj7rthiQ3vk=
 github.com/creack/pty v1.1.9/go.mod h1:oKZEueFk5CKHvIhNR5MUki03XCEU+Q6VDXinZuGJ33E=

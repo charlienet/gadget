@@ -13,6 +13,12 @@ github.com/bsm/gomega v1.27.10/go.mod h1:JyEr/xRbxbtgWNi8tIEVPUYZ5Dzef52k01W3YH0
 github.com/census-instrumentation/opencensus-proto v0.2.1/go.mod h1:f6KPmirojxKA12rnyqOA5BBL4O983OfeGPqjHWSTneU=
 github.com/cespare/xxhash/v2 v2.3.0 h1:UL815xU9SqsFlibzuggzjXhog7bL6oX9BbNZnL2UFvs=
 github.com/cespare/xxhash/v2 v2.3.0/go.mod h1:VGX0DQ3Q6kWi7AoAeZDth3/j3BFtOZR5XLFGgcrjCOs=
+github.com/charlienet/gadget/bloom v0.1.5 h1:Gz4IlLrRrDsFs7DvLuwW2gyWp+gluKAaupZ53cr8jiY=
+github.com/charlienet/gadget/bloom v0.1.5/go.mod h1:Ksqg2obme7gxt1RwAgW9Z1qoYxWQDX8Qo2xm1ei7ZVw=
+github.com/charlienet/gadget/redis v0.1.5 h1:CwDcC1gQaty9Ga4MfeX0No95usQ+pU1Z0gEQJLvtBv4=
+github.com/charlienet/gadget/redis v0.1.5/go.mod h1:8q6NHVOha5H+Ut2Z93NiR2vcpPYTu1cSa3clxFrVEfA=
+github.com/charlienet/gadget/test v0.1.5 h1:X1mh7FyX7EYS/MJrDQ2vYsmsuTVHkUE6miNlDJsFIoY=
+github.com/charlienet/gadget/test v0.1.5/go.mod h1:5TYhAu7Z4WAmM86qcbs6iV6niBIVg3xRdhYLZ9lj91c=
 github.com/charlienet/go-crypto v0.0.0-20240914082323-49984dda5b5c h1:fhZ5xTBsBdEbnCw4IcixYnTQV+qu0WkoenJttvtJnnk=
 github.com/charlienet/go-crypto v0.0.0-20240914082323-49984dda5b5c/go.mod h1:XXT039biIaqe52c0qVwuhTbpwaTxUDPzXYFZR6LQTw8=
 github.com/charlienet/go-misc v0.0.0-20240911064214-e5f4643869eb h1:lnEHQjgr2ebE8+GDeyb5XrBdqu/JMZLVmSl/936AQZQ=

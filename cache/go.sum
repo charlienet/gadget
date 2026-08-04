@@ -1,3 +1,5 @@
+github.com/charlienet/gadget/logger v0.1.5 h1:B4bMA1ykupV488MbePW4+GjXtERZP7d/9lLdd0FAZE8=
+github.com/charlienet/gadget/logger v0.1.5/go.mod h1:y/Pq0DcEJUIXxYxzC0LLXw5afd92CUJThmS9Fotsom8=
 github.com/creack/pty v1.1.9/go.mod h1:oKZEueFk5CKHvIhNR5MUki03XCEU+Q6VDXinZuGJ33E=
 github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc h1:U9qPSI2PIWSS1VwoXQT9A3Wy9MM3WgvqSxFWenqJduM=
 github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=

@@ -1,5 +1,9 @@
 github.com/bluele/gcache v0.0.2 h1:WcbfdXICg7G/DGBh1PFfcirkWOQV+v077yF1pSy3DGw=
 github.com/bluele/gcache v0.0.2/go.mod h1:m15KV+ECjptwSPxKhOhQoAFQVtUFjTVkc3H8o0t/fp0=
+github.com/charlienet/gadget/cache v0.1.5 h1:GknmFBcE/JCcfLLs7UyNGog1R/WmvA4WKkFNn6Zxhzg=
+github.com/charlienet/gadget/cache v0.1.5/go.mod h1:5WBuZxiB3oB1PnLG5jnH0PS0YlL/hOpAvRQGjA7u5uw=
+github.com/charlienet/gadget/logger v0.1.5 h1:B4bMA1ykupV488MbePW4+GjXtERZP7d/9lLdd0FAZE8=
+github.com/charlienet/gadget/logger v0.1.5/go.mod h1:y/Pq0DcEJUIXxYxzC0LLXw5afd92CUJThmS9Fotsom8=
 github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc h1:U9qPSI2PIWSS1VwoXQT9A3Wy9MM3WgvqSxFWenqJduM=
 github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 h1:Jamvg5psRIccs7FGNTlIRMkT8wgtp5eCXdBlqhYGL6U=

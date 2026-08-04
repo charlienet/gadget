@@ -25,10 +25,3 @@ require (
 	golang.org/x/sync v0.8.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
-
-replace (
-	github.com/charlienet/gadget/cache => ../../../cache
-	github.com/charlienet/gadget/logger => ../../../logger
-	github.com/charlienet/gadget/redis => ../../../redis
-	github.com/charlienet/gadget/test => ../../../test
-)

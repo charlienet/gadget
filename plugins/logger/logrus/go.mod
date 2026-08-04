@@ -14,5 +14,3 @@ require (
 	github.com/stretchr/testify v1.9.0 // indirect
 	golang.org/x/sys v0.25.0 // indirect
 )
-
-replace github.com/charlienet/gadget/logger => ../../../logger

@@ -22,5 +22,3 @@ require (
 	github.com/yuin/gopher-lua v1.1.1 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
-
-replace github.com/charlienet/gadget/test => ../test
