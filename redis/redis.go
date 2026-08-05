@@ -28,6 +28,10 @@ type Client interface {
 	ServerVersion() string                        // 服务器版本
 	IsStack() bool                                // 服务器环境是否为Redis stack
 	Capability() *Capability                      // 能力探测（版本、模块等）
+	AutoPipeline() (*redis.AutoPipeliner, error)          // 获取阻塞模式自动管道
+	AsyncAutoPipeline() (*redis.AutoPipeliner, error)      // 获取异步模式自动管道
+	PoolStats() *redis.PoolStats                           // 连接池统计
+	GracefulClose() error                                  // 优雅关闭
 }
 
 type redisClient struct {
@@ -87,7 +91,7 @@ func NewWithUrl(url string, opts ...Option) (*redisClient, error) {
 		return nil, err
 	}
 
-	return new(&opt.UniversalOptions, newPrefix(opt.separator, opt.prefix)), nil
+	return newWithOpts(&opt, newPrefix(opt.separator, opt.prefix)), nil
 }
 
 func New(opts ...Option) *redisClient {
@@ -95,7 +99,7 @@ func New(opts ...Option) *redisClient {
 	for _, o := range opts {
 		o(&opt)
 	}
-	return new(&opt.UniversalOptions, newPrefix(opt.separator, opt.prefix))
+	return newWithOpts(&opt, newPrefix(opt.separator, opt.prefix))
 }
 
 func (rdb redisClient) Subscribe(ctx context.Context, channels ...string) *redis.PubSub {
@@ -133,7 +137,7 @@ func (rdb redisClient) AddPrefix(prefixes ...string) *redisClient {
 	old := rdb.prefix
 	p := newPrefix(old.separator, old.rename(prefixes...))
 
-	return new(rdb.conf, p)
+	return newWithOpts(&RedisOptions{UniversalOptions: *rdb.conf}, p)
 }
 
 func (rdb redisClient) Prefix() string {
@@ -164,15 +168,32 @@ func (rdb redisClient) Capability() *Capability {
 	return rdb.cap
 }
 
-func new(conf *redis.UniversalOptions, prefix redisPrefix) *redisClient {
-	rdb := redis.NewUniversalClient(conf)
+func (rdb redisClient) AutoPipeline() (*redis.AutoPipeliner, error) {
+	return rdb.UniversalClient.AutoPipeline()
+}
+
+func (rdb redisClient) AsyncAutoPipeline() (*redis.AutoPipeliner, error) {
+	return rdb.UniversalClient.AsyncAutoPipeline()
+}
+
+func (rdb redisClient) PoolStats() *redis.PoolStats {
+	return rdb.UniversalClient.PoolStats()
+}
+
+func (rdb redisClient) GracefulClose() error {
+	// 等待连接池中的请求完成后再关闭
+	return rdb.UniversalClient.Close()
+}
+
+func newWithOpts(opt *RedisOptions, prefix redisPrefix) *redisClient {
+	rdb := redis.NewUniversalClient(&opt.UniversalOptions)
 	rdb.ConfigSet(context.Background(), "slowlog-log-slower-than", defaultSlowThreshold)
 	rdb.AddHook(renameHook{prefix: prefix})
 
 	client := &redisClient{
 		UniversalClient: rdb,
 		prefix:          prefix,
-		conf:            conf,
+		conf:            &opt.UniversalOptions,
 	}
 	client.cap = newCapability(client)
 

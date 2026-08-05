@@ -81,7 +81,8 @@ func (r renameHook) renameKey(cmd redis.Cmder) {
 		"UNSUBSCRIBE", "PUNSUBSCRIBE", "SUNSUBSCRIBE",
 		"WAIT", "WAITAOF",
 		// TimeSeries: 无key
-		"TS.QUERYINDEX", "TS.MRANGE", "TS.MREVRANGE", "TS.MGET":
+		"TS.QUERYINDEX", "TS.MRANGE", "TS.MREVRANGE", "TS.MGET",
+		"TS.QUERYLABELS":
 		return
 	}
 
@@ -96,6 +97,7 @@ func (r renameHook) renameKey(cmd redis.Cmder) {
 		"RENAME", "RENAMENX", "RPOPLPUSH",
 		"SDIFF", "SDIFFSTORE", "SINTER", "SINTERSTORE",
 		"SUNION", "SUNIONSTORE",
+		"SUNIONCARD", "SDIFFCARD",
 		"TOUCH",
 		"UNLINK",
 		"WATCH":
@@ -169,9 +171,11 @@ func (r renameHook) renameKey(cmd redis.Cmder) {
 	// 模式G: 固定双key — args[1]和args[2]都是key，后面可能有选项参数
 	// COPY src dest [DB...], LCS key1 key2 [LEN...]
 	// LMOVE src dest LEFT|RIGHT..., BLMOVE src dest LEFT|RIGHT... timeout
+	// LMOVEM src dest LEFT|RIGHT... element [element...], BLMOVEM ... timeout
 	// TS.CREATERULE sourceKey destKey [AGGREGATE...]
 	// TS.DELETERULE sourceKey destKey
-	case "COPY", "LCS", "LMOVE", "BLMOVE", "ZRANGESTORE", "GEOSEARCHSTORE",
+	case "COPY", "LCS", "LMOVE", "BLMOVE", "LMOVEM", "BLMOVEM",
+		"ZRANGESTORE", "GEOSEARCHSTORE",
 		"TS.CREATERULE", "TS.DELETERULE":
 		if len(args) >= 3 {
 			r.rename(args, 1, 2)
@@ -207,8 +211,8 @@ func (r renameHook) renameKey(cmd redis.Cmder) {
 
 	// 模式J: 特殊命令处理
 	case "XREAD", "XREADGROUP":
-		// XREAD [COUNT count] [BLOCK ms] STREAMS key [key...] id [id...]
-		// XREADGROUP GROUP group consumer [COUNT count] [BLOCK ms] [NOACK] STREAMS key [key...] id [id...]
+		// XREAD [COUNT count] [BLOCK ms] [MAXCOUNT count] [MAXSIZE size] STREAMS key [key...] id [id...]
+		// XREADGROUP GROUP group consumer [COUNT count] [BLOCK ms] [NOACK] [MAXCOUNT count] [MAXSIZE size] STREAMS key [key...] id [id...]
 		// 找到 STREAMS 关键字的位置，然后重命名其后的 key（前半部分是 key，后半部分是 id）
 		streamsIndex := -1
 		for i, arg := range args {
@@ -225,6 +229,21 @@ func (r renameHook) renameKey(cmd redis.Cmder) {
 				r.rename(args, createSepuence(streamsIndex+1, streamsIndex+1+keyCount, 1)...)
 			}
 		}
+
+	case "HIMPORT":
+		// HIMPORT key field value [field value...]
+		// args[1] 是 key，后面是 field/value 对
+		r.rename(args, 1)
+
+	case "TS.READ":
+		// TS.READ key [LATEST] [FROM_TIMESTAMP] [TO_TIMESTAMP] [FILTER_BY_TS ts...] [FILTER_BY_VALUE min max] [COUNT count] [[ALIGN align] AGGREGATION aggregator bucketDuration [BUCKETTIMESTAMP bt] [EMPTY]]
+		// args[1] 是 key
+		r.rename(args, 1)
+
+	case "TS.NRANGE", "TS.NREVRANGE":
+		// TS.NRANGE key [LATEST] FROM_TIMESTAMP TO_TIMESTAMP [FILTER_BY_TS ts...] [FILTER_BY_VALUE min max] [COUNT count] [[ALIGN align] AGGREGATION aggregator bucketDuration [BUCKETTIMESTAMP bt] [EMPTY]]
+		// args[1] 是 key
+		r.rename(args, 1)
 
 	case "SORT":
 		// SORT key [BY pattern] [LIMIT offset count] [GET pattern [GET pattern ...]] [ASC|DESC] [ALPHA] [STORE dest]

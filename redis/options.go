@@ -61,3 +61,30 @@ func WithPrefix(prefix string) Option {
 		o.prefix = prefix
 	}
 }
+
+// WithProtocol 设置 RESP 协议版本（2 或 3）
+// 客户端缓存需要 Protocol: 3
+func WithProtocol(protocol int) Option {
+	return func(ro *RedisOptions) {
+		ro.Protocol = protocol
+	}
+}
+
+// WithClientSideCache 启用客户端缓存（实验性功能）
+// 要求：Protocol 必须为 3，仅支持独立客户端，仅支持 DB 0
+func WithClientSideCache(config *redis.ClientSideCacheConfig) Option {
+	return func(ro *RedisOptions) {
+		ro.UniversalOptions.ClientSideCacheConfig = config
+		if ro.Protocol == 0 {
+			ro.Protocol = 3
+		}
+	}
+}
+
+// WithAutoPipeline 设置自动管道的默认配置（实验性功能）
+// 设置后，通过 AutoPipeline() 或 AsyncAutoPipeline() 获取管道实例
+func WithAutoPipeline(opts *redis.AutoPipelineOptions) Option {
+	return func(ro *RedisOptions) {
+		ro.UniversalOptions.AutoPipelineOptions = opts
+	}
+}
