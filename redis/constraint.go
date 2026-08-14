@@ -9,10 +9,12 @@ import (
 	"github.com/hashicorp/go-version"
 )
 
-type constraintFunc func(redisClient) error
+// Constraint 是实例约束函数：对 client 进行校验，返回非 nil 错误表示约束不满足。
+// 通过 Client.Constraint/MustConstraint 执行，可自定义扩展。
+type Constraint func(Client) error
 
-func Ping() constraintFunc {
-	return func(rc redisClient) error {
+func Ping() Constraint {
+	return func(rc Client) error {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second*3)
 		defer cancel()
 
@@ -20,8 +22,8 @@ func Ping() constraintFunc {
 	}
 }
 
-func Version(expended string) constraintFunc {
-	return func(rc redisClient) error {
+func Version(expended string) Constraint {
+	return func(rc Client) error {
 		v := rc.ServerVersion()
 		if len(v) == 0 {
 			return errors.New("version not obtained")

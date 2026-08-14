@@ -400,17 +400,69 @@ func TestRenameHook_DefaultMode(t *testing.T) {
 	assert.Equal(t, []interface{}{"SET", "test:key2", "value"}, cmd2.Args(), "Default mode should rename first argument")
 }
 
-func TestRenameHook_PubsubNoRename(t *testing.T) {
+func TestRenameHook_PubsubPrefix(t *testing.T) {
 	prefix := newPrefix(":", "test")
 	hook := renameHook{prefix: prefix}
 
-	// PUBSUB 命令不应该重命名参数
-	cmd := createMockCmd("PUBSUB", "CHANNELS", "pattern")
-	originalArgs := make([]interface{}, len(cmd.Args()))
-	copy(originalArgs, cmd.Args())
-	
-	hook.renameKey(cmd)
-	
-	// 验证参数没有变化
-	assert.Equal(t, originalArgs, cmd.Args(), "PUBSUB command should not have modified arguments")
+	// PUBSUB 查询命令与 Subscribe/Publish 对称加前缀
+	testCases := []struct {
+		name     string
+		input    []interface{}
+		expected []interface{}
+	}{
+		// CHANNELS 后的 pattern 对应 PSubscribe，加前缀
+		{"PUBSUB", []interface{}{"PUBSUB", "CHANNELS", "cache:*"}, []interface{}{"PUBSUB", "CHANNELS", "test:cache:*"}},
+		{"PUBSUB", []interface{}{"PUBSUB", "CHANNELS"}, []interface{}{"PUBSUB", "CHANNELS"}},
+		// NUMSUB 后的 channel 对应 Subscribe，加前缀
+		{"PUBSUB", []interface{}{"PUBSUB", "NUMSUB", "chan1", "chan2"}, []interface{}{"PUBSUB", "NUMSUB", "test:chan1", "test:chan2"}},
+		{"PUBSUB", []interface{}{"PUBSUB", "NUMSUB"}, []interface{}{"PUBSUB", "NUMSUB"}},
+		// NUMPAT 无 channel/pattern，不重命名
+		{"PUBSUB", []interface{}{"PUBSUB", "NUMPAT"}, []interface{}{"PUBSUB", "NUMPAT"}},
+	}
+
+	for _, tc := range testCases {
+		cmd := createMockCmd(tc.name, tc.input[1:]...) // Skip command name in input
+		hook.renameKey(cmd)
+		assert.Equal(t, tc.expected, cmd.Args(), "PUBSUB %v should have handled channels symmetrically", tc.input)
+	}
+
+	// PUBLISH 的 channel 与 Subscribe 对称加前缀
+	pubCmd := createMockCmd("PUBLISH", "chan1", "hello")
+	hook.renameKey(pubCmd)
+	assert.Equal(t, []interface{}{"PUBLISH", "test:chan1", "hello"}, pubCmd.Args())
+}
+
+func TestRenameHook_StreamSubcommands(t *testing.T) {
+	prefix := newPrefix(":", "test")
+	hook := renameHook{prefix: prefix}
+
+	// Stream 子命令：首参数为子命令，key 在 args[2]；stream listener 实际使用的命令
+	testCases := []struct {
+		name     string
+		input    []interface{}
+		expected []interface{}
+	}{
+		// XGROUP：子命令后才是 key
+		{"XGROUP", []interface{}{"XGROUP", "CREATE", "stream1", "group1", "0"}, []interface{}{"XGROUP", "CREATE", "test:stream1", "group1", "0"}},
+		{"XGROUP", []interface{}{"XGROUP", "DESTROY", "stream1", "group1"}, []interface{}{"XGROUP", "DESTROY", "test:stream1", "group1"}},
+		{"XGROUP", []interface{}{"XGROUP", "CREATECONSUMER", "stream1", "group1", "c1"}, []interface{}{"XGROUP", "CREATECONSUMER", "test:stream1", "group1", "c1"}},
+		{"XGROUP", []interface{}{"XGROUP", "HELP"}, []interface{}{"XGROUP", "HELP"}},
+		// XINFO：子命令后才是 key
+		{"XINFO", []interface{}{"XINFO", "STREAM", "stream1"}, []interface{}{"XINFO", "STREAM", "test:stream1"}},
+		{"XINFO", []interface{}{"XINFO", "GROUPS", "stream1"}, []interface{}{"XINFO", "GROUPS", "test:stream1"}},
+		{"XINFO", []interface{}{"XINFO", "CONSUMERS", "stream1", "group1"}, []interface{}{"XINFO", "CONSUMERS", "test:stream1", "group1"}},
+		{"XINFO", []interface{}{"XINFO", "HELP"}, []interface{}{"XINFO", "HELP"}},
+		// XPENDING：无子命令，key 在 args[1]
+		{"XPENDING", []interface{}{"XPENDING", "stream1", "group1", "-", "+", "10"}, []interface{}{"XPENDING", "test:stream1", "group1", "-", "+", "10"}},
+		// stream listener 使用的其他命令
+		{"XADD", []interface{}{"XADD", "stream1", "*", "key", "v"}, []interface{}{"XADD", "test:stream1", "*", "key", "v"}},
+		{"XACK", []interface{}{"XACK", "stream1", "group1", "1-1"}, []interface{}{"XACK", "test:stream1", "group1", "1-1"}},
+		{"XTRIM", []interface{}{"XTRIM", "stream1", "MAXLEN", "100"}, []interface{}{"XTRIM", "test:stream1", "MAXLEN", "100"}},
+	}
+
+	for _, tc := range testCases {
+		cmd := createMockCmd(tc.name, tc.input[1:]...) // Skip command name in input
+		hook.renameKey(cmd)
+		assert.Equal(t, tc.expected, cmd.Args(), "Command %s should have handled stream keys correctly", tc.name)
+	}
 }

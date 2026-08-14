@@ -12,6 +12,34 @@ type renameHook struct {
 	prefix redisPrefix
 }
 
+// PrefixHook 创建一个透明改写键前缀的 go-redis Hook。
+// 注册到 go-redis client 后（client.AddHook(hook)），普通命令中的 key
+// 会自动添加 prefix（以 separator 分隔），实现统一键前缀。
+// 传空 prefix 时 hook 直通（不做任何改写），等价于未注册。
+//
+// Pub/Sub 边界：go-redis 的 SUBSCRIBE/PSUBSCRIBE 走专用连接，不经
+// ProcessHook，因此 channel 前缀仅在 Publish 端生效；独立使用本 hook 时，
+// 订阅端需使用 SubscribeWithPrefix 帮助函数显式加前缀，保证两端对称。
+// （本库 redisClient.Subscribe 等包装方法已内置加前缀逻辑，无需额外处理。）
+//
+// 典型用法：
+//
+//	rdb := redis.NewClient(...)
+//	rdb.AddHook(redis.PrefixHook("myapp", ":"))
+func PrefixHook(prefix, separator string) redis.Hook {
+	return renameHook{prefix: newPrefix(separator, prefix)}
+}
+
+// SubscribeWithPrefix 在外部 go-redis client 上订阅指定 channel，并给每个
+// channel 添加前缀（与 PrefixHook 的 Publish 端规则一致，内部即 newPrefix +
+// renames）。用于 PrefixHook 独立用法下的 pub/sub 对称：
+// PUBLISH 经 hook 加前缀，而 go-redis 的 PubSub 订阅走专用连接不经
+// ProcessHook，订阅端必须显式加前缀，否则两端不对称静默失联。
+func SubscribeWithPrefix(uc redis.UniversalClient, prefix, separator string, channels ...string) *redis.PubSub {
+	p := newPrefix(separator, prefix)
+	return uc.Subscribe(context.Background(), p.renames(channels...)...)
+}
+
 func (r renameHook) DialHook(next redis.DialHook) redis.DialHook {
 	return func(ctx context.Context, network, addr string) (net.Conn, error) {
 		return next(ctx, network, addr)
@@ -64,6 +92,7 @@ func (r renameHook) renameKey(cmd redis.Cmder) {
 	// 模式A: 无KEY指令 — 所有参数都不是key
 	switch cmdName {
 	case
+		"ACL", // ACL 首参数为子命令（SETUSER/GETUSER/CAT/WHOAMI 等），非 key
 		"AUTH", "BGREWRITEAOF", "BGSAVE",
 		"CLIENT", "CLUSTER", "COMMAND", "CONFIG",
 		"DBSIZE",
@@ -159,12 +188,23 @@ func (r renameHook) renameKey(cmd redis.Cmder) {
 
 	// 模式F: 子命令后有key — args[2]为key
 	// OBJECT ENCODING key / MEMORY USAGE key / DEBUG OBJECT key
+	// 注意：OBJECT HELP / MEMORY HELP / MEMORY STATS / MEMORY DOCTOR /
+	// MEMORY PURGE 等子命令无 key，显式排除避免误伤。
 	case "OBJECT":
 		if len(args) >= 3 {
+			if sub, ok := args[1].(string); ok && strings.ToUpper(sub) == "HELP" {
+				return
+			}
 			r.rename(args, 2)
 		}
 	case "MEMORY":
 		if len(args) >= 3 {
+			if sub, ok := args[1].(string); ok {
+				switch strings.ToUpper(sub) {
+				case "HELP", "STATS", "DOCTOR", "PURGE": // 无 key 的诊断子命令
+					return
+				}
+			}
 			r.rename(args, 2)
 		}
 
@@ -247,17 +287,28 @@ func (r renameHook) renameKey(cmd redis.Cmder) {
 
 	case "SORT":
 		// SORT key [BY pattern] [LIMIT offset count] [GET pattern [GET pattern ...]] [ASC|DESC] [ALPHA] [STORE dest]
-		// args[1] 是 key（已被 default 处理），还需要处理 STORE 后面的 dest key
+		// args[1] 是 key；STORE 后的 dest 是 key；BY/GET 后的 pattern 形如
+		// "weight_*"/"object_*"，其中 * 会被排序元素的字段值替换，pattern 整体
+		// 也视为键模式加前缀（* 保留在内部，替换后前缀仍正确）。
 		r.rename(args, 1) // 处理主 key
-		storeIndex := -1
-		for i, arg := range args {
-			if str, ok := arg.(string); ok && strings.ToUpper(str) == "STORE" {
-				storeIndex = i
-				break
+		for i := 2; i < len(args); i++ {
+			str, ok := args[i].(string)
+			if !ok {
+				continue
 			}
-		}
-		if storeIndex != -1 && storeIndex+1 < len(args) {
-			r.rename(args, storeIndex+1) // 重命名 STORE 后的 dest key
+			switch strings.ToUpper(str) {
+			case "BY", "GET":
+				// pattern 含 * 通配符才加前缀；不含 *（如 BY nosort）不处理
+				if i+1 < len(args) {
+					if pat, ok := args[i+1].(string); ok && strings.Contains(pat, "*") {
+						r.rename(args, i+1)
+					}
+				}
+			case "STORE":
+				if i+1 < len(args) {
+					r.rename(args, i+1) // 重命名 STORE 后的 dest key
+				}
+			}
 		}
 
 	case "GEORADIUS", "GEORADIUSBYMEMBER":
@@ -283,11 +334,44 @@ func (r renameHook) renameKey(cmd redis.Cmder) {
 			}
 		}
 
+	case "PUBLISH":
+		// PUBLISH channel message
+		// channel 与 Subscribe（redis.go 的 Subscribe 显式加前缀）同规则加前缀，
+		// 保证包装内外自洽：Publish 加前缀 → Subscribe 加前缀 → 两端一致。
+		// 注意：SUBSCRIBE/PSUBSCRIBE/SSUBSCRIBE 由 redis.go 包装方法显式加前缀，
+		// hook 不重复处理（见模式A排除列表），此处保持对称。
+		if len(args) >= 2 {
+			r.rename(args, 1)
+		}
+
 	case "PUBSUB":
 		// PUBSUB CHANNELS [pattern] / PUBSUB NUMSUB [channel [channel ...]] / PUBSUB NUMPAT
-		// channel/pattern 不是 key，不需要添加前缀
-		// 此分支保留以明确处理该命令，但不执行任何重命名操作
-		return
+		// channel/pattern 与 Subscribe/PSubscribe 对称加前缀：
+		//   - CHANNELS 后的 pattern 对应 PSubscribe（redis.go 显式加前缀）
+		//   - NUMSUB 后的 channel 对应 Subscribe（redis.go 显式加前缀）
+		// NUMPAT/HELP 无 channel/pattern，不做处理。
+		if len(args) >= 3 {
+			if sub, ok := args[1].(string); ok {
+				switch strings.ToUpper(sub) {
+				case "CHANNELS", "NUMSUB":
+					r.rename(args, createSepuence(2, len(args), 1)...)
+				}
+			}
+		}
+
+	case "XGROUP", "XINFO":
+		// XGROUP CREATE|SETID|DESTROY|CREATECONSUMER|DELCONSUMER key group [id]...
+		// XINFO STREAM|GROUPS|CONSUMERS key [group]...
+		// 首参数是子命令，key 在 args[2]；子命令为 HELP 时无 key
+		if len(args) >= 3 {
+			if sub, ok := args[1].(string); ok && strings.ToUpper(sub) == "HELP" {
+				return
+			}
+			r.rename(args, 2)
+		}
+
+	// XPENDING key group [IDLE min-idle-time] start end count [consumer]
+	// 无子命令，key 在 args[1]，由 default 分支处理，无需单独分支
 
 	default:
 		// 默认模式: 第一个参数为键值（覆盖90%+的命令）
@@ -298,6 +382,11 @@ func (r renameHook) renameKey(cmd redis.Cmder) {
 func (r renameHook) rename(args []any, indexes ...int) {
 	for _, i := range indexes {
 		if key, ok := args[i].(string); ok {
+			// 约定：调用方传入的 key 不应自带前缀（前缀由本 hook 统一添加）。
+			// 因此这里不做 HasPrefix 幂等检查——若手动拼好前缀后再传入，
+			// 会二次加前缀。不做检查的原因：无法可靠区分「已带前缀的 key」
+			// 与「恰好以 prefix 开头的业务 key」，检查反而引入歧义；
+			// 需要手动拼前缀的场景请使用 ComposeKey 后仍走本 hook 的规则。
 			newKey := r.prefix.rename(key)
 			args[i] = newKey
 		}

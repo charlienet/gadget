@@ -4,6 +4,8 @@ import (
 	"context"
 	"hash/fnv"
 	"math"
+
+	goredis "github.com/redis/go-redis/v9"
 )
 
 // BloomFilter is a Bloom filter backed by Redis. It automatically uses native
@@ -231,8 +233,63 @@ func hashSalt(item string) string {
 	return "\x92" + item + "\x71"
 }
 
+// --- Lua 原子化脚本 ---
+// bitmap 路径的 add/exists 通过 Lua 脚本在服务端一次往返完成：
+// 原实现是 exists（k 次 GETBIT）+ k 次 SETBIT 的多命令往返，既慢又存在
+// 非原子窗口（并发添加同一 item 可能重复返回"新添加"）。脚本化后单次
+// EVAL 完成全部位操作，保证语义与原实现一致且原子。
+
+var (
+	// bitmapAddScript 原子添加：逐位 GETBIT 检查、SETBIT 置位，
+	// 返回 1 表示 item 之前完全不存在（新添加），0 表示已存在。
+	bitmapAddScript = goredis.NewScript(`
+		local all_zero = 1
+		for i = 1, #ARGV do
+			local bit = redis.call('GETBIT', KEYS[1], ARGV[i])
+			if bit == 1 then
+				all_zero = 0
+			else
+				redis.call('SETBIT', KEYS[1], ARGV[i], 1)
+			end
+		end
+		return all_zero
+	`)
+
+	// bitmapExistsScript 原子存在性检查：任一位置为 0 即不存在，返回 0。
+	bitmapExistsScript = goredis.NewScript(`
+		for i = 1, #ARGV do
+			if redis.call('GETBIT', KEYS[1], ARGV[i]) == 0 then
+				return 0
+			end
+		end
+		return 1
+	`)
+)
+
+// positions 将 item 的 k 个哈希位转为脚本参数（[]uint64 → []interface{}）。
+func (b *bitmapImpl) positions(item string) []interface{} {
+	hashs := b.hashs(item)
+	args := make([]interface{}, len(hashs))
+	for i, p := range hashs {
+		args[i] = p
+	}
+	return args
+}
+
 func (b *bitmapImpl) add(ctx context.Context, item string) (bool, error) {
-	exists, err := b.exists(ctx, item)
+	added, err := bitmapAddScript.Run(ctx, b.client, []string{b.key}, b.positions(item)...).Int()
+	if err == nil {
+		// Lua 脚本返回 1 = 新添加（item 之前完全不存在）
+		return added == 1, nil
+	}
+
+	// 服务器不支持 Lua（如代理类服务器）时回退到非原子多命令实现
+	return b.addFallback(ctx, item)
+}
+
+// addFallback 非原子回退：exists + k 次 SetBit 多往返，语义与原实现一致。
+func (b *bitmapImpl) addFallback(ctx context.Context, item string) (bool, error) {
+	exists, err := b.existsFallback(ctx, item)
 	if err != nil {
 		return false, err
 	}
@@ -252,6 +309,17 @@ func (b *bitmapImpl) Add(ctx context.Context, item string) (bool, error) {
 }
 
 func (b *bitmapImpl) exists(ctx context.Context, item string) (bool, error) {
+	exists, err := bitmapExistsScript.Run(ctx, b.client, []string{b.key}, b.positions(item)...).Int()
+	if err == nil {
+		return exists == 1, nil
+	}
+
+	// 服务器不支持 Lua 时回退到多命令实现
+	return b.existsFallback(ctx, item)
+}
+
+// existsFallback 非原子回退：k 次 GetBit 逐位检查。
+func (b *bitmapImpl) existsFallback(ctx context.Context, item string) (bool, error) {
 	for _, pos := range b.hashs(item) {
 		bit, err := b.client.GetBit(ctx, b.key, int64(pos)).Result()
 		if err != nil {

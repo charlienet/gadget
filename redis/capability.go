@@ -19,7 +19,6 @@ type Capability struct {
 	version    string
 	versionSem *version.Version
 	modules    []moduleInfo
-	stack      bool
 }
 
 type moduleInfo struct {
@@ -32,7 +31,8 @@ func newCapability(rdb *redisClient) *Capability {
 }
 
 // Probe sends INFO commands to the server and caches version and module info.
-// Returns an error only if the server is unreachable.
+// 探测失败（如服务器不可达）时返回真实错误，且不标记缓存就绪，
+// 后续访问会重新探测（见 ensureLoaded）。
 func (c *Capability) Probe(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -47,37 +47,43 @@ func (c *Capability) Refresh() {
 }
 
 func (c *Capability) probeLocked(ctx context.Context) error {
-	c.ready = true
+	// 注意：探测全部成功（INFO 命令执行成功）才置 ready=true；
+	// 任一探测失败直接返回错误，ready 保持 false，后续访问会重试（见 ensureLoaded）。
 
 	// --- Server version ---
 	info, err := c.rdb.Info(ctx, "Server").Result()
-	if err == nil {
-		for _, line := range strings.Split(info, "\r\n") {
-			if after, found := strings.CutPrefix(line, "redis_version:"); found {
-				c.version = after
-				if v, err := version.NewVersion(after); err == nil {
-					c.versionSem = v
-				}
-				break
+	if err != nil {
+		return err
+	}
+	c.version = ""
+	c.versionSem = nil
+	for _, line := range strings.Split(info, "\r\n") {
+		if after, found := strings.CutPrefix(line, "redis_version:"); found {
+			c.version = after
+			if v, err := version.NewVersion(after); err == nil {
+				c.versionSem = v
 			}
+			break
 		}
 	}
 
 	// --- Modules ---
 	modInfo, err := c.rdb.Info(ctx, "Modules").Result()
-	if err == nil {
-		c.modules = c.modules[:0]
-		for _, line := range strings.Split(modInfo, "\r\n") {
-			if after, found := strings.CutPrefix(line, "module:"); found {
-				m := parseModuleLine(after)
-				if m.Name != "" {
-					c.modules = append(c.modules, m)
-				}
+	if err != nil {
+		return err
+	}
+	c.modules = c.modules[:0]
+	for _, line := range strings.Split(modInfo, "\r\n") {
+		if after, found := strings.CutPrefix(line, "module:"); found {
+			m := parseModuleLine(after)
+			if m.Name != "" {
+				c.modules = append(c.modules, m)
 			}
 		}
-		c.stack = len(c.modules) > 0
 	}
 
+	// 两条 INFO 均成功，标记缓存就绪
+	c.ready = true
 	return nil
 }
 
@@ -107,7 +113,9 @@ func (c *Capability) ensureLoaded() {
 	ready := c.ready
 	c.mu.Unlock()
 	if !ready {
-		c.Probe(context.Background())
+		// 惰性探测：失败静默忽略（错误详情可通过主动调用 Probe 获取），
+		// 且 ready 保持 false，后续访问会重试，避免探测失败被永久缓存。
+		_ = c.Probe(context.Background())
 	}
 }
 
@@ -134,14 +142,6 @@ func (c *Capability) VersionAtLeast(minVersion string) bool {
 	return constraint.Check(c.versionSem)
 }
 
-// IsStack returns true if any Redis Stack modules are loaded.
-func (c *Capability) IsStack() bool {
-	c.ensureLoaded()
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.stack
-}
-
 // HasModule returns true if a module with the given name is loaded.
 // Matching is case-insensitive.
 func (c *Capability) HasModule(name string) bool {
@@ -161,6 +161,7 @@ func (c *Capability) HasJSON() bool        { return c.HasModule("ReJSON") }
 func (c *Capability) HasSearch() bool      { return c.HasModule("search") }
 func (c *Capability) HasBloom() bool       { return c.HasModule("bf") }
 func (c *Capability) HasCuckoo() bool      { return c.HasModule("cf") }
+func (c *Capability) HasCMS() bool         { return c.HasModule("cms") }
 func (c *Capability) HasTimeSeries() bool  { return c.HasModule("timeseries") }
 func (c *Capability) HasTopK() bool        { return c.HasModule("topk") }
 func (c *Capability) HasTDigest() bool     { return c.HasModule("tdigest") }

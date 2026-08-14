@@ -62,6 +62,13 @@ func WithPrefix(prefix string) Option {
 	}
 }
 
+// WithSeparator 设置键前缀分隔符（默认 ":"），与 WithPrefix 配套使用。
+func WithSeparator(separator string) Option {
+	return func(o *RedisOptions) {
+		o.separator = separator
+	}
+}
+
 // WithProtocol 设置 RESP 协议版本（2 或 3）
 // 客户端缓存需要 Protocol: 3
 func WithProtocol(protocol int) Option {
@@ -74,7 +81,7 @@ func WithProtocol(protocol int) Option {
 // 要求：Protocol 必须为 3，仅支持独立客户端，仅支持 DB 0
 func WithClientSideCache(config *redis.ClientSideCacheConfig) Option {
 	return func(ro *RedisOptions) {
-		ro.UniversalOptions.ClientSideCacheConfig = config
+		ro.ClientSideCacheConfig = config
 		if ro.Protocol == 0 {
 			ro.Protocol = 3
 		}
@@ -85,6 +92,6 @@ func WithClientSideCache(config *redis.ClientSideCacheConfig) Option {
 // 设置后，通过 AutoPipeline() 或 AsyncAutoPipeline() 获取管道实例
 func WithAutoPipeline(opts *redis.AutoPipelineOptions) Option {
 	return func(ro *RedisOptions) {
-		ro.UniversalOptions.AutoPipelineOptions = opts
+		ro.AutoPipelineOptions = opts
 	}
 }
