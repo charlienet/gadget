@@ -46,9 +46,13 @@ type BloomInfo struct {
 type BloomOption func(*bloomConfig)
 
 type bloomConfig struct {
+	failPolicyConfig
 	capacity      int64
 	falsePositive float64
 }
+
+// BloomConfig 是 BloomFilter 的配置类型别名，供 WithFailPolicy 泛型参数使用。
+type BloomConfig = bloomConfig
 
 func defaultBloomConfig() bloomConfig {
 	return bloomConfig{
@@ -77,14 +81,17 @@ func WithFalsePositive(rate float64) BloomOption {
 
 // NewBloomFilter creates a BloomFilter for the given key. The implementation
 // is auto-selected based on the server's capabilities.
+// 失效兜底策略默认 FailOpen（过滤器是保护性能力：服务不可用时防穿透失效但
+// 放行业务）；可用 WithFailPolicy 显式改为 FailClosed。
 func (rdb *redisClient) NewBloomFilter(key string, opts ...BloomOption) BloomFilter {
 	cfg := defaultBloomConfig()
+	cfg.policy = FailOpen // 过滤器默认 FailOpen：宁可放行不阻塞业务
 	for _, o := range opts {
 		o(&cfg)
 	}
 
 	if rdb.cap.HasBloom() {
-		return &bfCmdImpl{client: rdb, key: key, cfg: cfg}
+		return &bfCmdImpl{client: rdb, key: key, cfg: cfg, policy: cfg.policy}
 	}
 	return newBitmapImpl(rdb, key, cfg)
 }
@@ -105,14 +112,48 @@ type bfCmdImpl struct {
 	client *redisClient
 	key    string
 	cfg    bloomConfig
+	policy FailPolicy // 失效兜底策略（默认 FailOpen）
+}
+
+// fallbackBool 按策略返回布隆过滤器兜底值 + 哨兵错误：FailOpen → true
+// （视为已添加/存在）；FailClosed → false。错误为 ErrRedisUnavailable 包装。
+func (b *bfCmdImpl) fallbackBool(err error) (bool, error) {
+	if b.policy == FailOpen {
+		return true, fallbackErr(err)
+	}
+	return false, fallbackErr(err)
+}
+
+// fallbackBools 返回 AddMulti/ExistsMulti 的兜底切片：FailOpen → 全 true；
+// FailClosed → 全 false。
+func (b *bfCmdImpl) fallbackBools(n int, err error) ([]bool, error) {
+	res := make([]bool, n)
+	for i := range res {
+		res[i] = b.policy == FailOpen
+	}
+	return res, fallbackErr(err)
 }
 
 func (b *bfCmdImpl) Add(ctx context.Context, item string) (bool, error) {
-	return b.client.BFAdd(ctx, b.key, item).Result()
+	added, err := b.client.BFAdd(ctx, b.key, item).Result()
+	if err != nil {
+		if isUnavailable(err) {
+			return b.fallbackBool(err)
+		}
+		return false, err
+	}
+	return added, nil
 }
 
 func (b *bfCmdImpl) Exists(ctx context.Context, item string) (bool, error) {
-	return b.client.BFExists(ctx, b.key, item).Result()
+	exists, err := b.client.BFExists(ctx, b.key, item).Result()
+	if err != nil {
+		if isUnavailable(err) {
+			return b.fallbackBool(err)
+		}
+		return false, err
+	}
+	return exists, nil
 }
 
 func toInterfaceSlice(items []string) []interface{} {
@@ -131,6 +172,9 @@ func (b *bfCmdImpl) AddMulti(ctx context.Context, items ...string) ([]bool, erro
 	// BF.MADD returns ints: 1 if newly inserted, 0 if already present
 	added, err := b.client.BFMAdd(ctx, b.key, toInterfaceSlice(items)...).Result()
 	if err != nil {
+		if isUnavailable(err) {
+			return b.fallbackBools(len(items), err)
+		}
 		return nil, err
 	}
 
@@ -144,6 +188,9 @@ func (b *bfCmdImpl) ExistsMulti(ctx context.Context, items ...string) ([]bool, e
 
 	results, err := b.client.BFMExists(ctx, b.key, toInterfaceSlice(items)...).Result()
 	if err != nil {
+		if isUnavailable(err) {
+			return b.fallbackBools(len(items), err)
+		}
 		return nil, err
 	}
 	return results, nil
@@ -152,6 +199,10 @@ func (b *bfCmdImpl) ExistsMulti(ctx context.Context, items ...string) ([]bool, e
 func (b *bfCmdImpl) Info(ctx context.Context) (*BloomInfo, error) {
 	info, err := b.client.BFInfo(ctx, b.key).Result()
 	if err != nil {
+		if isUnavailable(err) {
+			// Info 非关键：兜底返回空结构体 + 哨兵错误（errors.Is 可感知）
+			return &BloomInfo{}, fallbackErr(err)
+		}
 		return nil, err
 	}
 
@@ -172,6 +223,7 @@ type bitmapImpl struct {
 	m        uint64 // bitmap size in bits
 	k        uint   // number of hash functions
 	capacity int64
+	policy   FailPolicy // 失效兜底策略（默认 FailOpen）
 }
 
 func newBitmapImpl(client *redisClient, key string, cfg bloomConfig) *bitmapImpl {
@@ -184,7 +236,16 @@ func newBitmapImpl(client *redisClient, key string, cfg bloomConfig) *bitmapImpl
 		m:        m,
 		k:        k,
 		capacity: cfg.capacity,
+		policy:   cfg.policy,
 	}
+}
+
+// fallbackBool 按策略返回布隆过滤器兜底值 + 哨兵错误（与 bfCmdImpl 语义一致）。
+func (b *bitmapImpl) fallbackBool(err error) (bool, error) {
+	if b.policy == FailOpen {
+		return true, fallbackErr(err)
+	}
+	return false, fallbackErr(err)
 }
 
 // bloomBitCount computes optimal bitmap size (m bits) using:
@@ -282,7 +343,10 @@ func (b *bitmapImpl) add(ctx context.Context, item string) (bool, error) {
 		// Lua 脚本返回 1 = 新添加（item 之前完全不存在）
 		return added == 1, nil
 	}
-
+	// 服务不可用：直接兜底（fallback 同样会失败）
+	if isUnavailable(err) {
+		return b.fallbackBool(err)
+	}
 	// 服务器不支持 Lua（如代理类服务器）时回退到非原子多命令实现
 	return b.addFallback(ctx, item)
 }
@@ -291,11 +355,17 @@ func (b *bitmapImpl) add(ctx context.Context, item string) (bool, error) {
 func (b *bitmapImpl) addFallback(ctx context.Context, item string) (bool, error) {
 	exists, err := b.existsFallback(ctx, item)
 	if err != nil {
+		if isUnavailable(err) {
+			return b.fallbackBool(err)
+		}
 		return false, err
 	}
 
 	for _, pos := range b.hashs(item) {
 		if err := b.client.SetBit(ctx, b.key, int64(pos), 1).Err(); err != nil {
+			if isUnavailable(err) {
+				return b.fallbackBool(err)
+			}
 			return false, err
 		}
 	}
@@ -313,7 +383,10 @@ func (b *bitmapImpl) exists(ctx context.Context, item string) (bool, error) {
 	if err == nil {
 		return exists == 1, nil
 	}
-
+	// 服务不可用：直接兜底
+	if isUnavailable(err) {
+		return b.fallbackBool(err)
+	}
 	// 服务器不支持 Lua 时回退到多命令实现
 	return b.existsFallback(ctx, item)
 }
@@ -323,6 +396,9 @@ func (b *bitmapImpl) existsFallback(ctx context.Context, item string) (bool, err
 	for _, pos := range b.hashs(item) {
 		bit, err := b.client.GetBit(ctx, b.key, int64(pos)).Result()
 		if err != nil {
+			if isUnavailable(err) {
+				return b.fallbackBool(err)
+			}
 			return false, err
 		}
 		if bit == 0 {
@@ -364,6 +440,10 @@ func (b *bitmapImpl) Info(ctx context.Context) (*BloomInfo, error) {
 	// For the bitmap fallback, we estimate current item count
 	strLen, err := b.client.StrLen(ctx, b.key).Result()
 	if err != nil {
+		if isUnavailable(err) {
+			// Info 非关键：兜底返回空结构体 + 哨兵错误（errors.Is 可感知）
+			return &BloomInfo{}, fallbackErr(err)
+		}
 		return nil, err
 	}
 

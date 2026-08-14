@@ -25,11 +25,15 @@ type CuckooInfo struct {
 type CuckooOption func(*cuckooConfig)
 
 type cuckooConfig struct {
+	failPolicyConfig
 	capacity      int64 // 预估容量（模块版 >0 时 CF.RESERVE 预分配；回退版决定桶数量）
 	maxIterations int64 // 最大踢出迭代次数
 	bucketSize    int64 // 桶大小
 	expansion     int64 // 扩容因子（仅模块版 CF.RESERVE 使用）
 }
+
+// CuckooConfig 是 CuckooFilter 的配置类型别名，供 WithFailPolicy 泛型参数使用。
+type CuckooConfig = cuckooConfig
 
 func defaultCuckooConfig() cuckooConfig { return cuckooConfig{} }
 
@@ -99,43 +103,79 @@ type cuckooFilterImpl interface {
 //		return err
 //	}
 type CuckooFilter struct {
-	impl cuckooFilterImpl
+	impl   cuckooFilterImpl
+	policy FailPolicy // 失效兜底策略（默认 FailOpen）
 }
 
 // NewCuckooFilter 创建布谷鸟过滤器（挂 *redisClient）。
 // 分派逻辑：每次创建时按能力探测结果选择实现（Capability().HasCuckoo()，
 // 探测结果有缓存，与 bloom.go 的 NewBloomFilter 分派方式一致）。
+// 失效兜底策略默认 FailOpen（过滤器是保护性能力：服务不可用时放行业务）；
+// 可用 WithFailPolicy 显式改为 FailClosed。
 func (rdb *redisClient) NewCuckooFilter(key string, opts ...CuckooOption) *CuckooFilter {
 	cfg := defaultCuckooConfig()
+	cfg.policy = FailOpen // 过滤器默认 FailOpen：宁可放行不阻塞业务
 	for _, o := range opts {
 		o(&cfg)
 	}
 
 	if rdb.cap.HasCuckoo() {
-		return &CuckooFilter{impl: &cfCmdImpl{client: rdb, key: key, cfg: cfg}}
+		return &CuckooFilter{impl: &cfCmdImpl{client: rdb, key: key, cfg: cfg}, policy: cfg.policy}
 	}
-	return &CuckooFilter{impl: newHashImpl(rdb, key, cfg)}
+	return &CuckooFilter{impl: newHashImpl(rdb, key, cfg), policy: cfg.policy}
+}
+
+// fallbackBool 按策略返回布谷鸟过滤器兜底值 + 哨兵错误：FailOpen → true
+// （视为成功）；FailClosed → false。错误为 ErrRedisUnavailable 包装。
+func (cf *CuckooFilter) fallbackBool(err error) (bool, error) {
+	if cf.policy == FailOpen {
+		return true, fallbackErr(err)
+	}
+	return false, fallbackErr(err)
 }
 
 // Add 向过滤器添加一个元素，返回是否新增（false 表示元素已存在）。
+// Redis 服务失效时按兜底策略：FailOpen → (true, nil)；FailClosed → (false, nil)。
 func (cf *CuckooFilter) Add(ctx context.Context, item string) (bool, error) {
-	return cf.impl.Add(ctx, item)
+	added, err := cf.impl.Add(ctx, item)
+	if err != nil && isUnavailable(err) {
+		return cf.fallbackBool(err)
+	}
+	return added, err
 }
 
 // Exists 检查元素是否可能存在于过滤器（布谷鸟过滤器无假阴性，可能有假阳性）。
+// Redis 服务失效时按兜底策略：FailOpen → (true, nil)（视为存在，防穿透失效
+// 但放行业务）；FailClosed → (false, nil)。
 func (cf *CuckooFilter) Exists(ctx context.Context, item string) (bool, error) {
-	return cf.impl.Exists(ctx, item)
+	exists, err := cf.impl.Exists(ctx, item)
+	if err != nil && isUnavailable(err) {
+		return cf.fallbackBool(err)
+	}
+	return exists, err
 }
 
 // Del 从过滤器删除一个元素。注意与 BF 不同：CF.DEL 返回是否删除成功
 // （元素不存在或删除导致桶耗尽时返回 false）。
+// Redis 服务失效时按兜底策略：FailOpen → (true, nil)（视为删除成功）；
+// FailClosed → (false, nil)。
 func (cf *CuckooFilter) Del(ctx context.Context, item string) (bool, error) {
-	return cf.impl.Del(ctx, item)
+	deleted, err := cf.impl.Del(ctx, item)
+	if err != nil && isUnavailable(err) {
+		return cf.fallbackBool(err)
+	}
+	return deleted, err
 }
 
 // Info 返回过滤器的元数据。
+// Redis 服务失效时按兜底策略：FailOpen → 空结构体 nil；FailClosed → 返回错误。
 func (cf *CuckooFilter) Info(ctx context.Context) (*CuckooInfo, error) {
-	return cf.impl.Info(ctx)
+	info, err := cf.impl.Info(ctx)
+	if err != nil && isUnavailable(err) {
+		// Info 非关键：兜底返回空结构体 + 哨兵错误（errors.Is 可感知）
+		return &CuckooInfo{}, fallbackErr(err)
+	}
+	return info, err
 }
 
 // ---------------------------------------------------------------------------

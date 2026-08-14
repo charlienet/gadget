@@ -217,3 +217,72 @@ go-redis 升级回归提醒
 升级 go-redis 时请验证：集群重定向（MOVED/ASK）后前缀改写仍正确、
 命令重试（MaxRetries）不导致前缀二次添加、EVAL/FCALL 的 KEYS 参数
 改写不受脚本引擎变化影响。本地无法模拟，需真实 Redis 集群环境。
+
+
+Redis 失效兜底（fail-open / fail-closed）
+
+Redis 服务不可用时（dial 失败、读写超时、连接池超时、连接关闭等连接/服务层
+故障），各扩展按 FailPolicy 策略放行或拒绝，避免业务直接挂掉：
+
+| 扩展 | 默认策略 | 兜底语义 |
+|---|---|---|
+| 锁（Lock） | FailClosed | 不获取锁、不放行临界区（避免并发写数据） |
+| 限流（RateLimiter/LeakyBucket） | FailOpen | Allow 返回放行、Wait 直接放行（保护性能力，宁可多放） |
+| 布隆/布谷鸟过滤器 | FailOpen | Add/Exists 返回成功值（防穿透失效但放行业务） |
+| CAS / 延迟队列 | 无策略 | 写操作不可降级，直接返回原始错误 |
+
+显式配置（各扩展 Option 通过 WithFailPolicy 泛型设置）：
+
+```go
+lock := rdb.NewLock("k", redis.WithFailPolicy[*redis.LockConfig](redis.FailClosed))
+rl := rdb.NewRateLimiter("login", redis.WithFailPolicy[*redis.RateLimiter](redis.FailOpen))
+cf := rdb.NewCuckooFilter("cf:1", redis.WithFailPolicy[*redis.CuckooConfig](redis.FailOpen))
+```
+
+边界与可观测性：
+- 兜底只覆盖**连接/服务不可用类错误**；命令级错误（WRONGTYPE、语法错误等）
+  必须照常返回，不兜底吞掉。
+- 调用方 ctx 取消/超时不触发兜底（主动行为 ≠ Redis 失效）。
+- 兜底生效时返回**兜底值 + ErrRedisUnavailable 哨兵错误**（包装原始错误，
+  `errors.Is(err, redis.ErrRedisUnavailable)` 可判断脱机事件，应用层自行
+  处理告警/降级）：
+  ```go
+  ok, err := lock.TryLock(ctx)
+  if errors.Is(err, redis.ErrRedisUnavailable) {
+      // Redis 不可用，锁已按策略兜底（默认 FailClosed：ok=false）
+      notifyAlert() // 自行处理：告警/降级
+  }
+  ```
+- FailClosed 的阻塞/循环语义不会死循环：Lock 失效返回错误、Wait 失效返回错误。
+
+自动重连
+
+Redis 宕机恢复后 client 自动重连，无需额外配置——这是 go-redis 连接池的
+固有行为：请求时获取连接、失败时重新 dial 并丢弃坏连接；宕机期间操作报
+连接错误（可被 isUnavailable 判定触发兜底），恢复后新请求自动重建连接
+（集群 client 还会自动刷新拓扑）。测试 TestAutoReconnect 以 miniredis
+固定端口模拟"宕机→恢复"验证了该行为。
+
+
+熔断器（circuit breaker，默认启用）
+
+Redis 服务失效后避免每次请求都等待连接超时：连续失败达阈值进入 Open
+状态**快速失败**（不实际连接），冷却后半开放行探测请求，成功自动恢复。
+
+- 三态：Closed（正常）→ Open（连续失败 ≥ 阈值，快速失败）→ HalfOpen
+  （冷却后放行单个探测，单飞：并发下同时只放行一个）→ 成功回 Closed。
+- 默认参数：阈值 3 次（仅连接类错误计数，命令级错误不计入）、冷却 1s
+  （短冷却保证快速重连探测）。配置：
+
+  ```go
+  rdb := redis.New(
+      redis.WithAddr("127.0.0.1:6379"),
+      redis.WithBreakerThreshold(5),               // 连续失败阈值
+      redis.WithBreakerCooldown(500*time.Millisecond), // 冷却期
+      // redis.WithBreaker(false)                  // 显式关闭
+  )
+  ```
+
+- 与兜底联动：熔断 Open 快速失败返回的连接类错误同样被扩展层
+  isUnavailable 识别并走 FailPolicy 兜底（errors.Is(ErrRedisUnavailable)
+  命中）；半开探测成功即自动闭合恢复，无需人工干预。

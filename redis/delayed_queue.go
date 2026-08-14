@@ -135,3 +135,9 @@ func (q *DelayedQueue) DequeueBatch(ctx context.Context, max int) ([]string, err
 func (q *DelayedQueue) PendingCount(ctx context.Context) (int64, error) {
 	return q.client.ZCard(ctx, q.key).Result()
 }
+
+// 设计决策：延迟队列不做失效兜底策略（fail-open/fail-closed）。
+// 队列是持久化状态（ZSET 成员），服务不可用时 Enqueue 无法安全降级
+// （放行=任务丢失、拒绝=任务丢弃），Dequeue 兜底会重复消费或丢任务，
+// 因此直接返回原始错误，由调用方决定重试。与限流/过滤器等无状态保护性
+// 能力不同，队列兜底会产生数据一致性问题。

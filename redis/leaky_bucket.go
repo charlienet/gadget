@@ -12,8 +12,12 @@ import (
 type LeakyBucketOption func(*leakyBucketConfig)
 
 type leakyBucketConfig struct {
+	failPolicyConfig
 	burst int // 桶容量（允许的最大排队请求数），默认等于速率（rate）
 }
+
+// LeakyBucketConfig 是 LeakyBucket 的配置类型别名，供 WithFailPolicy 泛型参数使用。
+type LeakyBucketConfig = leakyBucketConfig
 
 func defaultLeakyBucketConfig() leakyBucketConfig { return leakyBucketConfig{} }
 
@@ -49,6 +53,7 @@ type LeakyBucket struct {
 	name      string
 	separator string
 	burst     int
+	policy    FailPolicy // 失效兜底策略（默认 FailOpen）
 }
 
 // NewLeakyBucket 创建漏桶限流器（挂 *redisClient）。
@@ -56,6 +61,7 @@ type LeakyBucket struct {
 // 空名称不隔离。
 func (rdb *redisClient) NewLeakyBucket(name string, opts ...LeakyBucketOption) *LeakyBucket {
 	cfg := defaultLeakyBucketConfig()
+	cfg.policy = FailOpen // 漏桶默认 FailOpen：保护性能力，宁可多放
 	for _, o := range opts {
 		o(&cfg)
 	}
@@ -70,6 +76,7 @@ func (rdb *redisClient) NewLeakyBucket(name string, opts ...LeakyBucketOption) *
 		name:      name,
 		separator: sep,
 		burst:     cfg.burst,
+		policy:    cfg.policy,
 	}
 }
 
@@ -98,9 +105,10 @@ redis.call('SET', KEYS[1], cur + tonumber(ARGV[2]), 'PX', ARGV[4])
 return {1, 0}
 `)
 
-// allow 漏桶核心：rate = n/per，interval = per/n。
-// 返回值：Allowed=放行；RetryAfter=被拒时的建议等待时长（毫秒）。
-func (lb *LeakyBucket) allow(ctx context.Context, key string, n int, per time.Duration) (*RateResult, error) {
+// allowRaw 漏桶核心（不做失效兜底，返回原始错误，供 Wait 使用）。
+// rate = n/per，interval = per/n。返回值：Allowed=放行；RetryAfter=被拒时
+// 的建议等待时长（毫秒）。
+func (lb *LeakyBucket) allowRaw(ctx context.Context, key string, n int, per time.Duration) (*RateResult, error) {
 	if n <= 0 {
 		return nil, fmt.Errorf("redis: 漏桶速率必须为正数，got %d", n)
 	}
@@ -133,6 +141,24 @@ func (lb *LeakyBucket) allow(ctx context.Context, key string, n int, per time.Du
 	}, nil
 }
 
+// fallbackRateResult 按策略返回漏桶兜底值 + 哨兵错误：FailOpen → 放行；
+// FailClosed → 拒绝。错误为 ErrRedisUnavailable 包装（errors.Is 可感知）。
+func (lb *LeakyBucket) fallbackRateResult(err error) (*RateResult, error) {
+	if lb.policy == FailOpen {
+		return &RateResult{Allowed: true}, fallbackErr(err)
+	}
+	return &RateResult{Allowed: false}, fallbackErr(err)
+}
+
+// allow 执行漏桶检查并处理失效兜底（Allow/AllowN 使用）。
+func (lb *LeakyBucket) allow(ctx context.Context, key string, n int, per time.Duration) (*RateResult, error) {
+	res, err := lb.allowRaw(ctx, key, n, per)
+	if err != nil && isUnavailable(err) {
+		return lb.fallbackRateResult(err)
+	}
+	return res, err
+}
+
 // Allow 检查请求是否放行：ratePerSec 为每秒输出速率（burst 默认 = ratePerSec）。
 // 被拒（Allowed=false）时 RetryAfter 为建议等待时长，可用 Wait 阻塞等待。
 func (lb *LeakyBucket) Allow(ctx context.Context, key string, ratePerSec int) (*RateResult, error) {
@@ -147,15 +173,32 @@ func (lb *LeakyBucket) AllowN(ctx context.Context, key string, n int, per time.D
 
 // Wait 阻塞直到配额放行或 ctx 取消/超时（限速语义：等待而非拒绝）。
 // 被拒时等待 RetryAfter 后重试；RetryAfter 为 0 时最小等待 1ms 防忙循环。
+// Redis 服务失效时按兜底策略：FailOpen → 直接放行返回 nil；FailClosed →
+// 返回错误（不能吞错死循环等待）。
 func (lb *LeakyBucket) Wait(ctx context.Context, key string, ratePerSec int) error {
 	return waitLoop(ctx, func(ctx context.Context) (*RateResult, error) {
-		return lb.Allow(ctx, key, ratePerSec)
+		res, err := lb.allowRaw(ctx, key, ratePerSec, time.Second)
+		if err != nil && isUnavailable(err) {
+			if lb.policy == FailOpen {
+				// FailOpen：放行但返回哨兵错误（应用层感知"放行是兜底的"）
+				return &RateResult{Allowed: true}, fallbackErr(err)
+			}
+			return nil, fallbackErr(err) // FailClosed：返回错误（不死循环）
+		}
+		return res, err
 	})
 }
 
 // WaitN 阻塞直到配额放行或 ctx 取消/超时（AllowN 的等待版）。
 func (lb *LeakyBucket) WaitN(ctx context.Context, key string, n int, per time.Duration) error {
 	return waitLoop(ctx, func(ctx context.Context) (*RateResult, error) {
-		return lb.AllowN(ctx, key, n, per)
+		res, err := lb.allowRaw(ctx, key, n, per)
+		if err != nil && isUnavailable(err) {
+			if lb.policy == FailOpen {
+				return &RateResult{Allowed: true}, fallbackErr(err)
+			}
+			return nil, fallbackErr(err)
+		}
+		return res, err
 	})
 }

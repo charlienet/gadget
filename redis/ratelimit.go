@@ -117,10 +117,23 @@ return {cost, remaining, tostring(-1), tostring(reset_after)}
 // 语义：允许突发（burst = 速率），按平均速率补令牌，与漏桶（LeakyBucket，
 // 恒定输出速率）互补。支持按名称隔离限流 key 空间：同一 client 创建的多个
 // 限流器（不同 name）互不干扰；同一 name 内相同业务 key 共享配额。
+//
+// 失效兜底策略默认 FailOpen（保护性能力，服务不可用时宁可多放也不阻塞业务）；
+// 可用 WithFailPolicy 显式改为 FailClosed。
 type RateLimiter struct {
 	client    *redisClient
 	name      string // 命名空间（空字符串表示不隔离，key 直通）
 	separator string // 名称与 key 的分隔符（捕获自 client 前缀分隔符，默认 ":"）
+	policy    FailPolicy
+}
+
+// RateLimiterOption 配置限流器（WithFailPolicy 泛型参数使用
+// *RateLimiter 类型，见 failover.go）。
+type RateLimiterOption func(*RateLimiter)
+
+// setPolicy 实现 failPolicySetter（供 WithFailPolicy 泛型约束使用）。
+func (rl *RateLimiter) setPolicy(p FailPolicy) {
+	rl.policy = p
 }
 
 // RateResult contains the result of a rate limit check.
@@ -154,17 +167,22 @@ type RateResult struct {
 //	// login 与 pay 对相同业务 key 互不影响（key 空间按名称隔离）
 //	login.Allow(ctx, "user:1", 5)
 //	pay.Allow(ctx, "user:1", 10)
-func (rdb *redisClient) NewRateLimiter(name string) *RateLimiter {
+func (rdb *redisClient) NewRateLimiter(name string, opts ...RateLimiterOption) *RateLimiter {
 	sep := rdb.prefix.separator
 	if sep == "" {
 		sep = defaultSeparator
 	}
 
-	return &RateLimiter{
+	rl := &RateLimiter{
 		client:    rdb,
 		name:      name,
 		separator: sep,
+		policy:    FailOpen, // 限流默认 FailOpen：保护性能力，宁可多放
 	}
+	for _, o := range opts {
+		o(rl)
+	}
+	return rl
 }
 
 // limitKey 组合名称与业务 key：name 为空直通原 key，非空加命名空间前缀。
@@ -175,9 +193,9 @@ func (rl *RateLimiter) limitKey(key string) string {
 	return rl.name + rl.separator + key
 }
 
-// allow 执行 GCRA 脚本并映射结果：rate 为窗口内允许次数，period 为窗口时长。
-// 最终 Redis key = "rate:" + [name:]key，与旧版 redis_rate 的 key 结构一致。
-func (rl *RateLimiter) allow(ctx context.Context, key string, rate int, period time.Duration) (*RateResult, error) {
+// allowRaw 执行 GCRA 脚本并映射结果，**不做失效兜底**（返回原始错误，
+// 供 Wait/WaitN 使用——避免 FailClosed 兜底吞错后 Wait 死循环）。
+func (rl *RateLimiter) allowRaw(ctx context.Context, key string, rate int, period time.Duration) (*RateResult, error) {
 	if rate <= 0 {
 		return nil, fmt.Errorf("redis: 限流速率必须为正数，got %d", rate)
 	}
@@ -216,6 +234,25 @@ func (rl *RateLimiter) allow(ctx context.Context, key string, rate int, period t
 	return res, nil
 }
 
+// fallbackRateResult 按策略返回限流兜底值 + 哨兵错误：FailOpen → 放行
+// （Allowed=true, Consumed=1）；FailClosed → 拒绝（Allowed=false）。
+// 错误为 ErrRedisUnavailable 包装（errors.Is 可感知兜底发生）。
+func (rl *RateLimiter) fallbackRateResult(err error) (*RateResult, error) {
+	if rl.policy == FailOpen {
+		return &RateResult{Allowed: true, Consumed: 1}, fallbackErr(err)
+	}
+	return &RateResult{Allowed: false}, fallbackErr(err)
+}
+
+// allow 执行 GCRA 检查并处理失效兜底（Allow/AllowN/AllowAtMost 使用）。
+func (rl *RateLimiter) allow(ctx context.Context, key string, rate int, period time.Duration) (*RateResult, error) {
+	res, err := rl.allowRaw(ctx, key, rate, period)
+	if err != nil && isUnavailable(err) {
+		return rl.fallbackRateResult(err)
+	}
+	return res, err
+}
+
 // Allow checks if a request identified by key is allowed at the given rate
 // (operations per second). Returns the result including remaining quota.
 func (rl *RateLimiter) Allow(ctx context.Context, key string, ratePerSec int) (*RateResult, error) {
@@ -229,9 +266,9 @@ func (rl *RateLimiter) AllowN(ctx context.Context, key string, n int, per time.D
 	return rl.allow(ctx, key, n, per)
 }
 
-// allowAtMost 执行"尽力而为"的 GCRA 检查：请求消耗 cost 个配额，配额不足时
-// 消耗剩余配额而非整批拒绝（"能发多少发多少"），适用批量请求场景。
-func (rl *RateLimiter) allowAtMost(ctx context.Context, key string, rate int, period time.Duration, cost int) (*RateResult, error) {
+// allowAtMostRaw 执行"尽力而为"的 GCRA 检查（不做失效兜底，返回原始错误，
+// 供 WaitAtMost 语义的一致性使用；当前 Wait 系列只用于 Allow/AllowN）。
+func (rl *RateLimiter) allowAtMostRaw(ctx context.Context, key string, rate int, period time.Duration, cost int) (*RateResult, error) {
 	if rate <= 0 {
 		return nil, fmt.Errorf("redis: 限流速率必须为正数，got %d", rate)
 	}
@@ -272,6 +309,16 @@ func (rl *RateLimiter) allowAtMost(ctx context.Context, key string, rate int, pe
 	return res, nil
 }
 
+// allowAtMost 执行"尽力而为"的 GCRA 检查并处理失效兜底。
+// FailOpen → (Allowed=true, Consumed=1) 放行；FailClosed → (Allowed=false)。
+func (rl *RateLimiter) allowAtMost(ctx context.Context, key string, rate int, period time.Duration, cost int) (*RateResult, error) {
+	res, err := rl.allowAtMostRaw(ctx, key, rate, period, cost)
+	if err != nil && isUnavailable(err) {
+		return rl.fallbackRateResult(err)
+	}
+	return res, err
+}
+
 // AllowAtMost 请求消耗 ratePerSec 配额的部分配额：配额充足时消耗 cost 全部放行
 // （Consumed=cost）；不足时消耗剩余配额部分放行（Consumed=剩余量）；无剩余配额
 // 时拒绝（Allowed=false、RetryAfter>0）。rate 语义同 Allow（每秒速率）。
@@ -292,25 +339,40 @@ func (rl *RateLimiter) Reset(ctx context.Context, key string) error {
 
 // Wait 阻塞直到配额放行或 ctx 取消/超时（限速语义：等待而非拒绝）。
 // 被拒时等待 RetryAfter 后重试；RetryAfter 为 0 时最小等待 1ms 防忙循环。
+// Redis 服务失效时按兜底策略：FailOpen → 直接放行返回 nil；FailClosed →
+// 返回错误（不能吞错死循环等待）。
 func (rl *RateLimiter) Wait(ctx context.Context, key string, ratePerSec int) error {
 	return waitLoop(ctx, func(ctx context.Context) (*RateResult, error) {
-		return rl.Allow(ctx, key, ratePerSec)
+		res, err := rl.allowRaw(ctx, key, ratePerSec, time.Second)
+		if err != nil && isUnavailable(err) {
+			if rl.policy == FailOpen {
+				// FailOpen：放行但返回哨兵错误（应用层感知"放行是兜底的"）
+				return &RateResult{Allowed: true}, fallbackErr(err)
+			}
+			return nil, fallbackErr(err) // FailClosed：返回错误（不死循环）
+		}
+		return res, err
 	})
 }
 
 // WaitN 阻塞直到配额放行或 ctx 取消/超时（AllowN 的等待版）。
 func (rl *RateLimiter) WaitN(ctx context.Context, key string, n int, per time.Duration) error {
 	return waitLoop(ctx, func(ctx context.Context) (*RateResult, error) {
-		return rl.AllowN(ctx, key, n, per)
+		res, err := rl.allowRaw(ctx, key, n, per)
+		if err != nil && isUnavailable(err) {
+			if rl.policy == FailOpen {
+				return &RateResult{Allowed: true}, fallbackErr(err)
+			}
+			return nil, fallbackErr(err)
+		}
+		return res, err
 	})
 }
-
-// minWaitInterval 是 RetryAfter 为 0 时的最小等待时长，防止忙循环。
-const minWaitInterval = time.Millisecond
 
 // waitLoop 通用的阻塞等待循环：反复调用 allow，被拒时等待 RetryAfter
 // （不足时取最小等待）后重试；放行返回 nil，ctx 取消/超时返回 ctx.Err()。
 // 每次调用独立，无需额外锁（并发安全由 Redis 侧原子性保证）。
+// 供 RateLimiter 与 LeakyBucket 的 Wait/WaitN 共用。
 func waitLoop(ctx context.Context, allow func(context.Context) (*RateResult, error)) error {
 	for {
 		res, err := allow(ctx)
@@ -335,3 +397,6 @@ func waitLoop(ctx context.Context, allow func(context.Context) (*RateResult, err
 		}
 	}
 }
+
+// minWaitInterval 是 RetryAfter 为 0 时的最小等待时长，防止忙循环。
+const minWaitInterval = time.Millisecond

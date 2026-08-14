@@ -36,7 +36,7 @@ type Client interface {
 	NewCuckooFilter(key string, opts ...CuckooOption) *CuckooFilter   // 创建布谷鸟过滤器（需 RedisBloom cuckoo 模块）
 	NewLock(key string, opts ...LockOption) *Lock                     // 创建分布式锁
 	NewDelayedQueue(key string, opts ...QueueOption) *DelayedQueue    // 创建延迟队列（ZSET 实现）
-	NewRateLimiter(name string) *RateLimiter                          // 创建限流器（按名称隔离限流 key 空间，空名称不隔离）
+	NewRateLimiter(name string, opts ...RateLimiterOption) *RateLimiter // 创建限流器（按名称隔离限流 key 空间，空名称不隔离）
 	NewLeakyBucket(name string, opts ...LeakyBucketOption) *LeakyBucket // 创建漏桶限流器（恒定输出速率、拒绝突发；name 隔离同限流器）
 	// CompareAndSet 原子比较并设置：key 当前值等于 oldValue 时设置为 newValue。
 	// oldValue=nil 表示"仅当 key 不存在时设置"（SETNX 语义）。
@@ -57,6 +57,7 @@ type redisClient struct {
 	cap      *Capability
 	state    *closeState
 	ownsPool bool // 是否拥有底层连接池：NewWithClient 包装外部 uc 时为 false
+	breaker  *CircuitBreaker // 熔断器（默认启用；nil 表示禁用）
 }
 
 // closeState 保存 client 连接池的生命周期状态，通过指针共享：
@@ -244,6 +245,9 @@ func NewWithClient(uc redis.UniversalClient, opts ...Option) (Client, error) {
 	}
 	client.cap = newCapability(client)
 
+	// 注册熔断 hook（renameHook 之后 → 最外层，先熔断判断再前缀改写）
+	client.initBreaker(uc, &opt)
+
 	return client, nil
 }
 
@@ -416,5 +420,19 @@ func newWithOpts(opt *RedisOptions, prefix redisPrefix) *redisClient {
 	}
 	client.cap = newCapability(client)
 
+	// 注册熔断 hook：必须在 renameHook 之后注册（go-redis hook 链后注册的
+	// 最外层，先熔断判断再前缀改写）
+	client.initBreaker(rdb, opt)
+
 	return client
+}
+
+// initBreaker 按配置构造熔断器并注册熔断 hook（默认启用）。
+// 熔断 hook 为最外层：Open 时快速失败（不执行命令、不实际连接）。
+func (c *redisClient) initBreaker(rdb redis.UniversalClient, opt *RedisOptions) {
+	if !opt.breakerEnabled {
+		return
+	}
+	c.breaker = newCircuitBreaker(opt.breakerThreshold, opt.breakerCooldown)
+	rdb.AddHook(&breakerHook{breaker: c.breaker})
 }

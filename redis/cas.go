@@ -78,3 +78,9 @@ func (rdb *redisClient) CompareAndDelete(ctx context.Context, key string, oldVal
 	}
 	return n == 1, nil
 }
+
+// 设计决策：CAS 原子操作不做失效兜底策略（fail-open/fail-closed）。
+// CAS 是写操作且语义依赖"比较-设置"的原子性——服务不可用时无法安全降级
+// （放行会跳过数据校验、拒绝会伪装为"值不匹配"），因此直接返回原始错误，
+// 由调用方决定重试或失败处理。与锁（可降级为"不获取"）、过滤器（可降级为
+// "放行"）不同，CAS 的兜底值会产生错误的数据语义。
