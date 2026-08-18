@@ -9,10 +9,11 @@ import (
 )
 
 type mem_store struct {
-	items           map[string]item
+	items map[string]item
 	sync.RWMutex
 	stopClean       chan struct{}
 	cleanupInterval time.Duration
+	closeOnce       sync.Once
 
 	maxItems    int
 	maxBytes    int64
@@ -98,8 +99,8 @@ func (s *mem_store) Put(ctx context.Context, key string, v []byte, expireSecond 
 	}
 
 	s.items[key] = item{
-		Value:      v,
-		Expiration: e,
+		Value:       v,
+		Expiration:  e,
 		ttlDuration: ttlDuration,
 	}
 	s.usedBytes += int64(len(v))
@@ -202,23 +203,29 @@ func (s *mem_store) GetMulti(ctx context.Context, keys ...string) (map[string][]
 func (s *mem_store) SetMulti(ctx context.Context, items map[string][]byte, expireSecond int) error {
 	ttlDuration := int64(time.Second * time.Duration(expireSecond))
 
-	var e int64
-	if expireSecond > 0 {
-		e = time.Now().Add(time.Second * time.Duration(expireSecond)).UnixNano()
-	}
-
 	s.Lock()
 	defer s.Unlock()
 
 	for key, val := range items {
+		var e int64
+		if expireSecond > 0 {
+			e = time.Now().Add(time.Second * time.Duration(expireSecond)).UnixNano()
+
+			// 与单键 Put 一致：每 key 独立应用 TTL jitter，防止批量写入后同时过期
+			if s.ttlJitter > 0 {
+				jitter := time.Duration(rand.Int63n(int64(s.ttlJitter)))
+				e += jitter.Nanoseconds()
+			}
+		}
+
 		if old, ok := s.items[key]; ok {
 			s.usedBytes -= int64(len(old.Value))
 			s.removeFromOrder(key)
 		}
 
 		s.items[key] = item{
-			Value:      val,
-			Expiration: e,
+			Value:       val,
+			Expiration:  e,
 			ttlDuration: ttlDuration,
 		}
 		s.usedBytes += int64(len(val))
@@ -258,8 +265,12 @@ func (*mem_store) IsRemote() bool { return false }
 
 func (*mem_store) Name() string { return "memory" }
 
+// Close 停止后台清理 goroutine。幂等：两个 cache 实例共享同一 store 时
+// 二次 Close 不 panic。
 func (s *mem_store) Close() {
-	close(s.stopClean)
+	s.closeOnce.Do(func() {
+		close(s.stopClean)
+	})
 }
 
 func (s *mem_store) evictLoop() {
@@ -289,8 +300,8 @@ func (s *mem_store) evictExpired() {
 }
 
 type item struct {
-	Value      []byte
-	Expiration int64
+	Value       []byte
+	Expiration  int64
 	ttlDuration int64 // original TTL in nanoseconds (for sliding expiration)
 }
 

@@ -19,11 +19,13 @@ type Stats struct {
 	Query     uint64
 	QueryFail uint64
 	Shared    uint64
-	l         sync.Mutex
+	// l 为指针锁：Stats 可作为值拷贝返回（Snapshot 只读快照），
+	// 指针锁的拷贝不触发 copylocks 检查；内部方法经 s.l 自动解引用。
+	l *sync.Mutex
 }
 
 func newStats() Stats {
-	return Stats{stores: make(map[string]*storeStats)}
+	return Stats{stores: make(map[string]*storeStats), l: &sync.Mutex{}}
 }
 
 func (s *Stats) IncrHit(name string) {
@@ -97,6 +99,29 @@ func (s *Stats) Total() uint64 {
 	return total
 }
 
+// Snapshot 返回一致性只读快照（值拷贝）：外部修改快照不影响内部计数。
+// Query/QueryFail/Shared 用 atomic 读取；stores 在锁内深拷贝（每个 storeStats
+// 值复制）。返回后快照与内部完全隔离。
+func (s *Stats) Snapshot() Stats {
+	s.l.Lock()
+	defer s.l.Unlock()
+
+	snap := Stats{
+		stores:    make(map[string]*storeStats, len(s.stores)),
+		Query:     atomic.LoadUint64(&s.Query),
+		QueryFail: atomic.LoadUint64(&s.QueryFail),
+		Shared:    atomic.LoadUint64(&s.Shared),
+		l:         &sync.Mutex{},
+	}
+	for name, v := range s.stores {
+		snap.stores[name] = &storeStats{
+			Hits: atomic.LoadUint64(&v.Hits),
+			Miss: atomic.LoadUint64(&v.Miss),
+		}
+	}
+	return snap
+}
+
 func (s *Stats) Clear() {
 	s.l.Lock()
 	defer s.l.Unlock()
@@ -108,4 +133,5 @@ func (s *Stats) Clear() {
 
 	atomic.SwapUint64(&s.Query, 0)
 	atomic.SwapUint64(&s.QueryFail, 0)
+	atomic.SwapUint64(&s.Shared, 0)
 }

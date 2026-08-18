@@ -39,7 +39,7 @@ func TestJsonSerialize(t *testing.T) {
 	t.Log(string(b2))
 
 	var r string
-	s.Unmarshal(b2, &r)
+	_ = s.Unmarshal(b2, &r)
 	t.Log(r)
 }
 
@@ -48,14 +48,14 @@ func BenchmarkMarshal(b *testing.B) {
 		v := "abc"
 		for i := 0; i < b.N; i++ {
 			j := &jsonSerializer{}
-			j.Marshal(v)
+			_, _ = j.Marshal(v)
 		}
 	})
 
 	b.Run("j", func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
 			j := &jsonSerializer{}
-			j.Marshal(u)
+			_, _ = j.Marshal(u)
 		}
 	})
 
@@ -75,10 +75,10 @@ func TestSerializerEdgeCases(t *testing.T) {
 	assert.Nil(t, err)
 	assert.Equal(t, original, data)
 
-	// string passthrough
+	// string 统一走 JSON 编码（带引号）
 	data, err = s.Marshal("hello")
 	assert.Nil(t, err)
-	assert.Equal(t, []byte("hello"), data)
+	assert.Equal(t, []byte(`"hello"`), data)
 
 	// Unmarshal nil
 	err = s.Unmarshal(nil, nil)
@@ -94,9 +94,16 @@ func TestSerializerEdgeCases(t *testing.T) {
 	assert.Nil(t, err)
 	assert.Equal(t, []byte("bytes"), b)
 
-	// Unmarshal to *string
+	// Unmarshal to *string（需为 JSON 编码的字符串）
 	var str string
-	err = s.Unmarshal([]byte("hello"), &str)
+	err = s.Unmarshal([]byte(`"hello"`), &str)
 	assert.Nil(t, err)
 	assert.Equal(t, "hello", str)
+}
+
+func TestSerializerUnmarshalNilValue(t *testing.T) {
+	s := &jsonSerializer{}
+	// 非空数据 + nil 目标 → 返回 nil
+	err := s.Unmarshal([]byte("x"), nil)
+	assert.Nil(t, err)
 }

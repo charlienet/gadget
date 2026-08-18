@@ -3,6 +3,9 @@ package cache
 import "context"
 
 // Store is the interface that wraps the cache store.
+//
+// 实现必须并发安全：cache 包的 healthLoop 会在后台并发调用 Get/Put/Delete，
+// 用户的 Get/Put/Delete 请求也会并发执行。
 type Store interface {
 
 	// Get gets a cached value by key.
@@ -14,10 +17,10 @@ type Store interface {
 	// Delete removes a key from cache.
 	Delete(ctx context.Context, key ...string) error
 
-	// String returns the name of the implementation.
+	// Name returns the name of the implementation.
 	Name() string
 
-	// Is remote storage
+	// IsRemote reports whether this store is remote (network-backed).
 	IsRemote() bool
 }
 
