@@ -197,7 +197,7 @@ func (m *mockRecorder) Log(level logger.Level, v ...any) {
 		fields = "[" + strings.Join(parts, " ") + "] "
 	}
 	s := level.String() + " " + fields + joinStrings(v...) + "\n"
-	out.Write([]byte(s))
+	_, _ = out.Write([]byte(s))
 	m.mu.Unlock()
 }
 func (m *mockRecorder) Logf(level logger.Level, format string, v ...any) {
@@ -212,7 +212,7 @@ func (m *mockRecorder) Logf(level logger.Level, format string, v ...any) {
 		fields = "[" + strings.Join(parts, " ") + "] "
 	}
 	s := level.String() + " " + fields + fmt.Sprintf(format, v...) + "\n"
-	out.Write([]byte(s))
+	_, _ = out.Write([]byte(s))
 	m.mu.Unlock()
 }
 func (m *mockRecorder) String() string { return "mock" }

@@ -67,7 +67,7 @@ func (l *defaultLogger) write(level Level, message string) {
 		metadata = append(metadata, fmt.Sprintf("%s:%v", k, v))
 	}
 
-	fmt.Fprintf(out, "%s [%s] %s %v\n", t, level.String(), metadata, message)
+	_, _ = fmt.Fprintf(out, "%s [%s] %s %v\n", t, level.String(), metadata, message)
 }
 
 func (*defaultLogger) String() string { return "default" }
