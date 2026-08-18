@@ -56,5 +56,15 @@ func (n *natsBroker) Subscribe(topic string, handler broker.Handler) (broker.Sub
 
 func (b *natsBroker) Name() string { return "nats" }
 
+// Close 关闭底层 NATS 连接
+func (n *natsBroker) Close() error {
+	if n.conn == nil {
+		return nil
+	}
+
+	n.conn.Close()
+	return nil
+}
+
 func (s *subscriber) Topic() string      { return s.s.Subject }
 func (s *subscriber) Unsubscribe() error { return s.s.Unsubscribe() }

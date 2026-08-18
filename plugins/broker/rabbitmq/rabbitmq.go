@@ -24,6 +24,9 @@ func (b *rabbitmqBroker) Subscribe(topic string, handler broker.Handler) (broker
 
 func (b *rabbitmqBroker) Name() string { return "kafka" }
 
+// Close 释放 broker 资源（当前实现无占用的连接资源）
+func (b *rabbitmqBroker) Close() error { return nil }
+
 func (s *subscriber) Topic() string { return "" }
 
 func (s *subscriber) Unsubscribe() error {

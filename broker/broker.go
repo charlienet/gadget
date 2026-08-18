@@ -5,6 +5,8 @@ type Broker interface {
 	Publish(topic string, m *Message) error
 	Subscribe(topic string, h Handler) (Subscriber, error)
 	Name() string
+	// Close 释放 broker 占用的资源（连接、订阅 goroutine 等）
+	Close() error
 }
 
 // Subscriber is a convenience return type for the Subscribe method.

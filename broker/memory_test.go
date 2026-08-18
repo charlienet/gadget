@@ -28,9 +28,9 @@ func TestMemoryBroker(t *testing.T) {
 			Body: "hello",
 		}
 
-		b.Publish(topic, msg)
+		_ = b.Publish(topic, msg)
 	}
 
-	sub.Unsubscribe()
+	_ = sub.Unsubscribe()
 	assert.Equal(t, count, received)
 }

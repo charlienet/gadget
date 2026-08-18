@@ -14,10 +14,11 @@ type memoryBroker struct {
 }
 
 type memorySubscriber struct {
-	exit    chan bool
-	handler Handler
-	id      string
-	topic   string
+	exit      chan bool
+	handler   Handler
+	id        string
+	topic     string
+	closeOnce sync.Once // 保证 exit channel 只关闭一次
 }
 
 type memoryEvent struct {
@@ -38,9 +39,9 @@ func (m *memoryBroker) Publish(topic string, msg *Message) error {
 	p := &memoryEvent{message: msg, topic: topic}
 	for _, sub := range subs {
 		if err := sub.handler(p); err != nil {
-			// p.err = err
+			// 记录 handler 错误，供事件订阅方通过 Error() 读取
+			p.err = err
 		}
-
 	}
 
 	return nil
@@ -61,9 +62,9 @@ func (m *memoryBroker) Subscribe(topic string, handler Handler) (Subscriber, err
 	go func() {
 		<-sub.exit
 		m.Lock()
-		size := len(m.Subscribers) - 1
-		newSubscribers := make([]*memorySubscriber, 0, size)
-		for _, s := range m.Subscribers[topic] {
+		subs := m.Subscribers[topic]
+		newSubscribers := make([]*memorySubscriber, 0, len(subs))
+		for _, s := range subs {
 			if s.id != sub.id {
 				newSubscribers = append(newSubscribers, s)
 			}
@@ -77,12 +78,32 @@ func (m *memoryBroker) Subscribe(topic string, handler Handler) (Subscriber, err
 
 func (m *memoryBroker) Name() string { return "memory" }
 
+// Close 关闭 broker：通知所有 subscriber 退出并清空订阅
+func (m *memoryBroker) Close() error {
+	m.Lock()
+	defer m.Unlock()
+
+	for _, subs := range m.Subscribers {
+		for _, sub := range subs {
+			sub.closeOnce.Do(func() {
+				close(sub.exit)
+			})
+		}
+	}
+	m.Subscribers = make(map[string][]*memorySubscriber)
+
+	return nil
+}
+
 func (m *memorySubscriber) Topic() string {
 	return m.topic
 }
 
 func (m *memorySubscriber) Unsubscribe() error {
-	m.exit <- true
+	// 通过关闭 exit 通知 goroutine 退出（幂等，避免在无缓冲 channel 上阻塞发送）
+	m.closeOnce.Do(func() {
+		close(m.exit)
+	})
 	return nil
 }
 
