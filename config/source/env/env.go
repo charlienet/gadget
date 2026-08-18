@@ -12,7 +12,6 @@ type StringReplacer interface {
 }
 
 type env struct {
-	prefixes       []string
 	envKeyReplacer StringReplacer
 }
 

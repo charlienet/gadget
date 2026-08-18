@@ -13,7 +13,7 @@ func newWatcher(f *file) (*watcher, error) {
 		return nil, err
 	}
 
-	fw.Add(f.path)
+	_ = fw.Add(f.path)
 
 	return &watcher{
 		f:  f,
@@ -22,5 +22,5 @@ func newWatcher(f *file) (*watcher, error) {
 }
 
 func (w *watcher) Stop() {
-	w.fw.Close()
+	_ = w.fw.Close()
 }

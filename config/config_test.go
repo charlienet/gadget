@@ -17,6 +17,6 @@ func TestReadFile(t *testing.T) {
 	_ = conf.Get("ac").String()
 
 	app := struct{}{}
-	conf.Get("app").Unmarshal(&app)
-	conf.Get("app").Unmarshal(&app)
+	_ = conf.Get("app").Unmarshal(&app)
+	_ = conf.Get("app").Unmarshal(&app)
 }

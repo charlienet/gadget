@@ -28,7 +28,7 @@ func (w *watcher) run(wc clientv3.Watcher, ch clientv3.WatchChan) {
 			}
 			_ = resp
 		case <-w.exit:
-			wc.Close()
+			_ = wc.Close()
 			return
 		}
 	}

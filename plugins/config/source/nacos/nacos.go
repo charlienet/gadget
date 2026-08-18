@@ -12,7 +12,6 @@ import (
 
 type nacos struct {
 	confClient config_client.IConfigClient
-	group      string
 }
 
 func New(opts ...Option) nacos {
@@ -26,9 +25,7 @@ func New(opts ...Option) nacos {
 
 	serverConfigs := make([]constant.ServerConfig, 0)
 	for _, addr := range o.address {
-		host, port, err := net.SplitHostPort(addr)
-		if err != nil {
-		}
+		host, port, _ := net.SplitHostPort(addr)
 
 		p, err := strconv.ParseUint(port, 10, 64)
 		_ = err
