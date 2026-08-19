@@ -3,6 +3,7 @@ package logger
 import (
 	"fmt"
 	"log/slog"
+	"os"
 	"strings"
 )
 
@@ -36,4 +37,33 @@ func GetLevel(levelStr string) (Level, error) {
 	}
 
 	return Info, fmt.Errorf("unknown Level String: '%s', defaulting to InfoLevel", levelStr)
+}
+
+// ParseLevel 解析日志级别字符串（trace/debug/info/warn/error/fatal，大小写不敏感）
+func ParseLevel(s string) slog.Level {
+	switch strings.ToLower(s) {
+	case "trace":
+		return Trace
+	case "debug":
+		return Debug
+	case "info":
+		return Info
+	case "warn":
+		return Warn
+	case "error":
+		return Error
+	case "fatal":
+		return Fatal
+	default:
+		return Info
+	}
+}
+
+// LevelFromEnv 从环境变量 LOG_LEVEL 读取日志级别（未设置时默认 Info）
+func LevelFromEnv() slog.Level {
+	env := os.Getenv("LOG_LEVEL")
+	if env == "" {
+		return Info
+	}
+	return ParseLevel(env)
 }

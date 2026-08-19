@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"os"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -60,8 +59,10 @@ func (l *slogLogger) rebuild() {
 	noColor := false
 	if l.opt.Color != nil {
 		noColor = !*l.opt.Color
-	} else if os.Getenv("NO_COLOR") != "" {
-		noColor = true
+	} else {
+		// 自动模式：NO_COLOR 环境变量或非 TTY 输出（管道/文件）时禁用颜色
+		w := *l.outPtr.Load()
+		noColor = !ShouldColor() || !IsTerminal(w)
 	}
 	console := newConsoleHandlerWithPtr(l.outPtr, &ConsoleOptions{
 		Level:     l.level,

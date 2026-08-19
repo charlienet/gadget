@@ -278,9 +278,9 @@ func TestConsoleColor(t *testing.T) {
 	// 确保不受环境变量影响
 	t.Setenv("NO_COLOR", "")
 
-	// 默认：输出 ANSI 转义序列
+	// WithColor(true)：非 TTY（bytes.Buffer）也强制输出 ANSI 转义序列
 	var buf bytes.Buffer
-	l := logger.New(logger.WithOutput(&buf))
+	l := logger.New(logger.WithOutput(&buf), logger.WithColor(true))
 	l.Info("colored")
 	if !strings.Contains(buf.String(), "\033[") {
 		t.Errorf("expected ANSI color codes, got: %q", buf.String())

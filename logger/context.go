@@ -1,6 +1,8 @@
 package logger
 
-import "context"
+import (
+	"context"
+)
 
 type contextKey struct{}
 
@@ -36,4 +38,10 @@ func FromContext(ctx context.Context) Logger {
 	}
 
 	return DefaultLogger
+}
+
+// ObtainLogger 从 context 获取请求级 logger（FromContext 的别名，命名对齐 aide 生态习惯）。
+// 如果 ctx 为 nil 或未注入 logger，返回包级默认 logger。
+func ObtainLogger(ctx context.Context) Logger {
+	return FromContext(ctx)
 }
