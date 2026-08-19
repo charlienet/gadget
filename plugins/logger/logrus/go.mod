@@ -4,7 +4,7 @@ go 1.26
 
 require (
 	github.com/antonfisher/nested-logrus-formatter v1.3.1
-	github.com/charlienet/gadget/logger v0.1.5
+	github.com/charlienet/gadget/logger v0.2.1
 	github.com/sirupsen/logrus v1.9.3
 )
 
@@ -13,4 +13,5 @@ require (
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
 	github.com/stretchr/testify v1.11.1 // indirect
 	golang.org/x/sys v0.47.0 // indirect
+	gopkg.in/natefinch/lumberjack.v2 v2.2.1 // indirect
 )

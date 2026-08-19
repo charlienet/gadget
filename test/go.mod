@@ -4,7 +4,7 @@ go 1.26
 
 require (
 	github.com/alicebob/miniredis v2.5.0+incompatible
-	github.com/charlienet/gadget/redis v0.1.5
+	github.com/charlienet/gadget/redis v0.3.0
 	github.com/stretchr/testify v1.11.1
 )
 
@@ -12,7 +12,6 @@ require (
 	github.com/alicebob/gopher-json v0.0.0-20230218143504-906a9b012302 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
-	github.com/go-redis/redis_rate/v10 v10.0.1 // indirect
 	github.com/gomodule/redigo v1.9.2 // indirect
 	github.com/hashicorp/go-version v1.7.0 // indirect
 	github.com/kr/pretty v0.3.1 // indirect
