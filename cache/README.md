@@ -20,6 +20,16 @@ c = cache.New(
 )
 ```
 
+## 部署模式
+
+| 模式 | 配置 | 说明 |
+|------|------|------|
+| 只本地 | 零参 `New()` 或 `WithStore(本地 store)` | 默认注入内存缓存；单机场景 |
+| 只远程 | `WithStore(redisStore)` 单独使用 | 不注入本地层（`localStore` 为 nil），所有读写直达远程；降级/versionSync 仍生效（remoteStore 存在时启动） |
+| 两级（推荐） | `WithMemStore() + WithStore(redisStore)` | 本地 + 远程多级，兼顾性能与一致性 |
+
+只远程模式下各读写路径对 `localStore == nil` 已有完整保护，可安全运行。
+
 ## 保护性能力（默认开启，零配置生效）
 
 生产环境推荐的防雪崩 / 防穿透保护均已**默认生效**，无需显式配置；仅高级场景

@@ -2587,3 +2587,52 @@ func TestFlushWindowKeepsPendingProtection(t *testing.T) {
 	assert.Len(t, c.flushing, 0, "flushing placeholders must be cleaned after flush")
 	c.pendingMu.Unlock()
 }
+
+// --- 部署模式：只远程 / 默认注入 / 显式本地 ---
+
+func TestRemoteOnlyMode(t *testing.T) {
+	// 显式只配远程（WithStore(remoteStore)）→ 不注入本地缓存（localStore 为 nil）
+	remote := newTestRemoteStore()
+	c := New(func(o *Options) { o.WithStore(remote) })
+	assert.Nil(t, c.localStore, "remote-only mode must not inject local store")
+	assert.NotNil(t, c.remoteStore)
+
+	ctx := context.Background()
+	// Put/Get 走 remote
+	assert.Nil(t, c.Put(ctx, "k", "v", 60))
+	var s string
+	assert.Nil(t, c.Get(ctx, "k", &s))
+	assert.Equal(t, "v", s)
+
+	// Getfn 回源正常
+	var s2 string
+	assert.Nil(t, c.Getfn(ctx, "k2", &s2, func(ctx context.Context, key string, v any) (bool, error) {
+		if sv, ok := v.(*string); ok {
+			*sv = "loaded"
+		}
+		return true, nil
+	}, 60))
+	assert.Equal(t, "loaded", s2)
+
+	// Delete 走 remote
+	c.Delete(ctx, "k")
+	_, exist, _ := remote.Get(ctx, "k")
+	assert.False(t, exist, "delete should reach remote in remote-only mode")
+	c.Close()
+}
+
+func TestDefaultMemStoreInjection(t *testing.T) {
+	// 零参 New → 默认注入 mem_store（不回归）
+	c := New()
+	_, ok := c.localStore.(*mem_store)
+	assert.True(t, ok, "zero-arg New should inject mem_store")
+	c.Close()
+}
+
+func TestExplicitLocalStoreNoInjection(t *testing.T) {
+	// 显式 WithStore(localStore) → 使用传入 store，不注入默认
+	local := newMockLocalStore()
+	c := New(func(o *Options) { o.WithStore(local) })
+	assert.Equal(t, local, c.localStore, "explicit local store must be used, not injected")
+	c.Close()
+}

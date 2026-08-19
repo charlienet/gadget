@@ -142,10 +142,11 @@ func New(opts ...Option) *cache {
 	c.localStore = opt.localStore
 	c.remoteStore = opt.remoteStore
 	c.listener = opt.listener
-	// 零参 New（未通过 WithMemStore/WithStore 设置本地存储）时默认注入内存缓存，
-	// 与显式 WithMemStore() 完全一致（同一 newMemStore() 构造、走同一配置循环），
-	// 消灭"无缓存实例"陷阱（Getfn 静默回源且不写入）。
-	if c.localStore == nil {
+	// 零参 New（未显式设置任何 store）时默认注入内存缓存，与显式 WithMemStore()
+	// 完全一致（同一 newMemStore() 构造、走同一配置循环），消灭"无缓存实例"陷阱。
+	// 显式设置过任一 store（storeSet）则不注入——`WithStore(redisStore)` 单独使用
+	// 即"只远程"模式（localStore 为 nil，各读写路径已有 nil 保护）。
+	if c.localStore == nil && !opt.storeSet {
 		c.localStore = newMemStore()
 	}
 	if opt.Logger != nil {

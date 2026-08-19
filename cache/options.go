@@ -29,6 +29,9 @@ type Options struct {
 	slidingWindow       time.Duration
 	verifyEvery         int
 	versionSyncInterval time.Duration
+	// storeSet 是否显式设置过任一 store（WithStore/WithMemStore），
+	// 用于区分"零参 New 默认注入 mem_store"与"显式只配远程（只远程模式）"。
+	storeSet bool
 	// Cipher 提供透明加解密：缓存（L1/L2）中存储加密结果，调用方明文进出，
 	// 无感知。nil 表示不加密（默认）。
 	Cipher Cipher
@@ -51,6 +54,7 @@ func (o Options) initActual(v any) {
 }
 
 func (o *Options) WithStore(s Store) {
+	o.storeSet = true // 显式设置过任一 store（含只远程模式）
 	if !s.IsRemote() {
 		o.localStore = s
 	} else {
