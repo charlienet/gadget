@@ -7,62 +7,24 @@ import (
 )
 
 func TestLevelString(t *testing.T) {
+	// Level 是 slog.Level 别名，String() 遵循 slog 规则：
+	// 命名级别返回大写名（DEBUG/INFO/WARN/ERROR），自定义值返回 base+偏移
 	tests := []struct {
 		level logger.Level
 		want  string
 	}{
-		{logger.Trace, "TRACE"},
+		{logger.Trace, "DEBUG-4"},
 		{logger.Debug, "DEBUG"},
 		{logger.Info, "INFO"},
 		{logger.Warn, "WARN"},
 		{logger.Error, "ERROR"},
-		{logger.Fatal, "FATAL"},
+		{logger.Fatal, "ERROR+4"},
 	}
 
 	for _, tt := range tests {
 		got := tt.level.String()
 		if got != tt.want {
-			t.Errorf("Level(%d).String() = %q, want %q", int8(tt.level), got, tt.want)
-		}
-	}
-}
-
-func TestLevelEnabled(t *testing.T) {
-	tests := []struct {
-		current logger.Level
-		target  logger.Level
-		want    bool
-	}{
-		// Same level is enabled
-		{logger.Info, logger.Info, true},
-		{logger.Debug, logger.Debug, true},
-		{logger.Fatal, logger.Fatal, true},
-
-		// Higher severity (bigger value) is enabled
-		{logger.Debug, logger.Info, true},
-		{logger.Debug, logger.Warn, true},
-		{logger.Debug, logger.Error, true},
-		{logger.Debug, logger.Fatal, true},
-		{logger.Info, logger.Warn, true},
-		{logger.Info, logger.Error, true},
-		{logger.Info, logger.Fatal, true},
-
-		// Lower severity (smaller value) is NOT enabled
-		{logger.Info, logger.Debug, false},
-		{logger.Info, logger.Trace, false},
-		{logger.Warn, logger.Info, false},
-		{logger.Warn, logger.Debug, false},
-		{logger.Warn, logger.Trace, false},
-		{logger.Error, logger.Warn, false},
-		{logger.Error, logger.Info, false},
-		{logger.Fatal, logger.Error, false},
-	}
-
-	for _, tt := range tests {
-		got := tt.current.Enabled(tt.target)
-		if got != tt.want {
-			t.Errorf("Level(%s).Enabled(%s) = %v, want %v",
-				tt.current, tt.target, got, tt.want)
+			t.Errorf("Level(%d).String() = %q, want %q", int(tt.level), got, tt.want)
 		}
 	}
 }

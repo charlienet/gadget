@@ -16,6 +16,11 @@ func WithLogger(parent context.Context, l Logger) context.Context {
 	})
 }
 
+// WithContext 将 logger 注入 context（WithLogger 的别名，命名对齐 slog 生态习惯）
+func WithContext(ctx context.Context, l Logger) context.Context {
+	return WithLogger(ctx, l)
+}
+
 func FromContext(ctx context.Context) Logger {
 	if ctx == nil {
 		return DefaultLogger

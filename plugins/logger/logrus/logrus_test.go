@@ -20,7 +20,7 @@ func captureLogger(t *testing.T, level logger.Level, opts ...logrus.Option) (log
 		DisableColors: true,
 		FullTimestamp: false,
 	}))
-	l := logger.New(logrus.New(opts...), logger.WithLevel(level), logger.WithOutput(&buf))
+	l := logger.New(logger.WithRecorder(logrus.New(opts...)), logger.WithLevel(level), logger.WithOutput(&buf))
 	return l, &buf
 }
 
@@ -150,8 +150,8 @@ func TestSetOutput(t *testing.T) {
 
 func TestJSONFormatter(t *testing.T) {
 	var buf bytes.Buffer
-	l := logger.New(
-		logrus.New(logrus.WithJSONFormatter()),
+	l := logger.New(logger.WithRecorder(
+		logrus.New(logrus.WithJSONFormatter())),
 		logger.WithLevel(logger.Info),
 		logger.WithOutput(&buf),
 	)
@@ -169,8 +169,8 @@ func TestJSONFormatter(t *testing.T) {
 
 func TestNestedFormatter(t *testing.T) {
 	var buf bytes.Buffer
-	l := logger.New(
-		logrus.New(logrus.WithNestedFormatter()),
+	l := logger.New(logger.WithRecorder(
+		logrus.New(logrus.WithNestedFormatter())),
 		logger.WithLevel(logger.Info),
 		logger.WithOutput(&buf),
 	)
@@ -185,8 +185,8 @@ func TestNestedFormatter(t *testing.T) {
 
 func TestReportCaller(t *testing.T) {
 	var buf bytes.Buffer
-	l := logger.New(
-		logrus.New(logrus.WithReportCaller()),
+	l := logger.New(logger.WithRecorder(
+		logrus.New(logrus.WithReportCaller())),
 		logger.WithLevel(logger.Info),
 		logger.WithOutput(&buf),
 	)
@@ -210,8 +210,8 @@ func TestWithHook(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	l := logger.New(
-		logrus.New(logrus.WithHook(hook)),
+	l := logger.New(logger.WithRecorder(
+		logrus.New(logrus.WithHook(hook))),
 		logger.WithLevel(logger.Info),
 		logger.WithOutput(&buf),
 	)
@@ -237,8 +237,8 @@ func TestString(t *testing.T) {
 func TestLoggerToLogrusLevel(t *testing.T) {
 	// Verify all levels are correctly mapped by checking log output
 	var buf bytes.Buffer
-	l := logger.New(
-		logrus.New(logrus.WithFormatter(&log.TextFormatter{DisableColors: true})),
+	l := logger.New(logger.WithRecorder(
+		logrus.New(logrus.WithFormatter(&log.TextFormatter{DisableColors: true}))),
 		logger.WithLevel(logger.Trace),
 		logger.WithOutput(&buf),
 	)
@@ -264,11 +264,11 @@ func TestSensitiveDataRedaction(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	l := logger.New(
+	l := logger.New(logger.WithRecorder(
 		logrus.New(
 			logrus.WithFormatter(&log.TextFormatter{DisableColors: true}),
 			logrus.WithHook(redactHook),
-		),
+		)),
 		logger.WithLevel(logger.Info),
 		logger.WithOutput(&buf),
 	)
@@ -296,11 +296,11 @@ func TestSensitiveFieldRedaction(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	l := logger.New(
+	l := logger.New(logger.WithRecorder(
 		logrus.New(
 			logrus.WithFormatter(&log.TextFormatter{DisableColors: true}),
 			logrus.WithHook(redactHook),
-		),
+		)),
 		logger.WithLevel(logger.Info),
 		logger.WithOutput(&buf),
 	)
@@ -344,8 +344,8 @@ func TestFatalLevelLogrusMapping(t *testing.T) {
 	// Verify the Fatal level is mapped to logrus.FatalLevel
 	// by using the adapter's internal mapping through Log()
 	var buf bytes.Buffer
-	l := logger.New(
-		logrus.New(logrus.WithFormatter(&log.TextFormatter{DisableColors: true})),
+	l := logger.New(logger.WithRecorder(
+		logrus.New(logrus.WithFormatter(&log.TextFormatter{DisableColors: true}))),
 		logger.WithLevel(logger.Trace),
 		logger.WithOutput(&buf),
 	)

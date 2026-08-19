@@ -9,6 +9,8 @@ require (
 	github.com/stretchr/testify v1.11.1
 )
 
+require github.com/rogpeppe/go-internal v1.14.1 // indirect
+
 require (
 	github.com/alicebob/gopher-json v0.0.0-20230218143504-906a9b012302 // indirect
 	github.com/alicebob/miniredis v2.5.0+incompatible

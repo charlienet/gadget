@@ -11,13 +11,15 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/charlienet/gadget/logger"
 	"golang.org/x/sync/singleflight"
 )
 
 const (
-	versionMarker           = 0xFB // magic byte prefix to distinguish versioned data
-	versionPrefixLen        = 9    // 1 magic byte + 8-byte unix millisecond timestamp
-	defaultVersionSyncBatch = 100
+	versionMarker              = 0xFB // magic byte prefix to distinguish versioned data
+	versionPrefixLen           = 9    // 1 magic byte + 8-byte unix millisecond timestamp
+	defaultVersionSyncBatch    = 100
+	defaultVersionSyncInterval = 30 * time.Second
 	// maxPendingWrites 是降级期间 pending 缓冲的最大条目数，防止长降级 × 高写速率下内存无界增长。
 	maxPendingWrites = 1024
 	// flushTimeout 是单次 flush 中逐条网络操作的总超时。
@@ -60,7 +62,7 @@ type cache struct {
 	listener            Listener   // 异步消息通知
 	serializer          Serializer // 序列化
 	notExistPlaceholder []byte     // 缓存击穿空对象
-	logger              Logger     // 日志
+	logger              logger.Logger // 日志
 	opt                 Options
 	cipher              Cipher // 透明加解密器（nil 表示不加密）
 	sg                  singleflight.Group
@@ -532,6 +534,8 @@ func (c *cache) Delete(ctx context.Context, keys ...string) {
 	if len(keys) == 0 {
 		return // 空参数直接返回，避免向 remote 发送空 Del 引发告警/计数噪音
 	}
+	c.logger.Debugf("delete cache key: %v", keys)
+
 	c.removeFromStorage(ctx, c.localStore, keys...)
 	c.removeFromStorage(ctx, c.remoteStore, keys...)
 
@@ -1182,7 +1186,7 @@ func acquireDefaultCache() *cache {
 	return &cache{
 		notExistPlaceholder: []byte(defaultNotExistPlaceholder),
 		serializer:          jsonSerializer{},
-		logger:              DefaultLogger,
+		logger:              logger.DefaultLogger,
 		sg:                  singleflight.Group{},
 		stats:               newStats(),
 		metrics:             noopMetrics{},

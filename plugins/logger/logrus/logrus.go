@@ -1,3 +1,8 @@
+// Package logrus 提供基于 logrus 的 LogRecorder 实现（recorder 路径兼容插件）。
+//
+// 注意：recorder 路径的 SetLevel/SetOutput 作用于底层 logrus.Logger 全局实例
+// （l.SetLevel(...) / l.SetOutput(...)）。多个 logger 实例共享同一 logrus.Logger
+// 时会互相影响（后调用的覆盖先调用的），建议单实例使用。
 package logrus
 
 import (
@@ -5,7 +10,7 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-var DefaultLogger = logger.New(New())
+var DefaultLogger = logger.New(logger.WithRecorder(New()))
 
 type entryLogger interface {
 	WithFields(logrus.Fields) *logrus.Entry
@@ -63,21 +68,21 @@ func (l *logrusLogger) Logf(level logger.Level, format string, args ...any) {
 
 func (*logrusLogger) String() string { return "logrus" }
 
+// loggerToLogrusLevel 将 slog 级别（数值越小越详细）映射为 logrus 级别。
+// 两套级别数值体系完全不同，必须按值域比较。
 func loggerToLogrusLevel(level logger.Level) logrus.Level {
-	switch level {
-	case logger.Trace:
+	switch {
+	case level <= logger.Trace:
 		return logrus.TraceLevel
-	case logger.Debug:
+	case level <= logger.Debug:
 		return logrus.DebugLevel
-	case logger.Info:
+	case level <= logger.Info:
 		return logrus.InfoLevel
-	case logger.Warn:
+	case level <= logger.Warn:
 		return logrus.WarnLevel
-	case logger.Error:
+	case level <= logger.Error:
 		return logrus.ErrorLevel
-	case logger.Fatal:
-		return logrus.FatalLevel
 	default:
-		return logrus.InfoLevel
+		return logrus.FatalLevel
 	}
 }

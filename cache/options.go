@@ -2,6 +2,8 @@ package cache
 
 import (
 	"time"
+
+	"github.com/charlienet/gadget/logger"
 )
 
 // Options represents the options for the cache.
@@ -14,7 +16,7 @@ type Options struct {
 	listener            Listener
 	serializer          Serializer
 	metrics             Metrics
-	Logger              Logger
+	Logger              logger.Logger
 	TTL                 int
 	Name                string
 	cleanupInterval     time.Duration
@@ -99,7 +101,7 @@ func WithTTL(ttl int) Option {
 	}
 }
 
-func WithLogger(l Logger) Option {
+func WithLogger(l logger.Logger) Option {
 	return func(o *Options) {
 		o.Logger = l
 	}
