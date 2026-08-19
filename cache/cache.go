@@ -16,8 +16,8 @@ import (
 )
 
 const (
-	versionMarker             = 0xFB // magic byte prefix to distinguish versioned data
-	versionPrefixLen          = 9    // 1 magic byte + 8-byte unix millisecond timestamp
+	versionMarker              = 0xFB // magic byte prefix to distinguish versioned data
+	versionPrefixLen           = 9    // 1 magic byte + 8-byte unix millisecond timestamp
 	defaultVersionSyncInterval = 30 * time.Second
 	defaultVersionSyncBatch    = 100
 )
@@ -55,15 +55,15 @@ type cache struct {
 	stopChan            chan struct{}
 
 	// Degraded mode
-	degraded          atomic.Bool
-	degradeCount      atomic.Int64
-	degradeThreshold  int
-	degradeRecovery   time.Duration
-	degradeStopRecov  chan struct{}
+	degraded         atomic.Bool
+	degradeCount     atomic.Int64
+	degradeThreshold int
+	degradeRecovery  time.Duration
+	degradeStopRecov chan struct{}
 
 	// Probabilistic verification
-	verifyEvery   int
-	verifyCounts  sync.Map // string → *atomic.Int64: access count per key
+	verifyEvery  int
+	verifyCounts sync.Map // string → *atomic.Int64: access count per key
 
 	// Version sync (background cache coherence)
 	versionSyncInterval time.Duration
@@ -152,7 +152,6 @@ func New(opts ...Option) *cache {
 
 	return c
 }
-
 
 // GetMulti retrieves multiple keys at once. Uses the store's BulkStore
 // interface if available, otherwise falls back to individual Get calls.
@@ -312,7 +311,7 @@ func (c *cache) Update(ctx context.Context, key string, updateFn UpdateFn) error
 }
 
 func (c *cache) Delete(ctx context.Context, keys ...string) {
-	c.logger.Debug("delete cache key:", keys)
+	c.logger.Debugf("delete cache key: %v", keys)
 
 	c.removeFromStorage(ctx, c.localStore, keys...)
 	c.removeFromStorage(ctx, c.remoteStore, keys...)

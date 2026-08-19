@@ -19,7 +19,6 @@ use (
 	./plugins/config/source/etcd
 	./plugins/config/source/nacos
 	./plugins/logger/logrus
-	./plugins/logger/zap
 	./plugins/store/consul
 	./plugins/store/file
 	./plugins/store/redis

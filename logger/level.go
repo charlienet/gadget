@@ -2,53 +2,36 @@ package logger
 
 import (
 	"fmt"
+	"log/slog"
 	"strings"
 )
 
-type Level int8
+// Level 直接复用 slog 级别体系（现代化：与 slog 完全一致）
+type Level = slog.Level
 
 const (
-	Trace Level = iota - 1
-	Debug
-	Info
-	Warn
-	Error
-	Fatal
+	Trace Level = slog.Level(-8)
+	Debug Level = slog.LevelDebug // -4
+	Info  Level = slog.LevelInfo  // 0
+	Warn  Level = slog.LevelWarn  // 4
+	Error Level = slog.LevelError // 8
+	Fatal Level = slog.Level(12)
 )
 
-func (l Level) String() string {
-	switch l {
-	case Trace:
-		return "TRACE"
-	case Debug:
-		return "DEBUG"
-	case Info:
-		return "INFO"
-	case Warn:
-		return "WARN"
-	case Error:
-		return "ERROR"
-	case Fatal:
-		return "FATAL"
-	}
-	return ""
-}
-
-func (l Level) Enabled(lvl Level) bool { return lvl >= l }
-
+// GetLevel 解析级别字符串（保留原有 API，返回类型不变）
 func GetLevel(levelStr string) (Level, error) {
 	switch strings.ToUpper(levelStr) {
-	case Trace.String():
+	case "TRACE":
 		return Trace, nil
-	case Debug.String():
+	case "DEBUG":
 		return Debug, nil
-	case Info.String():
+	case "INFO":
 		return Info, nil
-	case Warn.String():
+	case "WARN":
 		return Warn, nil
-	case Error.String():
+	case "ERROR":
 		return Error, nil
-	case Fatal.String():
+	case "FATAL":
 		return Fatal, nil
 	}
 

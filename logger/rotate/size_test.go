@@ -10,10 +10,11 @@ func TestNewRotateSizeWriter(t *testing.T) {
 	dir := t.TempDir()
 	filename := filepath.Join(dir, "test.log")
 
-	w := NewRotateSizeWriter(filename, 1, 3, 2)
+	w := NewRotateSizeWriter(filename, 1, 3, 2, true)
 	if w == nil {
 		t.Fatal("NewRotateSizeWriter returned nil")
 	}
+	defer w.Close() // 释放文件句柄，否则 Windows 上 TempDir 清理失败
 
 	n, err := w.Write([]byte("hello\n"))
 	if err != nil {
@@ -36,7 +37,9 @@ func TestNewRotateSizeWriterMultipleWrites(t *testing.T) {
 	dir := t.TempDir()
 	filename := filepath.Join(dir, "multi.log")
 
-	w := NewRotateSizeWriter(filename, 10, 3, 5)
+	w := NewRotateSizeWriter(filename, 10, 3, 5, true)
+	defer w.Close() // 释放文件句柄
+
 	for i := range 3 {
 		_, err := w.Write([]byte("line\n"))
 		if err != nil {
@@ -50,5 +53,37 @@ func TestNewRotateSizeWriterMultipleWrites(t *testing.T) {
 	}
 	if len(data) < 3*5 {
 		t.Errorf("expected at least %d bytes, got %d", 3*5, len(data))
+	}
+}
+
+// TestCompressRotate 验证 compress 参数生效且 writer 可 Close：
+// Compress 透传给 lumberjack.Logger.Compress（gzip 压缩轮换文件），
+// 压缩行为由 lumberjack 保证，此处仅验证配置不静默丢失 + 句柄可释放。
+func TestCompressRotate(t *testing.T) {
+	dir := t.TempDir()
+	filename := filepath.Join(dir, "compress.log")
+
+	w := NewRotateSizeWriter(filename, 1, 1, 1, true)
+	defer w.Close()
+
+	n, err := w.Write([]byte("compressible data\n"))
+	if err != nil {
+		t.Fatalf("unexpected write error: %v", err)
+	}
+	if n != len("compressible data\n") {
+		t.Errorf("expected %d bytes written, got %d", len("compressible data\n"), n)
+	}
+
+	// 显式 Close 不应报错（io.WriteCloser 契约）
+	if err := w.Close(); err != nil {
+		t.Errorf("expected Close to succeed, got: %v", err)
+	}
+
+	data, err := os.ReadFile(filename)
+	if err != nil {
+		t.Fatalf("failed to read log file: %v", err)
+	}
+	if string(data) != "compressible data\n" {
+		t.Errorf("expected content in file, got %q", string(data))
 	}
 }

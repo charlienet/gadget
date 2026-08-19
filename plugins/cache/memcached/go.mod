@@ -9,5 +9,6 @@ require (
 
 require (
 	github.com/charlienet/gadget/logger v0.1.5 // indirect
-	golang.org/x/sync v0.8.0 // indirect
+	github.com/stretchr/testify v1.11.1 // indirect
+	golang.org/x/sync v0.22.0 // indirect
 )
