@@ -100,6 +100,8 @@ type cache struct {
 
 	// Close 幂等保护
 	closeOnce sync.Once
+	watcherWG sync.WaitGroup // 等待 startWatcher 退出
+	closed    atomic.Bool    // Close 后置位，阻止 noticeRemoved 发布
 }
 
 // pendingWrite 记录降级期间被跳过的 remote 写入，恢复后补偿写回 remote。
@@ -215,6 +217,7 @@ func New(opts ...Option) *cache {
 
 	c.opt = opt
 
+	c.watcherWG.Add(1)
 	go c.startWatcher()
 
 	return c
@@ -547,6 +550,9 @@ func (c *cache) Delete(ctx context.Context, keys ...string) {
 }
 
 func (c *cache) noticeRemoved(keys ...string) {
+	if c.closed.Load() {
+		return
+	}
 	if c.listener != nil && len(keys) > 0 {
 		for _, key := range keys {
 			if err := c.listener.Publish(key); err != nil {
@@ -563,7 +569,9 @@ func (c *cache) Stats() Stats {
 
 func (c *cache) Close() {
 	c.closeOnce.Do(func() {
+		c.closed.Store(true)
 		close(c.stopChan)
+		c.watcherWG.Wait()
 
 		if c.degradeStopRecov != nil {
 			close(c.degradeStopRecov)
@@ -1117,13 +1125,15 @@ func (c *cache) hasPending(key string) bool {
 }
 
 func (c *cache) startWatcher() {
+	defer c.watcherWG.Done()
+
 	if c.listener != nil {
 		ch := c.listener.Subscribe()
 		for {
 			select {
 			case key, ok := <-ch:
 				if !ok {
-					c.logger.Warn("listener channel closed, exiting watcher")
+					_ = c.listener.Close(context.Background())
 					return
 				}
 				c.removeFromStorage(context.Background(), c.localStore, key)

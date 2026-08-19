@@ -6,6 +6,7 @@ import "context"
 //
 // 实现必须并发安全：cache 包的 healthLoop 会在后台并发调用 Get/Put/Delete，
 // 用户的 Get/Put/Delete 请求也会并发执行。
+// Close 与 Get/Put/Delete 等数据操作须并发安全。
 type Store interface {
 
 	// Get gets a cached value by key.

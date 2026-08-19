@@ -2,6 +2,8 @@ package cache
 
 import "context"
 
+// Listener 定义缓存失效通知的订阅/发布接口。
+// Publish 必须在 Close 前完成；实现须保证 Publish 与 Close 并发安全。
 type Listener interface {
 	Subscribe() chan string
 	Publish(key string) error

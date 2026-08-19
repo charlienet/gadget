@@ -1193,14 +1193,19 @@ func (s *bulkFailStore) SetMulti(_ context.Context, _ map[string][]byte, _ int) 
 }
 
 // closableListener 的 Close 会关闭订阅 channel（触发 watcher ok=false 退出）。
+// 实现幂等：重复调用安全。
 type closableListener struct {
-	ch chan string
+	ch      chan string
+	closeOnce sync.Once
 }
 
-func (l *closableListener) Subscribe() chan string      { return l.ch }
-func (l *closableListener) Publish(string) error        { return nil }
-func (l *closableListener) Ready() <-chan struct{}      { return closedChan() }
-func (l *closableListener) Close(context.Context) error { close(l.ch); return nil }
+func (l *closableListener) Subscribe() chan string { return l.ch }
+func (l *closableListener) Publish(string) error   { return nil }
+func (l *closableListener) Ready() <-chan struct{}  { return closedChan() }
+func (l *closableListener) Close(context.Context) error {
+	l.closeOnce.Do(func() { close(l.ch) })
+	return nil
+}
 
 // initStore 实现 Initialize(Options) 接口。
 type initStore struct {
@@ -1442,6 +1447,7 @@ func TestWatcherExitsOnChannelClose(t *testing.T) {
 		stopChan:   make(chan struct{}),
 	}
 	done := make(chan struct{})
+	c.watcherWG.Add(1)
 	go func() {
 		c.startWatcher()
 		close(done)
@@ -1455,7 +1461,6 @@ func TestWatcherExitsOnChannelClose(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("watcher did not exit after channel close")
 	}
-	assert.Contains(t, ml.warns[0], "listener channel closed")
 }
 
 // --- mem_store 分支补全 ---
