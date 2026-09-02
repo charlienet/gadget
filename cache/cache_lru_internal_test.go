@@ -369,7 +369,7 @@ func TestEvictionMetricCountsOnlyRealEvictions(t *testing.T) {
 
 	_ = s.Put(ctx, "a", []byte("1"), 0)
 	_, _, _ = s.Get(ctx, "a")
-	_, _, _ = s.Get(ctx, "a") // a hits=2 且位于 head
+	_, _, _ = s.Get(ctx, "a") // a 累计 hits=2（此刻仅 a 一个条目，居于 head；随后 b、c 入队会把 a 挤向 tail，见下行）
 	_ = s.Put(ctx, "b", []byte("2"), 0)
 	_ = s.Put(ctx, "c", []byte("3"), 0)
 	// head→tail: c, b, a；a 热且在 tail
@@ -574,4 +574,102 @@ func TestSyncBatchCoversAllKeysDespiteHotUserReads(t *testing.T) {
 		k := fmt.Sprintf("k%d", i)
 		assert.Greater(t, remote.seen[k], 0, "key %s 应被版本同步采样覆盖（冷尾不饿死）", k)
 	}
+}
+
+// --- hardMode 重扫分支定向覆盖（Minor 1）---
+
+// 现有豁免用例的超限幅度都只有 1~2，预算（budget=len/4）从未耗尽，因此 evictIfNeeded
+// 第二阶段的 hardMode 重扫分支（游标抵达 head 后无条件重扫驱逐）从未被触发。
+//
+// 构造：先用足够大的容量建一批"全热"条目使其共存，再骤然收紧 maxItems——此时
+// budget=len/4 > maxItems，第一轮至多跳过 budget 个热条目、其余驱逐后残留仍 >maxItems，
+// 游标抵达 head 触发 hardMode，重扫无条件逐出热 key 才收敛到 maxItems。
+// 关键判据：最终 len 恰好等于 maxItems（若无 hardMode，会停在 len=budget > maxItems）。
+func TestHotKeyExemptionHardModeRescan(t *testing.T) {
+	spy := &internalEvictSpy{}
+	s := newMemStore()
+	s.ttlJitter = 0
+	s.hotKeyThreshold = 1 // 全热即可触发豁免路径
+	s.metrics = spy
+	ctx := context.Background()
+
+	const hot = 60
+	originals := make([]string, 0, hot)
+	s.maxItems = 1000 // 宽松容量：先让 hot 个热条目共存不被逐
+	for i := 0; i < hot; i++ {
+		k := fmt.Sprintf("h%d", i)
+		_ = s.Put(ctx, k, []byte("v"), 0)
+		_, _, _ = s.Get(ctx, k) // 每个 hits>=1 → 全体"够热"
+		originals = append(originals, k)
+	}
+	assert.Equal(t, hot, s.Len(), "构建阶段：热条目应全部共存")
+
+	// budget 归零后开始计量驱逐
+	spy.mu.Lock()
+	spy.n = 0
+	spy.mu.Unlock()
+
+	// 骤然收紧容量：len=60 → maxItems=10，budget=60/4=15 > 10。
+	// 一次 Put 触发 evictIfNeeded，单轮无法收敛 → 必须走 hardMode 重扫。
+	s.maxItems = 10
+	_ = s.Put(ctx, "trigger", []byte("t"), 0)
+
+	// 强判据：容量硬上限被强制维持。无 hardMode 分支时，第一轮扫到 head 会停在
+	// len=budget(=15) > maxItems，绝不可能恰好收敛到 10。
+	assert.Equal(t, 10, s.Len(), "hardMode 重扫应收敛到 maxItems；若仅停在 budget 残留说明分支未执行")
+	assert.LessOrEqual(t, s.Len(), 10, "不变量 len<=maxItems 恒成立")
+	checkListInvariants(t, s)
+
+	// 驱逐确实发生，且为收敛到 10 必须逐出大量热条目
+	spy.mu.Lock()
+	evictions := spy.n
+	spy.mu.Unlock()
+	assert.Greater(t, evictions, 0, "驱逐应发生")
+	assert.GreaterOrEqual(t, evictions, hot-10, "全热降级需逐出足够多的热条目")
+
+	alive := 0
+	for _, k := range originals {
+		if _, ok := s.peek(k); ok {
+			alive++
+		}
+	}
+	assert.Less(t, alive, hot, "hardMode 必然逐出部分原始热 key（豁免被预算降级）")
+}
+
+// --- 豁免不挡版本同步清除（Minor 2）---
+
+// 热 key 豁免只免容量驱逐。版本同步（syncBatch）发现"远程已删"时经
+// removeFromStorage→Delete 清除本地，该链路无视热度——即便 hits 远超阈值也必须被清。
+func TestHotKeyExemptionDoesNotBlockVersionSyncEviction(t *testing.T) {
+	local := newMemStore()
+	local.ttlJitter = 0
+	local.hotKeyThreshold = 1 // 开启豁免
+	remote := newRecordingRemoteStore()
+	ctx := context.Background()
+
+	v := makeVersionedData(1, []byte("p"))
+	_ = local.Put(ctx, "hot", v, 0)
+	_ = remote.Put(ctx, "hot", v, 0) // 远程先持有同版本副本
+
+	// 把 "hot" 抬成远超阈值的热 key（同包特权直设 hits）
+	local.Lock()
+	local.items["hot"].hits = 1000
+	local.Unlock()
+
+	// 远程侧删除该 key
+	_ = remote.Delete(ctx, "hot")
+
+	c := &cache{
+		localStore:       local,
+		remoteStore:      remote,
+		versionSyncBatch: 10,
+		logger:           slog.Default(),
+		stopChan:         make(chan struct{}),
+	}
+	c.syncBatch()
+
+	// 本地 "hot" 应被清除：removeFromStorage→mem_store.Delete 不经豁免路径
+	_, ok := local.peek("hot")
+	assert.False(t, ok, "热 key 命中'远程已删'仍应被版本同步清除——豁免只免容量驱逐")
+	checkListInvariants(t, local)
 }

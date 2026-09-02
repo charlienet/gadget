@@ -29,8 +29,12 @@ func benchConcurrentGet(b *testing.B, goroutines int) {
 	ctx := context.Background()
 
 	const keys = 2000
+	// 预生成 key 切片：把 fmt.Sprintf 移出热循环。否则每次 Get 都新建一个 key 字符串
+	// （实测约 14 B/op 分配即源于此），污染读吞吐测量。ResetTimer 前完成，不计入基准。
+	keyList := make([]string, keys)
 	for i := 0; i < keys; i++ {
-		_ = s.Put(ctx, fmt.Sprintf("k%d", i), []byte("payload-bytes"), 0) // expire 0：不过期，保证命中
+		keyList[i] = fmt.Sprintf("k%d", i)
+		_ = s.Put(ctx, keyList[i], []byte("payload-bytes"), 0) // expire 0：不过期，保证命中
 	}
 
 	per := b.N / goroutines
@@ -45,7 +49,7 @@ func benchConcurrentGet(b *testing.B, goroutines int) {
 		go func(g int) {
 			defer wg.Done()
 			for i := 0; i < per; i++ {
-				_, _, _ = s.Get(ctx, fmt.Sprintf("k%d", (g*131+i)%keys))
+				_, _, _ = s.Get(ctx, keyList[(g*131+i)%keys]) // 直接取预生成 key：热循环零分配
 			}
 		}(g)
 	}
@@ -53,8 +57,11 @@ func benchConcurrentGet(b *testing.B, goroutines int) {
 	b.StopTimer()
 }
 
-// BenchmarkSerialPutEviction 度量单线程持续 Put 触发容量驱逐时的写入吞吐
-// （旧版 removeFromOrder 为 O(n) 切片搬移，新版链表摘除为 O(1)）。
+// BenchmarkSerialPutEviction 度量单线程持续 Put 触发容量驱逐时的写入吞吐。
+// 注意：本基准（全新建键 + 满容量驱逐）的成本主要由 evictIfNeeded 第一阶段的全表
+// 过期扫描支配——该扫描两版共有、且按设计保持 O(n) 不做优化，故新旧版数字接近，
+// 本基准并非最能体现数据结构改进的场景。侵入式链表把 removeFromOrder 的 O(n) 线性
+// 摘除降为 O(1)，其真实收益体现在大表"覆写已有 key"与"Delete"路径，而非此处全新建键。
 func BenchmarkSerialPutEviction(b *testing.B) {
 	s := newMemStore()
 	s.ttlJitter = 0

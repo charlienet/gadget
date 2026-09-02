@@ -151,6 +151,7 @@ c.Delete(ctx, "key")
 | `WithName(name)` | 缓存实例名称（用于存储前缀） |
 | `WithLogger(l)` | 日志记录器 |
 | `WithTTLJitter(d)` | TTL 随机抖动范围（默认开启 0~30s；`WithTTLJitter(0)` 关闭） |
+| `WithHotKeyThreshold(n)` | L1 容量驱逐热 key 豁免：清理周期内命中 ≥ n 的条目优先跳过，单轮上限约 25%，热度窗口=清理周期，默认关闭（详见"内存存储驱逐策略"） |
 
 ### 缓存雪崩防护
 
