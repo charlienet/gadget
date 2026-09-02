@@ -12,7 +12,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/charlienet/gadget/logger"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -1198,10 +1197,9 @@ func acquireDefaultCache() *cache {
 	return &cache{
 		notExistPlaceholder: []byte(defaultNotExistPlaceholder),
 		serializer:          jsonSerializer{},
-		// 若应用运行期调用 logger.Init/New 重建默认实例，此处捕获的引用将失效
-		// （旧实例被关闭：异步链静默丢日志，见 logger.DefaultLogger 文档）；
-		// 需要新实例时应重新构造 cache。
-		logger:           logger.DefaultLogger,
+		// slog.Default() 每次动态解析当前默认实例：应用运行期重建默认日志器
+		// （logger.Init/New 内部已调用 slog.SetDefault）后 cache 自动跟随，无需重建。
+		logger:           slog.Default(),
 		sg:               singleflight.Group{},
 		stats:            newStats(),
 		metrics:          noopMetrics{},

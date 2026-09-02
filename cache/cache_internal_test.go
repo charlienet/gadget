@@ -10,7 +10,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/charlienet/gadget/logger"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -118,7 +117,7 @@ func TestSyncBatchUpdatesStaleLocal(t *testing.T) {
 		remoteStore:      remote,
 		ttl:              60,
 		versionSyncBatch: defaultVersionSyncBatch,
-		logger:           logger.DefaultLogger,
+		logger:           slog.Default(),
 		stopChan:         make(chan struct{}),
 	}
 
@@ -141,7 +140,7 @@ func TestSyncBatchEvictsStaleLocalWhenRemoteGone(t *testing.T) {
 		localStore:       local,
 		remoteStore:      remote,
 		versionSyncBatch: defaultVersionSyncBatch,
-		logger:           logger.DefaultLogger,
+		logger:           slog.Default(),
 		stopChan:         make(chan struct{}),
 	}
 
@@ -161,7 +160,7 @@ func TestSyncBatchSkipsWhenDegraded(t *testing.T) {
 	c := &cache{
 		localStore:  local,
 		remoteStore: remote,
-		logger:      logger.DefaultLogger,
+		logger:      slog.Default(),
 		stopChan:    make(chan struct{}),
 	}
 	c.degraded.Store(true)
@@ -177,7 +176,7 @@ func TestSyncBatchNoLocal(t *testing.T) {
 	c := &cache{
 		localStore:  nil,
 		remoteStore: newTestRemoteStore(),
-		logger:      logger.DefaultLogger,
+		logger:      slog.Default(),
 		stopChan:    make(chan struct{}),
 	}
 	// syncBatch checks localStore.(*mem_store); nil should not panic
@@ -192,7 +191,7 @@ func TestSyncBatchEmptyStore(t *testing.T) {
 		localStore:       local,
 		remoteStore:      remote,
 		versionSyncBatch: defaultVersionSyncBatch,
-		logger:           logger.DefaultLogger,
+		logger:           slog.Default(),
 		stopChan:         make(chan struct{}),
 	}
 
@@ -227,7 +226,7 @@ func TestVersionSyncLoop(t *testing.T) {
 		localStore:          local,
 		remoteStore:         remote,
 		ttl:                 60,
-		logger:              logger.DefaultLogger,
+		logger:              slog.Default(),
 		versionSyncInterval: 10 * time.Millisecond,
 		versionSyncBatch:    100,
 		versionStop:         make(chan struct{}),
@@ -342,7 +341,7 @@ func TestCacheDeletePattern(t *testing.T) {
 	local := newMemStore()
 	c := &cache{
 		localStore: local,
-		logger:     logger.DefaultLogger,
+		logger:     slog.Default(),
 		stopChan:   make(chan struct{}),
 	}
 	ctx := context.Background()
@@ -381,7 +380,7 @@ func TestRecordRemoteErrorTriggersDegraded(t *testing.T) {
 		degradeThreshold: 3,
 		degradeRecovery:  100 * time.Millisecond,
 		metrics:          noopMetrics{},
-		logger:           logger.DefaultLogger,
+		logger:           slog.Default(),
 		stopChan:         make(chan struct{}),
 	}
 
@@ -402,7 +401,7 @@ func TestRecordRemoteErrorNoThreshold(t *testing.T) {
 	c := &cache{
 		degradeThreshold: 0,
 		metrics:          noopMetrics{},
-		logger:           logger.DefaultLogger,
+		logger:           slog.Default(),
 		stopChan:         make(chan struct{}),
 	}
 
@@ -416,7 +415,7 @@ func TestRecordRemoteSuccessExitsDegraded(t *testing.T) {
 	c := &cache{
 		degradeThreshold: 1,
 		metrics:          noopMetrics{},
-		logger:           logger.DefaultLogger,
+		logger:           slog.Default(),
 		stopChan:         make(chan struct{}),
 	}
 	c.degraded.Store(true)
@@ -436,7 +435,7 @@ func TestHealthLoopStopsViaDegradeStopRecov(t *testing.T) {
 		degradeStopRecov: make(chan struct{}),
 		stopChan:         make(chan struct{}),
 		metrics:          noopMetrics{},
-		logger:           logger.DefaultLogger,
+		logger:           slog.Default(),
 	}
 
 	done := make(chan struct{})
@@ -465,7 +464,7 @@ func TestHealthLoopStopsViaStopChan(t *testing.T) {
 		degradeStopRecov: make(chan struct{}),
 		stopChan:         make(chan struct{}),
 		metrics:          noopMetrics{},
-		logger:           logger.DefaultLogger,
+		logger:           slog.Default(),
 	}
 
 	done := make(chan struct{})
@@ -494,7 +493,7 @@ func TestGetFromStoreSkipsRemoteWhenDegraded(t *testing.T) {
 	c := &cache{
 		remoteStore: remote,
 		stats:       newStats(),
-		logger:      logger.DefaultLogger,
+		logger:      slog.Default(),
 		stopChan:    make(chan struct{}),
 	}
 	c.degraded.Store(true)
@@ -514,7 +513,7 @@ func TestGetFromStoreRecordsRemoteError(t *testing.T) {
 		degradeThreshold: 2,
 		metrics:          noopMetrics{},
 		stats:            newStats(),
-		logger:           logger.DefaultLogger,
+		logger:           slog.Default(),
 		stopChan:         make(chan struct{}),
 	}
 
@@ -603,7 +602,7 @@ func TestFlushPendingWritesOnRecovery(t *testing.T) {
 		localStore:  local,
 		remoteStore: remote,
 		metrics:     noopMetrics{},
-		logger:      logger.DefaultLogger,
+		logger:      slog.Default(),
 		stopChan:    make(chan struct{}),
 	}
 	c.degraded.Store(true)
@@ -637,7 +636,7 @@ func TestFlushPendingWritesFailureKeepsForRetry(t *testing.T) {
 		remoteStore:      remote,
 		versionSyncBatch: defaultVersionSyncBatch,
 		metrics:          noopMetrics{},
-		logger:           logger.DefaultLogger,
+		logger:           slog.Default(),
 		stopChan:         make(chan struct{}),
 	}
 	c.degraded.Store(true)
@@ -691,7 +690,7 @@ func TestVerifyRemoteErrorKeepsLocal(t *testing.T) {
 		verifyEvery: 1,
 		metrics:     noopMetrics{},
 		stats:       newStats(),
-		logger:      logger.DefaultLogger,
+		logger:      slog.Default(),
 		ttl:         60,
 		stopChan:    make(chan struct{}),
 	}
@@ -722,7 +721,7 @@ func TestVerifyRemoteErrorNoLocalPropagates(t *testing.T) {
 		verifyEvery: 1,
 		metrics:     noopMetrics{},
 		stats:       newStats(),
-		logger:      logger.DefaultLogger,
+		logger:      slog.Default(),
 		ttl:         60,
 		stopChan:    make(chan struct{}),
 	}
@@ -745,7 +744,7 @@ func TestPutInStoreRemoteErrorTriggersDegraded(t *testing.T) {
 		remoteStore:      remote,
 		degradeThreshold: 2,
 		metrics:          noopMetrics{},
-		logger:           logger.DefaultLogger,
+		logger:           slog.Default(),
 		stopChan:         make(chan struct{}),
 	}
 	ctx := context.Background()
@@ -767,7 +766,7 @@ func TestRemoveFromStorageRemoteErrorTriggersDegraded(t *testing.T) {
 		remoteStore:      remote,
 		degradeThreshold: 2,
 		metrics:          noopMetrics{},
-		logger:           logger.DefaultLogger,
+		logger:           slog.Default(),
 		stopChan:         make(chan struct{}),
 	}
 	ctx := context.Background()
@@ -799,7 +798,7 @@ func TestGetfnVerifyWriteBackUsesRequestTTL(t *testing.T) {
 		verifyEvery: 1,
 		stats:       newStats(),
 		metrics:     noopMetrics{},
-		logger:      logger.DefaultLogger,
+		logger:      slog.Default(),
 		ttl:         60, // 固定 TTL，验证回写应被请求 TTL 覆盖
 		stopChan:    make(chan struct{}),
 	}
@@ -924,7 +923,7 @@ func TestDegradedGetReturnsNotExist(t *testing.T) {
 		remoteStore: remote,
 		stats:       newStats(),
 		metrics:     noopMetrics{},
-		logger:      logger.DefaultLogger,
+		logger:      slog.Default(),
 		stopChan:    make(chan struct{}),
 	}
 	c.degraded.Store(true)
@@ -943,7 +942,7 @@ func TestDegradedGetfnCallsLoadFn(t *testing.T) {
 		serializer:  jsonSerializer{},
 		stats:       newStats(),
 		metrics:     noopMetrics{},
-		logger:      logger.DefaultLogger,
+		logger:      slog.Default(),
 		stopChan:    make(chan struct{}),
 	}
 	c.degraded.Store(true)
@@ -974,7 +973,7 @@ func (failSerializer) Unmarshal(b []byte, v any) error { return nil }
 func TestPutMarshalError(t *testing.T) {
 	c := &cache{
 		serializer: failSerializer{},
-		logger:     logger.DefaultLogger,
+		logger:     slog.Default(),
 		stopChan:   make(chan struct{}),
 	}
 	err := c.Put(context.Background(), "k", "v", 60)
@@ -996,7 +995,7 @@ func TestGetUnmarshalError(t *testing.T) {
 		serializer: unmarshalFailSerializer{},
 		stats:      newStats(),
 		metrics:    noopMetrics{},
-		logger:     logger.DefaultLogger,
+		logger:     slog.Default(),
 		stopChan:   make(chan struct{}),
 	}
 	var s string
@@ -1047,7 +1046,7 @@ func TestVerifyRemoteGoneClearsStaleLocal(t *testing.T) {
 		verifyEvery: 1,
 		stats:       newStats(),
 		metrics:     noopMetrics{},
-		logger:      logger.DefaultLogger,
+		logger:      slog.Default(),
 		ttl:         60,
 		stopChan:    make(chan struct{}),
 	}
@@ -1067,7 +1066,7 @@ func TestVerifyRemoteGoneClearsStaleLocal(t *testing.T) {
 
 func TestDefaultLoggerMethods(t *testing.T) {
 	// DefaultLogger 的 Warn/Error 应可安全调用（输出到 stderr 的 Warn 及以上）
-	l := logger.DefaultLogger
+	l := slog.Default()
 	assert.NotPanics(t, func() {
 		l.Warn("warn")
 		l.Warn(fmt.Sprintf("warn %d", 1))
@@ -1087,7 +1086,7 @@ func TestOptionFunctionsWithValues(t *testing.T) {
 	WithSerializer(failSerializer{})(&o)
 	assert.NotNil(t, o.serializer)
 
-	WithLogger(logger.DefaultLogger)(&o)
+	WithLogger(slog.Default())(&o)
 	assert.NotNil(t, o.Logger)
 
 	WithTTLJitter(5 * time.Millisecond)(&o)
@@ -1129,7 +1128,7 @@ func TestSetMultiFallbackPath(t *testing.T) {
 		serializer: jsonSerializer{},
 		stats:      newStats(),
 		metrics:    noopMetrics{},
-		logger:     logger.DefaultLogger,
+		logger:     slog.Default(),
 		ttl:        60,
 		stopChan:   make(chan struct{}),
 	}
@@ -1228,7 +1227,7 @@ func TestGetPropagatesStoreError(t *testing.T) {
 		localStore: &failStore{},
 		stats:      newStats(),
 		metrics:    noopMetrics{},
-		logger:     logger.DefaultLogger,
+		logger:     slog.Default(),
 		stopChan:   make(chan struct{}),
 	}
 	var s string
@@ -1242,7 +1241,7 @@ func TestGetfnPropagatesStoreError(t *testing.T) {
 		localStore: &failStore{},
 		stats:      newStats(),
 		metrics:    noopMetrics{},
-		logger:     logger.DefaultLogger,
+		logger:     slog.Default(),
 		stopChan:   make(chan struct{}),
 	}
 	var s string
@@ -1258,7 +1257,7 @@ func TestGetMultiStoreError(t *testing.T) {
 		localStore: &failStore{},
 		stats:      newStats(),
 		metrics:    noopMetrics{},
-		logger:     logger.DefaultLogger,
+		logger:     slog.Default(),
 		stopChan:   make(chan struct{}),
 	}
 	_, err := c.GetMulti(context.Background(), "a", "b")
@@ -1273,7 +1272,7 @@ func TestGetMultiRawBytesFallback(t *testing.T) {
 		serializer: jsonSerializer{},
 		stats:      newStats(),
 		metrics:    noopMetrics{},
-		logger:     logger.DefaultLogger,
+		logger:     slog.Default(),
 		ttl:        60,
 		stopChan:   make(chan struct{}),
 	}
@@ -1288,7 +1287,7 @@ func TestSetMultiBulkError(t *testing.T) {
 		serializer: jsonSerializer{},
 		stats:      newStats(),
 		metrics:    noopMetrics{},
-		logger:     logger.DefaultLogger,
+		logger:     slog.Default(),
 		stopChan:   make(chan struct{}),
 	}
 	err := c.SetMulti(context.Background(), map[string]any{"a": "1"}, 60)
@@ -1301,7 +1300,7 @@ func TestSetMultiBulkMarshalError(t *testing.T) {
 		serializer: failSerializer{},
 		stats:      newStats(),
 		metrics:    noopMetrics{},
-		logger:     logger.DefaultLogger,
+		logger:     slog.Default(),
 		stopChan:   make(chan struct{}),
 	}
 	err := c.SetMulti(context.Background(), map[string]any{"a": "1"}, 60)
@@ -1315,7 +1314,7 @@ func TestSetMultiFallbackPutError(t *testing.T) {
 		serializer: jsonSerializer{},
 		stats:      newStats(),
 		metrics:    noopMetrics{},
-		logger:     logger.DefaultLogger,
+		logger:     slog.Default(),
 		stopChan:   make(chan struct{}),
 	}
 	err := c.SetMulti(context.Background(), map[string]any{"a": "1"}, 60)
@@ -1328,7 +1327,7 @@ func TestSetMultiFallbackMarshalError(t *testing.T) {
 		serializer: failSerializer{},
 		stats:      newStats(),
 		metrics:    noopMetrics{},
-		logger:     logger.DefaultLogger,
+		logger:     slog.Default(),
 		stopChan:   make(chan struct{}),
 	}
 	err := c.SetMulti(context.Background(), map[string]any{"a": "1"}, 60)
@@ -1341,7 +1340,7 @@ func TestPreLoadPutError(t *testing.T) {
 	c := &cache{
 		localStore: newMemStore(), // 使 SetMulti 执行到 Marshal（failSerializer 报错）
 		serializer: failSerializer{},
-		logger:     logger.DefaultLogger,
+		logger:     slog.Default(),
 		stopChan:   make(chan struct{}),
 	}
 	err := c.PreLoad(context.Background(), func(ctx context.Context) (map[string]any, error) {
@@ -1357,7 +1356,7 @@ func TestPutCacheLocalError(t *testing.T) {
 		serializer: jsonSerializer{},
 		stats:      newStats(),
 		metrics:    noopMetrics{},
-		logger:     logger.DefaultLogger,
+		logger:     slog.Default(),
 		stopChan:   make(chan struct{}),
 	}
 	err := c.Put(context.Background(), "k", "v", 60)
@@ -1380,7 +1379,7 @@ func TestSyncBatchRemoteGetError(t *testing.T) {
 		localStore:       local,
 		remoteStore:      &failStore{},
 		versionSyncBatch: defaultVersionSyncBatch,
-		logger:           logger.DefaultLogger,
+		logger:           slog.Default(),
 		stopChan:         make(chan struct{}),
 	}
 	// remote Get 出错 → continue，不 panic，本地数据保留
@@ -1394,7 +1393,7 @@ func TestRemoveFromStorageRemoteSuccess(t *testing.T) {
 	c := &cache{
 		remoteStore: remote,
 		metrics:     noopMetrics{},
-		logger:      logger.DefaultLogger,
+		logger:      slog.Default(),
 		stopChan:    make(chan struct{}),
 	}
 	ctx := context.Background()
@@ -1429,7 +1428,7 @@ func TestCloseClosesRemoteStore(t *testing.T) {
 	c := &cache{
 		localStore:  newMemStore(),
 		remoteStore: remote,
-		logger:      logger.DefaultLogger,
+		logger:      slog.Default(),
 		stopChan:    make(chan struct{}),
 	}
 	assert.NotPanics(t, func() { c.Close() })
@@ -1618,7 +1617,7 @@ func TestGetMultiDispatchesToBulkStore(t *testing.T) {
 		serializer: jsonSerializer{},
 		stats:      newStats(),
 		metrics:    noopMetrics{},
-		logger:     logger.DefaultLogger,
+		logger:     slog.Default(),
 		ttl:        60,
 		stopChan:   make(chan struct{}),
 	}
@@ -1638,7 +1637,7 @@ func TestSetMultiBulkWrapsVersion(t *testing.T) {
 		serializer: jsonSerializer{},
 		stats:      newStats(),
 		metrics:    noopMetrics{},
-		logger:     logger.DefaultLogger,
+		logger:     slog.Default(),
 		stopChan:   make(chan struct{}),
 	}
 
@@ -1664,7 +1663,7 @@ func TestVerifySkipsEvictionForPendingKey(t *testing.T) {
 		verifyEvery: 1,
 		stats:       newStats(),
 		metrics:     noopMetrics{},
-		logger:      logger.DefaultLogger,
+		logger:      slog.Default(),
 		ttl:         60,
 		stopChan:    make(chan struct{}),
 	}
@@ -1699,7 +1698,7 @@ func TestUpdateConcurrentGetfnSharesSingleflight(t *testing.T) {
 		serializer: jsonSerializer{},
 		stats:      newStats(),
 		metrics:    noopMetrics{},
-		logger:     logger.DefaultLogger,
+		logger:     slog.Default(),
 		ttl:        60,
 		stopChan:   make(chan struct{}),
 	}
@@ -1787,7 +1786,7 @@ func TestGetMultiBulkGetError(t *testing.T) {
 		serializer: jsonSerializer{},
 		stats:      newStats(),
 		metrics:    noopMetrics{},
-		logger:     logger.DefaultLogger,
+		logger:     slog.Default(),
 		ttl:        60,
 		stopChan:   make(chan struct{}),
 	}
@@ -1807,7 +1806,7 @@ func TestGetMultiBulkDispatchBranches(t *testing.T) {
 		notExistPlaceholder: []byte("*"),
 		stats:               newStats(),
 		metrics:             noopMetrics{},
-		logger:              logger.DefaultLogger,
+		logger:              slog.Default(),
 		ttl:                 60,
 		stopChan:            make(chan struct{}),
 	}
@@ -1827,7 +1826,7 @@ func TestGetMultiBulkDispatchFallbackHit(t *testing.T) {
 		serializer:  jsonSerializer{},
 		stats:       newStats(),
 		metrics:     noopMetrics{},
-		logger:      logger.DefaultLogger,
+		logger:      slog.Default(),
 		ttl:         60,
 		stopChan:    make(chan struct{}),
 	}
@@ -1848,7 +1847,7 @@ func TestGetMultiBulkDispatchFallbackRawBytes(t *testing.T) {
 		serializer:  jsonSerializer{},
 		stats:       newStats(),
 		metrics:     noopMetrics{},
-		logger:      logger.DefaultLogger,
+		logger:      slog.Default(),
 		ttl:         60,
 		stopChan:    make(chan struct{}),
 	}
@@ -1867,7 +1866,7 @@ func TestGetMultiFallbackLoop(t *testing.T) {
 		serializer: jsonSerializer{},
 		stats:      newStats(),
 		metrics:    noopMetrics{},
-		logger:     logger.DefaultLogger,
+		logger:     slog.Default(),
 		ttl:        60,
 		stopChan:   make(chan struct{}),
 	}
@@ -1897,7 +1896,7 @@ func TestPendingWritesLimit(t *testing.T) {
 		localStore:  newMemStore(),
 		remoteStore: remote,
 		metrics:     noopMetrics{},
-		logger:      logger.DefaultLogger,
+		logger:      slog.Default(),
 		stopChan:    make(chan struct{}),
 	}
 	c.degraded.Store(true)
@@ -1932,7 +1931,7 @@ func TestDegradedDeleteFlushedAfterRecovery(t *testing.T) {
 		localStore:  local,
 		remoteStore: remote,
 		metrics:     noopMetrics{},
-		logger:      logger.DefaultLogger,
+		logger:      slog.Default(),
 		stopChan:    make(chan struct{}),
 	}
 	ctx := context.Background()
@@ -1962,7 +1961,7 @@ func TestDegradedPutThenDeleteFlushesDelete(t *testing.T) {
 		remoteStore: remote,
 		serializer:  jsonSerializer{},
 		metrics:     noopMetrics{},
-		logger:      logger.DefaultLogger,
+		logger:      slog.Default(),
 		stopChan:    make(chan struct{}),
 	}
 	c.degraded.Store(true)
@@ -1993,7 +1992,7 @@ func TestFlushBackoffSkipsFrequentRetries(t *testing.T) {
 	c := &cache{
 		remoteStore: remote,
 		metrics:     noopMetrics{},
-		logger:      logger.DefaultLogger,
+		logger:      slog.Default(),
 		stopChan:    make(chan struct{}),
 	}
 	c.degraded.Store(true)
@@ -2019,7 +2018,7 @@ func TestRecordRemoteErrorIgnoresCanceled(t *testing.T) {
 	c := &cache{
 		degradeThreshold: 2,
 		metrics:          noopMetrics{},
-		logger:           logger.DefaultLogger,
+		logger:           slog.Default(),
 		stopChan:         make(chan struct{}),
 	}
 	// 用户主动取消连续多次 → 不进入降级
@@ -2034,7 +2033,7 @@ func TestRecordRemoteErrorCountsDeadlineExceeded(t *testing.T) {
 	c := &cache{
 		degradeThreshold: 2,
 		metrics:          noopMetrics{},
-		logger:           logger.DefaultLogger,
+		logger:           slog.Default(),
 		stopChan:         make(chan struct{}),
 	}
 	c.recordRemoteError(context.DeadlineExceeded)
@@ -2132,7 +2131,7 @@ func TestGetMultiFallbackFiltersPlaceholder(t *testing.T) {
 		notExistPlaceholder: []byte("*"),
 		stats:               newStats(),
 		metrics:             noopMetrics{},
-		logger:              logger.DefaultLogger,
+		logger:              slog.Default(),
 		ttl:                 60,
 		stopChan:            make(chan struct{}),
 	}
@@ -2149,7 +2148,7 @@ func TestFlushPendingDeleteFailureKeepsForRetry(t *testing.T) {
 	c := &cache{
 		remoteStore: remote,
 		metrics:     noopMetrics{},
-		logger:      logger.DefaultLogger,
+		logger:      slog.Default(),
 		stopChan:    make(chan struct{}),
 	}
 	c.degraded.Store(true)
@@ -2365,7 +2364,7 @@ func TestSetMultiDegradedRemoteBulkBuffers(t *testing.T) {
 		remoteStore: remote,
 		serializer:  jsonSerializer{},
 		metrics:     noopMetrics{},
-		logger:      logger.DefaultLogger,
+		logger:      slog.Default(),
 		stopChan:    make(chan struct{}),
 	}
 	c.degraded.Store(true)
@@ -2434,7 +2433,7 @@ func TestSetMultiBulkRemoteErrorDrivesDegrade(t *testing.T) {
 		serializer:       jsonSerializer{},
 		degradeThreshold: 2,
 		metrics:          noopMetrics{},
-		logger:           logger.DefaultLogger,
+		logger:           slog.Default(),
 		stopChan:         make(chan struct{}),
 	}
 	ctx := context.Background()
@@ -2458,7 +2457,7 @@ func TestSetMultiBulkRemoteSuccessResetsDegrade(t *testing.T) {
 		serializer:       jsonSerializer{},
 		degradeThreshold: 2,
 		metrics:          noopMetrics{},
-		logger:           logger.DefaultLogger,
+		logger:           slog.Default(),
 		stopChan:         make(chan struct{}),
 	}
 	ctx := context.Background()
@@ -2480,7 +2479,7 @@ func TestSetMultiLocalBulkErrorDoesNotCount(t *testing.T) {
 		serializer:       jsonSerializer{},
 		degradeThreshold: 2,
 		metrics:          noopMetrics{},
-		logger:           logger.DefaultLogger,
+		logger:           slog.Default(),
 		stopChan:         make(chan struct{}),
 	}
 	ctx := context.Background()
@@ -2552,7 +2551,7 @@ func TestFlushWindowKeepsPendingProtection(t *testing.T) {
 		localStore:  local,
 		remoteStore: remote,
 		metrics:     noopMetrics{},
-		logger:      logger.DefaultLogger,
+		logger:      slog.Default(),
 		stopChan:    make(chan struct{}),
 	}
 	c.degraded.Store(true)

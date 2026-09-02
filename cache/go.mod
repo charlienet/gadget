@@ -4,7 +4,6 @@ go 1.26
 
 require (
 	github.com/bytedance/sonic v1.15.2
-	github.com/charlienet/gadget/logger v0.2.1
 	golang.org/x/sync v0.22.0
 )
 
@@ -19,7 +18,6 @@ require (
 	golang.org/x/arch v0.0.0-20210923205945-b76863e36670 // indirect
 	golang.org/x/sys v0.26.0 // indirect
 	gopkg.in/check.v1 v1.0.0-20201130134442-10cb98267c6c // indirect
-	gopkg.in/natefinch/lumberjack.v2 v2.2.1 // indirect
 )
 
 require (
