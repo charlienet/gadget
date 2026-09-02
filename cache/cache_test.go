@@ -517,7 +517,7 @@ func TestUpdateThenGet(t *testing.T) {
 	_ = c.Put(ctx, "updatekey", "old", 60)
 
 	updateCalled := false
-	err := c.Update(ctx, "updatekey", func(ctx context.Context, key string) error {
+	err := c.Invalidate(ctx, "updatekey", func(ctx context.Context, key string) error {
 		updateCalled = true
 		return nil
 	})
@@ -535,7 +535,7 @@ func TestUpdateError(t *testing.T) {
 	ctx := context.Background()
 
 	_ = c.Put(ctx, "errorkey", "value", 60)
-	err := c.Update(ctx, "errorkey", func(ctx context.Context, key string) error {
+	err := c.Invalidate(ctx, "errorkey", func(ctx context.Context, key string) error {
 		return errors.New("update failed")
 	})
 	assert.ErrorContains(t, err, "update failed")

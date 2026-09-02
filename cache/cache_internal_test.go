@@ -1710,7 +1710,7 @@ func TestUpdateConcurrentGetfnSharesSingleflight(t *testing.T) {
 
 	go func() {
 		close(updateStarted)
-		updateErr <- c.Update(ctx, "k", func(ctx context.Context, key string) error {
+		updateErr <- c.Invalidate(ctx, "k", func(ctx context.Context, key string) error {
 			<-releaseUpdate // 阻塞，保证 Update 持有 singleflight
 			return nil
 		})

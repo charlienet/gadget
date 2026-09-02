@@ -10,6 +10,13 @@
 //     Context 变体），配合 gadget logger 内置的 TraceHandler，可从 ctx 自动
 //     注入 trace_id/req_id；后台协程（健康探测、版本同步、pending 补偿 flush
 //     等自建 context.Background() 的路径）保持非 Context 变体。
+//
+// 推荐使用路径：
+//   - 读路径用 Getfn：未命中时经 LoadFn 回源并自动回填（singleflight 防击穿）。
+//   - 涉及源数据的更新或删除，一律经 Invalidate 包装：回调内写/删数据源，
+//     成功后由库自动失效缓存（双删、补偿重试、集群广播），避免业务侧遗漏
+//     清理造成缓存不一致；切勿在回调外手工"写源 + Delete"。
+//   - Put/Delete 仅用于不涉及源数据的纯缓存操作（如临时计算结果）。
 package cache
 
 import (
@@ -141,7 +148,10 @@ type LoadFn func(ctx context.Context, key string, v any) (bool, error)
 // 批量回源，加载逻辑未实现）。未来实现批量回源功能时使用此签名；外部项目
 // 也可按此签名自行实现取数函数。
 type BatchLoadFn func(ctx context.Context, keys ...string) (map[string]any, error)
-type UpdateFn func(ctx context.Context, key string) error
+
+// MutateFn 是 Invalidate 的源变更函数：对数据源执行更新或删除等写操作。
+// 返回错误表示源未变更，缓存保持不动。
+type MutateFn func(ctx context.Context, key string) error
 
 func New(opts ...Option) *cache {
 	c := acquireDefaultCache()
@@ -527,13 +537,22 @@ func (c *cache) Put(ctx context.Context, key string, v any, expireSecond int) er
 	return nil
 }
 
-func (c *cache) Update(ctx context.Context, key string, updateFn UpdateFn) error {
+// Invalidate 使 key 对应的源数据变更后缓存收敛：mutateFn 内对数据源
+// （DB 等）执行更新或删除，成功后自动失效缓存——本地与远程双删、删除
+// 失败进 pending 补偿队列重试、并经 listener 向集群广播，其他实例同步
+// 失效本地副本。
+//
+// 与 Getfn 的回源共享 singleflight 互斥（同一 key 的变更与回填不并发），
+// 消除"源已变更、旧值回填"的脏窗口；mutateFn 返回错误时缓存保持不动
+// （源未变更）。推荐写路径：凡涉及源数据的写/删一律经本方法包装，
+// 由库承包失效与集群收敛，避免业务侧遗漏清理造成缓存不一致。
+func (c *cache) Invalidate(ctx context.Context, key string, mutateFn MutateFn) error {
 	// 与 getFromSource 共用同一 singleflight key，使 delete 与 load 互斥。
 	fnKey := fmt.Sprintf("key:%s", key)
 	defer c.sg.Forget(fnKey)
 
 	_, err, _ := c.sg.Do(fnKey, func() (interface{}, error) {
-		err := updateFn(ctx, key)
+		err := mutateFn(ctx, key)
 		if err != nil {
 			return storeItem{}, err
 		}
