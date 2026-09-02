@@ -1,3 +1,15 @@
+// Package cache 提供两级（L1 内存 + L2 远程）缓存，带降级补偿、singleflight
+// 去重与透明加解密能力。
+//
+// 日志约定：
+//   - 未显式注入时，默认日志器由 slog.Default() 派生，并自动附加 module=cache
+//     结构化属性，便于在混合输出中过滤本模块日志。
+//   - 通过 WithLogger 注入的 logger 由调用方全权自理，本模块不会额外附加
+//     module 属性；如需一致标注请在传入前自行 logger.With("module", "cache")。
+//   - 请求路径上的日志使用 slog 的 XxxContext(ctx, ...) 方法（Warn/Error/Debug
+//     Context 变体），配合 gadget logger 内置的 TraceHandler，可从 ctx 自动
+//     注入 trace_id/req_id；后台协程（健康探测、版本同步、pending 补偿 flush
+//     等自建 context.Background() 的路径）保持非 Context 变体。
 package cache
 
 import (
@@ -385,7 +397,7 @@ func (c *cache) DeletePattern(ctx context.Context, pattern string) {
 		if s != nil {
 			if ps, ok := s.(PatternStore); ok {
 				if err := ps.DeletePattern(ctx, pattern); err != nil {
-					c.logger.Warn("delete pattern from store failed", "pattern", pattern, "store", s.Name(), "err", err)
+					c.logger.WarnContext(ctx, "delete pattern from store failed", "pattern", pattern, "store", s.Name(), "err", err)
 				}
 			}
 		}
@@ -472,7 +484,7 @@ func (c *cache) Getfn(ctx context.Context, key string, v any, fn LoadFn, expireS
 			d, err = c.serializer.Marshal(v)
 			if err != nil {
 				// 序列化失败：记录 Warn 并跳过缓存写入，不阻断回源结果返回。
-				c.logger.Warn("marshal loaded value failed, skip caching", "key", key, "err", err)
+				c.logger.WarnContext(ctx, "marshal loaded value failed, skip caching", "key", key, "err", err)
 				return storeItem{bytes: nil, exist: true}, nil
 			}
 		}
@@ -481,7 +493,7 @@ func (c *cache) Getfn(ctx context.Context, key string, v any, fn LoadFn, expireS
 		// 回填失败仅记录 Warn（含占位符回填）：不阻断回源结果返回，
 		// 否则持续 miss → 每次穿透且零感知。
 		if err := c.putCache(ctx, key, d, expireSeconds); err != nil {
-			c.logger.Warn("fill cache failed", "key", key, "err", err)
+			c.logger.WarnContext(ctx, "fill cache failed", "key", key, "err", err)
 		}
 		return storeItem{bytes: d, exist: exist}, nil
 	})
@@ -538,7 +550,7 @@ func (c *cache) Delete(ctx context.Context, keys ...string) {
 	if len(keys) == 0 {
 		return // 空参数直接返回，避免向 remote 发送空 Del 引发告警/计数噪音
 	}
-	c.logger.Debug("delete cache key", "keys", keys)
+	c.logger.DebugContext(ctx, "delete cache key", "keys", keys)
 
 	c.removeFromStorage(ctx, c.localStore, keys...)
 	c.removeFromStorage(ctx, c.remoteStore, keys...)
@@ -823,7 +835,7 @@ func (c *cache) getFromCacheData(ctx context.Context, key string, expireSeconds 
 		// Remote has the data → sync to local (refresh stale or warm new)
 		// 回写失败仅记录 Warn：持续 miss 会导致每次穿透且零感知
 		if err := c.putInStore(ctx, c.localStore, key, data, ttl); err != nil {
-			c.logger.Warn("write back to local store failed", "key", key, "err", err)
+			c.logger.WarnContext(ctx, "write back to local store failed", "key", key, "err", err)
 		}
 	} else if localWasStale {
 		// Remote doesn't have it → clear stale local entry immediately
@@ -968,7 +980,7 @@ func (c *cache) removeFromStorage(ctx context.Context, s Store, keys ...string) 
 			delete(c.pendingWrites, key)
 			if len(c.pendingDeletes) >= maxPendingWrites {
 				// 上限：拒绝新删除（恢复后 remote 数据可能复活），Warn 告知
-				c.logger.Warn("pending deletes full, dropping delete", "key", key)
+				c.logger.WarnContext(ctx, "pending deletes full, dropping delete", "key", key)
 				continue
 			}
 			c.pendingDeletes[key] = struct{}{}
@@ -981,7 +993,7 @@ func (c *cache) removeFromStorage(ctx context.Context, s Store, keys ...string) 
 		if s.IsRemote() {
 			c.recordRemoteError(err)
 		}
-		c.logger.Warn("delete from store failed", "store", s.Name(), "keys", keys, "err", err)
+		c.logger.WarnContext(ctx, "delete from store failed", "store", s.Name(), "keys", keys, "err", err)
 	} else if s.IsRemote() {
 		c.recordRemoteSuccess()
 	}
@@ -1199,7 +1211,7 @@ func acquireDefaultCache() *cache {
 		serializer:          jsonSerializer{},
 		// slog.Default() 每次动态解析当前默认实例：应用运行期重建默认日志器
 		// （logger.Init/New 内部已调用 slog.SetDefault）后 cache 自动跟随，无需重建。
-		logger:           slog.Default(),
+		logger:           slog.Default().With("module", "cache"),
 		sg:               singleflight.Group{},
 		stats:            newStats(),
 		metrics:          noopMetrics{},
