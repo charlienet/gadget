@@ -4,8 +4,8 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
-	"io"
 	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -824,63 +824,56 @@ func TestGetfnVerifyWriteBackUsesRequestTTL(t *testing.T) {
 
 // --- M7: removeFromStorage Delete 错误记录 Warn ---
 
-// mockLogger 记录 Warn/Error 调用，用于断言告警路径。
+// mockLogger 记录 Warn/Error 级别日志（消息文本 + 结构化属性），用于断言告警路径。
+// 实现 slog.Handler，经 slog.New(ml) 注入 cache.logger 字段。
 type mockLogger struct {
-	mu    sync.Mutex
-	warns []string
-	errs  []string
+	mu        sync.Mutex
+	warns     []string
+	warnAttrs []map[string]any
+	errs      []string
 }
 
-func (l *mockLogger) Warn(args ...any) {
+func (l *mockLogger) Enabled(_ context.Context, _ slog.Level) bool { return true }
+
+func (l *mockLogger) Handle(_ context.Context, r slog.Record) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.warns = append(l.warns, fmt.Sprint(args...))
+	switch {
+	case r.Level >= slog.LevelError:
+		l.errs = append(l.errs, r.Message)
+	case r.Level >= slog.LevelWarn:
+		attrs := make(map[string]any, r.NumAttrs())
+		r.Attrs(func(a slog.Attr) bool {
+			attrs[a.Key] = a.Value.Any()
+			return true
+		})
+		l.warns = append(l.warns, r.Message)
+		l.warnAttrs = append(l.warnAttrs, attrs)
+	}
+	return nil
 }
 
-func (l *mockLogger) Warnf(format string, args ...any) {
+// attrsOf 返回首条消息包含 substr 的 Warn 记录的结构化属性；无匹配返回 nil。
+func (l *mockLogger) attrsOf(substr string) map[string]any {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.warns = append(l.warns, fmt.Sprintf(format, args...))
+	for i, m := range l.warns {
+		if strings.Contains(m, substr) {
+			return l.warnAttrs[i]
+		}
+	}
+	return nil
 }
 
-func (l *mockLogger) Error(args ...any) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.errs = append(l.errs, fmt.Sprint(args...))
-}
-
-func (l *mockLogger) Errorf(format string, args ...any) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.errs = append(l.errs, fmt.Sprintf(format, args...))
-}
-
-// --- logger.Logger 接口补齐（无操作，仅满足编译） ---
-func (l *mockLogger) WithField(string, any) logger.Logger        { return l }
-func (l *mockLogger) WithFields(map[string]any) logger.Logger    { return l }
-func (l *mockLogger) With(...any) logger.Logger                  { return l }
-func (l *mockLogger) Log(slog.Level, string, ...any)             {}
-func (l *mockLogger) WithAttrs(...slog.Attr) logger.Logger       { return l }
-func (l *mockLogger) LogAttrs(slog.Level, string, ...slog.Attr)  {}
-func (l *mockLogger) WithGroup(string) logger.Logger             { return l }
-func (l *mockLogger) SetLevel(logger.Level)                      {}
-func (l *mockLogger) SetOutput(_ io.Writer)                          {}
-func (l *mockLogger) Info(...any)                                {}
-func (l *mockLogger) Infof(string, ...any)                       {}
-func (l *mockLogger) Trace(...any)                               {}
-func (l *mockLogger) Tracef(string, ...any)                      {}
-func (l *mockLogger) Debug(...any)                               {}
-func (l *mockLogger) Debugf(string, ...any)                      {}
-func (l *mockLogger) Fatal(...any)                               {}
-func (l *mockLogger) Fatalf(string, ...any)                      {}
-func (l *mockLogger) WithContext(_ context.Context) context.Context { return context.Background() }
+func (l *mockLogger) WithAttrs(_ []slog.Attr) slog.Handler { return l }
+func (l *mockLogger) WithGroup(_ string) slog.Handler      { return l }
 
 func TestRemoveFromStorageDeleteErrorWarns(t *testing.T) {
 	remote := &deleteFailStore{testRemoteStore: newTestRemoteStore()}
 	ml := &mockLogger{}
 	c := &cache{
 		remoteStore: remote,
-		logger:      ml,
+		logger:      slog.New(ml),
 		stopChan:    make(chan struct{}),
 	}
 	ctx := context.Background()
@@ -888,6 +881,11 @@ func TestRemoveFromStorageDeleteErrorWarns(t *testing.T) {
 	c.removeFromStorage(ctx, remote, "k")
 	assert.Len(t, ml.warns, 1, "delete failure should be logged via Warn")
 	assert.Contains(t, ml.warns[0], "delete from store")
+	// 结构化属性：store/keys/err 均不得丢失
+	attrs := ml.attrsOf("delete from store")
+	assert.Equal(t, remote.Name(), attrs["store"])
+	assert.Equal(t, []string{"k"}, attrs["keys"])
+	assert.Equal(t, assert.AnError, attrs["err"])
 }
 
 // failListener 的 Publish 恒失败。
@@ -909,7 +907,7 @@ func TestNoticeRemovedPublishErrorWarns(t *testing.T) {
 	ml := &mockLogger{}
 	c := &cache{
 		listener: &failListener{},
-		logger:   ml,
+		logger:   slog.New(ml),
 		stopChan: make(chan struct{}),
 	}
 	c.noticeRemoved("k")
@@ -1014,7 +1012,7 @@ func TestGetfnMarshalErrorSkipsCaching(t *testing.T) {
 		notExistPlaceholder: []byte(defaultNotExistPlaceholder),
 		stats:               newStats(),
 		metrics:             noopMetrics{},
-		logger:              ml,
+		logger:              slog.New(ml),
 		stopChan:            make(chan struct{}),
 	}
 	ctx := context.Background()
@@ -1068,13 +1066,13 @@ func TestVerifyRemoteGoneClearsStaleLocal(t *testing.T) {
 // --- 基础组件覆盖：logger / options / stats / mem_store 补全 ---
 
 func TestDefaultLoggerMethods(t *testing.T) {
-	// DefaultLogger 的 Error/Errorf 应可安全调用（输出到 stderr 的 Warn 及以上）
+	// DefaultLogger 的 Warn/Error 应可安全调用（输出到 stderr 的 Warn 及以上）
 	l := logger.DefaultLogger
 	assert.NotPanics(t, func() {
 		l.Warn("warn")
-		l.Warnf("warn %d", 1)
+		l.Warn(fmt.Sprintf("warn %d", 1))
 		l.Error("err")
-		l.Errorf("err %d", 1)
+		l.Error(fmt.Sprintf("err %d", 1))
 	})
 }
 
@@ -1195,13 +1193,13 @@ func (s *bulkFailStore) SetMulti(_ context.Context, _ map[string][]byte, _ int) 
 // closableListener 的 Close 会关闭订阅 channel（触发 watcher ok=false 退出）。
 // 实现幂等：重复调用安全。
 type closableListener struct {
-	ch      chan string
+	ch        chan string
 	closeOnce sync.Once
 }
 
 func (l *closableListener) Subscribe() chan string { return l.ch }
 func (l *closableListener) Publish(string) error   { return nil }
-func (l *closableListener) Ready() <-chan struct{}  { return closedChan() }
+func (l *closableListener) Ready() <-chan struct{} { return closedChan() }
 func (l *closableListener) Close(context.Context) error {
 	l.closeOnce.Do(func() { close(l.ch) })
 	return nil
@@ -1443,7 +1441,7 @@ func TestWatcherExitsOnChannelClose(t *testing.T) {
 	c := &cache{
 		listener:   lis,
 		localStore: newMemStore(),
-		logger:     ml,
+		logger:     slog.New(ml),
 		stopChan:   make(chan struct{}),
 	}
 	done := make(chan struct{})
@@ -1550,7 +1548,7 @@ func TestWithLoggerInjection(t *testing.T) {
 	ml := &mockLogger{}
 	remote := &deleteFailStore{testRemoteStore: newTestRemoteStore()}
 	c := New(
-		WithLogger(ml),
+		WithLogger(slog.New(ml)),
 		func(o *Options) { o.WithStore(remote) },
 	)
 
@@ -1885,7 +1883,7 @@ func TestDeletePatternErrorWarns(t *testing.T) {
 	ml := &mockLogger{}
 	c := &cache{
 		localStore: &patternFailStore{mockLocalStore: newMockLocalStore()},
-		logger:     ml,
+		logger:     slog.New(ml),
 		stopChan:   make(chan struct{}),
 	}
 	c.DeletePattern(context.Background(), "x:*")
@@ -2094,7 +2092,7 @@ func TestDeleteEmptyKeysNoOp(t *testing.T) {
 	c := &cache{
 		localStore:  newMemStore(),
 		remoteStore: remote,
-		logger:      ml,
+		logger:      slog.New(ml),
 		stopChan:    make(chan struct{}),
 	}
 	c.Delete(context.Background()) // 空参数
@@ -2193,7 +2191,7 @@ func TestWriteBackFailureWarns(t *testing.T) {
 		notExistPlaceholder: []byte("*"),
 		stats:               newStats(),
 		metrics:             noopMetrics{},
-		logger:              ml,
+		logger:              slog.New(ml),
 		ttl:                 60,
 		stopChan:            make(chan struct{}),
 	}
@@ -2218,7 +2216,7 @@ func TestGetfnFillFailureWarns(t *testing.T) {
 		notExistPlaceholder: []byte("*"),
 		stats:               newStats(),
 		metrics:             noopMetrics{},
-		logger:              ml,
+		logger:              slog.New(ml),
 		ttl:                 60,
 		stopChan:            make(chan struct{}),
 	}
@@ -2234,7 +2232,7 @@ func TestGetfnFillFailureWarns(t *testing.T) {
 	assert.Nil(t, err, "fill failure must not block the fn result")
 	assert.Equal(t, "loaded", s)
 	assert.Len(t, ml.warns, 1, "fill failure should be logged")
-	assert.Contains(t, ml.warns[0], "fill cache for key")
+	assert.Contains(t, ml.warns[0], "fill cache")
 
 	// 占位符回填路径同样 Warn（exist=false 走同一 putCache）
 	var s2 string
@@ -2502,7 +2500,7 @@ func TestPendingDeletesLimit(t *testing.T) {
 		localStore:  newMemStore(),
 		remoteStore: remote,
 		metrics:     noopMetrics{},
-		logger:      ml,
+		logger:      slog.New(ml),
 		stopChan:    make(chan struct{}),
 	}
 	c.degraded.Store(true)

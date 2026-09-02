@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -57,12 +58,12 @@ type Cache interface {
 }
 
 type cache struct {
-	localStore          Store      // 堆缓存
-	remoteStore         Store      // 远程缓存
-	listener            Listener   // 异步消息通知
-	serializer          Serializer // 序列化
-	notExistPlaceholder []byte     // 缓存击穿空对象
-	logger              logger.Logger // 日志
+	localStore          Store        // 堆缓存
+	remoteStore         Store        // 远程缓存
+	listener            Listener     // 异步消息通知
+	serializer          Serializer   // 序列化
+	notExistPlaceholder []byte       // 缓存击穿空对象
+	logger              *slog.Logger // 日志
 	opt                 Options
 	cipher              Cipher // 透明加解密器（nil 表示不加密）
 	sg                  singleflight.Group
@@ -385,7 +386,7 @@ func (c *cache) DeletePattern(ctx context.Context, pattern string) {
 		if s != nil {
 			if ps, ok := s.(PatternStore); ok {
 				if err := ps.DeletePattern(ctx, pattern); err != nil {
-					c.logger.Warnf("delete pattern %s from store %s failed: %v", pattern, s.Name(), err)
+					c.logger.Warn("delete pattern from store failed", "pattern", pattern, "store", s.Name(), "err", err)
 				}
 			}
 		}
@@ -472,7 +473,7 @@ func (c *cache) Getfn(ctx context.Context, key string, v any, fn LoadFn, expireS
 			d, err = c.serializer.Marshal(v)
 			if err != nil {
 				// 序列化失败：记录 Warn 并跳过缓存写入，不阻断回源结果返回。
-				c.logger.Warnf("marshal loaded value for key:[%s] failed, skip caching: %v", key, err)
+				c.logger.Warn("marshal loaded value failed, skip caching", "key", key, "err", err)
 				return storeItem{bytes: nil, exist: true}, nil
 			}
 		}
@@ -481,7 +482,7 @@ func (c *cache) Getfn(ctx context.Context, key string, v any, fn LoadFn, expireS
 		// 回填失败仅记录 Warn（含占位符回填）：不阻断回源结果返回，
 		// 否则持续 miss → 每次穿透且零感知。
 		if err := c.putCache(ctx, key, d, expireSeconds); err != nil {
-			c.logger.Warnf("fill cache for key:[%s] failed: %v", key, err)
+			c.logger.Warn("fill cache failed", "key", key, "err", err)
 		}
 		return storeItem{bytes: d, exist: exist}, nil
 	})
@@ -538,7 +539,7 @@ func (c *cache) Delete(ctx context.Context, keys ...string) {
 	if len(keys) == 0 {
 		return // 空参数直接返回，避免向 remote 发送空 Del 引发告警/计数噪音
 	}
-	c.logger.Debugf("delete cache key: %v", keys)
+	c.logger.Debug("delete cache key", "keys", keys)
 
 	c.removeFromStorage(ctx, c.localStore, keys...)
 	c.removeFromStorage(ctx, c.remoteStore, keys...)
@@ -557,7 +558,7 @@ func (c *cache) noticeRemoved(keys ...string) {
 	if c.listener != nil && len(keys) > 0 {
 		for _, key := range keys {
 			if err := c.listener.Publish(key); err != nil {
-				c.logger.Warnf("publish removed key:[%s] failed: %v", key, err)
+				c.logger.Warn("publish removed key failed", "key", key, "err", err)
 			}
 		}
 	}
@@ -679,7 +680,7 @@ func (c *cache) syncBatch() {
 		if localExist && !remoteExist {
 			// Removed remotely → clear local（等待补偿的 key 不驱逐）
 			if c.hasPending(key) {
-				c.logger.Warnf("version sync: key:[%s] has pending op, skip eviction", key)
+				c.logger.Warn("version sync skip eviction: key has pending op", "key", key)
 				continue
 			}
 			c.removeFromStorage(ctx, c.localStore, key)
@@ -688,7 +689,7 @@ func (c *cache) syncBatch() {
 			// Remote has newer data → update local
 			// 回写失败仅记录 Warn（sync batch）：持续 miss 会导致每次穿透且零感知
 			if err := c.putInStore(ctx, c.localStore, key, payloadOf(remoteData), c.ttl); err != nil {
-				c.logger.Warnf("sync batch write back to local store key:[%s] failed: %v", key, err)
+				c.logger.Warn("sync batch write back to local store failed", "key", key, "err", err)
 			}
 		}
 	}
@@ -823,7 +824,7 @@ func (c *cache) getFromCacheData(ctx context.Context, key string, expireSeconds 
 		// Remote has the data → sync to local (refresh stale or warm new)
 		// 回写失败仅记录 Warn：持续 miss 会导致每次穿透且零感知
 		if err := c.putInStore(ctx, c.localStore, key, data, ttl); err != nil {
-			c.logger.Warnf("write back to local store key:[%s] failed: %v", key, err)
+			c.logger.Warn("write back to local store failed", "key", key, "err", err)
 		}
 	} else if localWasStale {
 		// Remote doesn't have it → clear stale local entry immediately
@@ -968,7 +969,7 @@ func (c *cache) removeFromStorage(ctx context.Context, s Store, keys ...string) 
 			delete(c.pendingWrites, key)
 			if len(c.pendingDeletes) >= maxPendingWrites {
 				// 上限：拒绝新删除（恢复后 remote 数据可能复活），Warn 告知
-				c.logger.Warnf("pending deletes full, dropping delete for key:[%s]", key)
+				c.logger.Warn("pending deletes full, dropping delete", "key", key)
 				continue
 			}
 			c.pendingDeletes[key] = struct{}{}
@@ -981,7 +982,7 @@ func (c *cache) removeFromStorage(ctx context.Context, s Store, keys ...string) 
 		if s.IsRemote() {
 			c.recordRemoteError(err)
 		}
-		c.logger.Warnf("delete from store %s keys %v failed: %v", s.Name(), keys, err)
+		c.logger.Warn("delete from store failed", "store", s.Name(), "keys", keys, "err", err)
 	} else if s.IsRemote() {
 		c.recordRemoteSuccess()
 	}
@@ -1073,7 +1074,7 @@ func (c *cache) flushPending(force bool) {
 		err := c.remoteStore.Delete(ctx, key)
 		c.pendingMu.Lock()
 		if err != nil {
-			c.logger.Warnf("flush pending delete for key:[%s] failed, keeping for retry: %v", key, err)
+			c.logger.Warn("flush pending delete failed, keeping for retry", "key", key, "err", err)
 			if c.pendingDeletes == nil {
 				c.pendingDeletes = make(map[string]struct{})
 			}
@@ -1091,7 +1092,7 @@ func (c *cache) flushPending(force bool) {
 		err := c.remoteStore.Put(ctx, key, wrapVersion(pw.data), pw.expireSeconds)
 		c.pendingMu.Lock()
 		if err != nil {
-			c.logger.Warnf("flush pending write to remote failed, keeping key:[%s] for retry: %v", key, err)
+			c.logger.Warn("flush pending write to remote failed, keeping for retry", "key", key, "err", err)
 			if c.pendingWrites == nil {
 				c.pendingWrites = make(map[string]pendingWrite)
 			}
@@ -1197,13 +1198,16 @@ func acquireDefaultCache() *cache {
 	return &cache{
 		notExistPlaceholder: []byte(defaultNotExistPlaceholder),
 		serializer:          jsonSerializer{},
-		logger:              logger.DefaultLogger,
-		sg:                  singleflight.Group{},
-		stats:               newStats(),
-		metrics:             noopMetrics{},
-		ttl:                 defaultExpiresSeconds,
-		stopChan:            make(chan struct{}),
-		degradeThreshold:    3,
-		degradeRecovery:     5 * time.Second,
+		// 若应用运行期调用 logger.Init/New 重建默认实例，此处捕获的引用将失效
+		// （旧实例被关闭：异步链静默丢日志，见 logger.DefaultLogger 文档）；
+		// 需要新实例时应重新构造 cache。
+		logger:           logger.DefaultLogger,
+		sg:               singleflight.Group{},
+		stats:            newStats(),
+		metrics:          noopMetrics{},
+		ttl:              defaultExpiresSeconds,
+		stopChan:         make(chan struct{}),
+		degradeThreshold: 3,
+		degradeRecovery:  5 * time.Second,
 	}
 }
