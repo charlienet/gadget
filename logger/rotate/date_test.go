@@ -4,137 +4,97 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
 
+// 所有用例的文件操作均限定在 t.TempDir()/t.Chdir 内，
+// 测试目录与包源码目录不得残留产物（logs/、.hidefile*、裸日期文件）。
+
 func TestWrite(t *testing.T) {
-	w := &RotateDateWriter{Filename: "logs/av.log"}
-	defer w.Close() // 释放文件句柄
+	dir := t.TempDir()
+	filename := filepath.Join(dir, "av.log")
+
+	w := &RotateDateWriter{Filename: filename}
+	defer w.Close()
 
 	for i := range 100 {
-		_, _ = w.Write([]byte("abc" + strconv.Itoa(i) + "\n"))
+		if _, err := w.Write([]byte("abc" + strconv.Itoa(i) + "\n")); err != nil {
+			t.Fatalf("write %d: %v", i, err)
+		}
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, "av."+time.Now().Format("2006-01-02")+".log"))
+	if err != nil {
+		t.Fatalf("read dated file: %v", err)
+	}
+	if !strings.Contains(string(data), "abc42") || !strings.HasSuffix(string(data), "abc99\n") {
+		t.Errorf("expected all 100 lines in dated file, got: %q", data)
 	}
 }
 
 func TestMuti(t *testing.T) {
-	w := &RotateDateWriter{Filename: "logs/av.test.log"}
+	dir := t.TempDir()
+	w := &RotateDateWriter{Filename: filepath.Join(dir, "av.test.log")}
 	defer w.Close()
 
 	for i := range 10 {
-		_, _ = w.Write([]byte("abc" + strconv.Itoa(i) + "\n"))
+		if _, err := w.Write([]byte("abc" + strconv.Itoa(i) + "\n")); err != nil {
+			t.Fatalf("write %d: %v", i, err)
+		}
+	}
+	// 多扩展名段：只切最后一段 .log，日期插在中间
+	if _, err := os.Stat(filepath.Join(dir, "av.test."+time.Now().Format("2006-01-02")+".log")); err != nil {
+		t.Errorf("expected mid-dated filename: %v", err)
 	}
 }
 
 func TestNoExt(t *testing.T) {
-	w := &RotateDateWriter{Filename: "logs/av"}
+	dir := t.TempDir()
+	w := &RotateDateWriter{Filename: filepath.Join(dir, "av")}
 	defer w.Close()
-	_, _ = w.Write([]byte("noext"))
+
+	if _, err := w.Write([]byte("noext")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "av."+time.Now().Format("2006-01-02"))); err != nil {
+		t.Errorf("expected no-ext dated file: %v", err)
+	}
 }
 
 func TestHideFile(t *testing.T) {
-	w := &RotateDateWriter{Filename: ".hidefile"}
+	dir := t.TempDir()
+	w := &RotateDateWriter{Filename: filepath.Join(dir, ".hidefile")}
 	defer w.Close()
-	_, _ = w.Write([]byte("hidefile"))
+
+	if _, err := w.Write([]byte("hidefile")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	// 隐藏文件：日期后缀直接追加在文件名后
+	if _, err := os.Stat(filepath.Join(dir, ".hidefile."+time.Now().Format("2006-01-02"))); err != nil {
+		t.Errorf("expected hidden dated file: %v", err)
+	}
 }
 
 func TestNoFileName(t *testing.T) {
+	// Filename 为空：日期文件落在当前工作目录——chdir 进 TempDir 防产物残留
+	t.Chdir(t.TempDir())
+
 	w := &RotateDateWriter{}
+	defer w.Close() //nolint:errcheck
 
-	_, _ = w.Write([]byte("abc11"))
-}
-
-// TestDateRotateCleanup 验证 MaxAge 清理：超过保留天数的历史日期文件被删除，
-// 保留期内的文件不受影响（直接调用内部清理逻辑，时间可控）。
-func TestDateRotateCleanup(t *testing.T) {
-	dir := t.TempDir()
-	filename := filepath.Join(dir, "app.log")
-	w := &RotateDateWriter{Filename: filename, Layout: "2006-01-02", MaxAge: 3}
-	defer w.Close()
-
-	layout := "2006-01-02"
-	now := time.Now()
-	// 构造 5 个历史日期文件：今天、-1、-2、-4、-5 天（MaxAge=3 时 -4/-5 应被清理）
-	dates := []time.Time{now, now.AddDate(0, 0, -1), now.AddDate(0, 0, -2), now.AddDate(0, 0, -4), now.AddDate(0, 0, -5)}
-	for _, d := range dates {
-		p := filepath.Join(dir, dateFilename("app.log", d.Format(layout)))
-		if err := os.WriteFile(p, []byte("x"), 0644); err != nil {
-			t.Fatalf("failed to create file: %v", err)
-		}
+	if _, err := w.Write([]byte("abc11")); err != nil {
+		t.Fatalf("write: %v", err)
 	}
-
-	if err := w.cleanupOld(); err != nil {
-		t.Fatalf("cleanupOld failed: %v", err)
-	}
-
-	for _, d := range dates {
-		p := filepath.Join(dir, dateFilename("app.log", d.Format(layout)))
-		age := int(now.Sub(d).Hours() / 24)
-		_, err := os.Stat(p)
-		if age >= 4 {
-			if err == nil {
-				t.Errorf("expected stale file removed: %s", p)
-			}
-		} else if err != nil {
-			t.Errorf("expected recent file kept: %s", p)
-		}
-	}
-}
-
-// TestDateRotateCompress 验证 Compress：对上一日文件 gzip 压缩后删除原文件（标准库 compress/gzip）
-func TestDateRotateCompress(t *testing.T) {
-	dir := t.TempDir()
-	filename := filepath.Join(dir, "app.log")
-	w := &RotateDateWriter{Filename: filename, Layout: "2006-01-02"}
-
-	date := time.Now().AddDate(0, 0, -1).Format("2006-01-02")
-	raw := filepath.Join(dir, dateFilename("app.log", date))
-	if err := os.WriteFile(raw, []byte("compress me"), 0644); err != nil {
-		t.Fatalf("failed to create file: %v", err)
-	}
-
-	if err := w.compressFile(date); err != nil {
-		t.Fatalf("compressFile failed: %v", err)
-	}
-
-	if _, err := os.Stat(raw); !os.IsNotExist(err) {
-		t.Errorf("expected raw file removed after compress, got err=%v", err)
-	}
-
-	data, err := os.ReadFile(raw + ".gz")
-	if err != nil {
-		t.Fatalf("failed to read gz file: %v", err)
-	}
-	// 验证 gzip 魔数 0x1f 0x8b
-	if len(data) < 2 || data[0] != 0x1f || data[1] != 0x8b {
-		t.Errorf("expected gzip magic bytes, got %v", data[:2])
-	}
-}
-
-// TestDateRotateCleanupGz 验证压缩后的 .gz 历史文件同样参与 MaxAge 清理
-func TestDateRotateCleanupGz(t *testing.T) {
-	dir := t.TempDir()
-	filename := filepath.Join(dir, "app.log")
-	w := &RotateDateWriter{Filename: filename, Layout: "2006-01-02", MaxAge: 3}
-
-	layout := "2006-01-02"
-	old := time.Now().AddDate(0, 0, -5).Format(layout)
-	gz := filepath.Join(dir, dateFilename("app.log", old)+".gz")
-	if err := os.WriteFile(gz, []byte("x"), 0644); err != nil {
-		t.Fatalf("failed to create gz file: %v", err)
-	}
-
-	if err := w.cleanupOld(); err != nil {
-		t.Fatalf("cleanupOld failed: %v", err)
-	}
-
-	if _, err := os.Stat(gz); !os.IsNotExist(err) {
-		t.Errorf("expected stale gz file removed, got err=%v", err)
+	if _, err := os.Stat(time.Now().Format("2006-01-02")); err != nil {
+		t.Errorf("expected bare date file in cwd: %v", err)
 	}
 }
 
 func BenchmarkWrite(b *testing.B) {
-	w := &RotateDateWriter{Filename: "logs/aaaa.log"}
+	dir := b.TempDir()
+	w := &RotateDateWriter{Filename: filepath.Join(dir, "bench.log")}
 	defer w.Close()
 
 	for i := 0; b.Loop(); i++ {

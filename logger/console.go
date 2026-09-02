@@ -10,7 +10,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 )
 
 // ConsoleOptions 控制台 handler 配置
@@ -34,26 +33,20 @@ const (
 )
 
 // consoleHandler 彩色控制台 slog.Handler
-// 注意：mu 用指针共享，WithAttrs/WithGroup 派生时值拷贝安全
+// 注意：mu 用指针共享，WithAttrs/WithGroup 派生时值拷贝安全；
+// w 构造后固定（输出目标切换 = 重建 logger，不支持热替换）。
 type consoleHandler struct {
 	mu     *sync.Mutex
-	w      *atomic.Pointer[io.Writer] // 共享 writer 引用：SetOutput 热切换（原子换指针，不重建链）
+	w      io.Writer
 	opts   ConsoleOptions
 	attrs  []slog.Attr
 	groups []string
 }
 
+// NewConsoleHandler 构造彩色控制台 handler：w 为输出目标（如 os.Stdout），
+// opts 为值拷贝，派生实例共享同一 writer 与互斥锁。
 func NewConsoleHandler(w io.Writer, opts *ConsoleOptions) slog.Handler {
-	// 创建独立共享指针：NewConsoleHandler 的使用者自行 SetOutput 时换掉指针内容即可
-	p := &atomic.Pointer[io.Writer]{}
-	p.Store(&w)
-	return newConsoleHandlerWithPtr(p, opts)
-}
-
-// newConsoleHandlerWithPtr 使用外部传入的共享 writer 指针构造 handler
-// （default.go 的 slogLogger 持有同一 outPtr，SetOutput 全局生效于所有派生实例）
-func newConsoleHandlerWithPtr(p *atomic.Pointer[io.Writer], opts *ConsoleOptions) slog.Handler {
-	return &consoleHandler{mu: &sync.Mutex{}, w: p, opts: *opts}
+	return &consoleHandler{mu: &sync.Mutex{}, w: w, opts: *opts}
 }
 
 // Enabled 判断级别是否启用（slog 级别数值越小越详细）
@@ -127,9 +120,7 @@ func (h *consoleHandler) Handle(_ context.Context, r slog.Record) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	// 原子加载当前 writer（SetOutput 热切换后新写入落到新目标）
-	w := h.w.Load()
-	_, err := (*w).Write(buf)
+	_, err := h.w.Write(buf)
 	return err
 }
 

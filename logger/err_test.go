@@ -55,7 +55,7 @@ func TestNoStackWhenDisabled(t *testing.T) {
 func TestStackViaWithAttrs(t *testing.T) {
 	var buf bytes.Buffer
 	l := logger.New(logger.WithOutput(&buf), logger.WithColor(false), logger.WithStackTrace(true))
-	l.WithAttrs(logger.Err(logger.Wrap(errors.New("boom")))).Error("msg")
+	l.With(logger.Err(logger.Wrap(errors.New("boom")))).Error("msg")
 
 	got := buf.String()
 	if !strings.Contains(got, "stack") {

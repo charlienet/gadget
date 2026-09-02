@@ -2,6 +2,7 @@ package logger_test
 
 import (
 	"bytes"
+	"context"
 	"log/slog"
 	"strings"
 	"testing"
@@ -181,5 +182,66 @@ func TestSensitiveString(t *testing.T) {
 	// 大小写不敏感
 	if got := logger.SensitiveString("PASSWORD is 123"); !strings.Contains(got, "******") {
 		t.Errorf("expected case-insensitive mask, got: %s", got)
+	}
+}
+
+// N-2：链路追踪保留属性豁免——用户子串词 "id" 不得打码 TraceHandler 注入的
+// trace_id / req_id；同 key 子串规则的其它属性（sessionid）照常打码
+func TestSensitiveReservedTraceKeysExempt(t *testing.T) {
+	var buf bytes.Buffer
+	l := logger.New(logger.WithOutput(&buf), logger.WithColor(false), logger.WithSensitiveKeys("id"))
+
+	ctx := logger.WithTraceID(context.Background(), "trace-keep")
+	ctx = logger.WithReqID(ctx, "req-keep")
+	l.InfoContext(ctx, "login", "sessionid", "sess-hide")
+
+	got := buf.String()
+	if !strings.Contains(got, "trace_id=trace-keep") {
+		t.Errorf("expected trace_id kept intact, got: %s", got)
+	}
+	if !strings.Contains(got, "req_id=req-keep") {
+		t.Errorf("expected req_id kept intact, got: %s", got)
+	}
+	if strings.Contains(got, "sess-hide") || !strings.Contains(got, "sessionid=******") {
+		t.Errorf("expected sessionid still masked by substring key, got: %s", got)
+	}
+}
+
+// N-2：Group 递归路径同样豁免（attrHasSensitive / maskAttr 共用被包装的 match）；
+// 手动写入的保留名属性与系统注入走同一豁免
+func TestSensitiveReservedKeysInsideGroup(t *testing.T) {
+	var buf bytes.Buffer
+	l := logger.New(logger.WithOutput(&buf), logger.WithColor(false), logger.WithSensitiveKeys("id"))
+
+	l.Info("m", slog.Group("meta",
+		slog.String("trace_id", "g-trace-keep"),
+		slog.String("req_id", "g-req-keep"),
+		slog.String("userid", "g-user-hide"),
+	))
+
+	got := buf.String()
+	if !strings.Contains(got, "meta.trace_id=g-trace-keep") || !strings.Contains(got, "meta.req_id=g-req-keep") {
+		t.Errorf("expected reserved keys kept inside group, got: %s", got)
+	}
+	if strings.Contains(got, "g-user-hide") || !strings.Contains(got, "meta.userid=******") {
+		t.Errorf("expected userid masked inside group, got: %s", got)
+	}
+}
+
+// N-2：自定义 Match 函数路径同样保留豁免（match 入口统一包装）
+func TestSensitiveReservedKeysExemptWithCustomMatch(t *testing.T) {
+	var buf bytes.Buffer
+	l := logger.New(logger.WithOutput(&buf), logger.WithColor(false),
+		logger.WithSensitiveMatch(func(k string) bool { return strings.Contains(k, "id") }))
+
+	ctx := logger.WithTraceID(context.Background(), "custom-keep")
+	l.InfoContext(ctx, "m", "deviceid", "dev-hide")
+
+	got := buf.String()
+	if !strings.Contains(got, "trace_id=custom-keep") {
+		t.Errorf("expected trace_id exempt under custom match, got: %s", got)
+	}
+	if strings.Contains(got, "dev-hide") {
+		t.Errorf("expected deviceid masked, got: %s", got)
 	}
 }

@@ -14,6 +14,9 @@ import (
 //
 // 掩码替换统一将敏感值替换为字符串掩码（slog.StringValue，默认 "******"），
 // 原始类型信息丢失：JSON 下游（文件 handler）注意字段 schema 变化。
+//
+// 例外：链路追踪保留属性（trace_id / req_id，见 AttrTraceID / AttrReqID）
+// 不参与敏感打码——系统注入的链路标识是可观测性地基，避免被用户子串词误伤。
 
 // SensitiveOptions 敏感信息过滤配置（应用端可配）
 type SensitiveOptions struct {
@@ -42,6 +45,7 @@ type sensitiveHandler struct {
 
 // NewSensitiveHandler 包装 handler：Handle 时对敏感 key 的属性值打码后透传。
 // opts 为 nil 或字段缺省时使用内置默认敏感词集（精确匹配）与默认掩码 "******"。
+// 链路追踪保留属性（trace_id / req_id）永不参与打码（见 reservedExemptMatcher）。
 func NewSensitiveHandler(handler slog.Handler, opts *SensitiveOptions) slog.Handler {
 	h := &sensitiveHandler{
 		handler: handler,
@@ -61,8 +65,24 @@ func NewSensitiveHandler(handler slog.Handler, opts *SensitiveOptions) slog.Hand
 	} else {
 		h.match = buildSensitiveMatcher(nil)
 	}
+	// 保留属性名豁免统一包在 match 入口短路：覆盖 Handle 扫描 / maskAttr（含
+	// Group 递归）/ WithAttrs 预设等全部属性处理路径
+	h.match = reservedExemptMatcher(h.match)
 
 	return h
+}
+
+// reservedExemptMatcher 包装匹配函数：链路追踪保留属性名不参与敏感打码。
+// TraceHandler 位于链最外层，trace_id / req_id 以固定名注入每条日志；
+// 用户子串词（如 WithSensitiveKeys("id")）会误命中系统标识、破坏可观测性。
+// 豁免为精确匹配（注入路径用常量拼写，无大小写变体）。
+func reservedExemptMatcher(inner func(string) bool) func(string) bool {
+	return func(key string) bool {
+		if key == AttrTraceID || key == AttrReqID {
+			return false // 链路追踪保留属性不参与敏感打码
+		}
+		return inner(key)
+	}
 }
 
 // buildSensitiveMatcher 构造匹配函数：

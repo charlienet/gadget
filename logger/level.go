@@ -16,7 +16,9 @@ const (
 	Info  Level = slog.LevelInfo  // 0
 	Warn  Level = slog.LevelWarn  // 4
 	Error Level = slog.LevelError // 8
-	Fatal Level = slog.Level(12)
+	// FatalLevel 致命级（12）。原名 Fatal 与包级 Fatal(msg, args...) 函数同层冲突
+	// （Go 包级命名空间唯一），故更名保留该级别语义。
+	FatalLevel Level = slog.Level(12)
 )
 
 // GetLevel 解析级别字符串（保留原有 API，返回类型不变）
@@ -33,7 +35,7 @@ func GetLevel(levelStr string) (Level, error) {
 	case "ERROR":
 		return Error, nil
 	case "FATAL":
-		return Fatal, nil
+		return FatalLevel, nil
 	}
 
 	return Info, fmt.Errorf("unknown Level String: '%s', defaulting to InfoLevel", levelStr)
@@ -53,7 +55,7 @@ func ParseLevel(s string) slog.Level {
 	case "error":
 		return Error
 	case "fatal":
-		return Fatal
+		return FatalLevel
 	default:
 		return Info
 	}

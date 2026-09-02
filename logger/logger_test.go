@@ -3,7 +3,6 @@ package logger_test
 import (
 	"bytes"
 	"context"
-	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -14,35 +13,34 @@ import (
 	"github.com/charlienet/gadget/logger"
 )
 
-func captureLogger(t *testing.T, level logger.Level) (logger.Logger, *bytes.Buffer) {
+// newBufLogger 创建输出到 buffer 的 logger（关闭颜色，级别显式指定）
+func newBufLogger(t *testing.T, level logger.Level) (*slog.Logger, *bytes.Buffer) {
 	t.Helper()
 	var buf bytes.Buffer
-	l := logger.New(logger.WithRecorder(&mockRecorder{}), logger.WithLevel(level), logger.WithOutput(&buf))
+	l := logger.New(logger.WithLevel(level), logger.WithOutput(&buf), logger.WithColor(false))
 	return l, &buf
 }
 
 func TestInfo(t *testing.T) {
-	l, buf := captureLogger(t, logger.Info)
+	l, buf := newBufLogger(t, logger.Info)
 	l.Info("hello")
-	if buf.Len() == 0 {
-		t.Error("expected Info output")
+	if !strings.Contains(buf.String(), "hello") {
+		t.Errorf("expected Info output, got: %s", buf.String())
 	}
 }
 
 func TestLevelFiltering(t *testing.T) {
-	l, buf := captureLogger(t, logger.Warn)
+	l, buf := newBufLogger(t, logger.Warn)
 
 	l.Debug("hidden")
 	if buf.Len() > 0 {
 		t.Errorf("expected no Debug output at Warn level, got: %s", buf.String())
 	}
-	buf.Reset()
 
 	l.Info("hidden")
 	if buf.Len() > 0 {
 		t.Errorf("expected no Info output at Warn level, got: %s", buf.String())
 	}
-	buf.Reset()
 
 	l.Warn("visible")
 	if buf.Len() == 0 {
@@ -50,123 +48,103 @@ func TestLevelFiltering(t *testing.T) {
 	}
 }
 
-func TestLogf(t *testing.T) {
-	l, buf := captureLogger(t, logger.Info)
-	l.Infof("fmt %s %d", "abc", 42)
-	if !strings.Contains(buf.String(), "fmt abc 42") {
-		t.Errorf("expected formatted output, got: %s", buf.String())
-	}
-}
-
-func TestWithField(t *testing.T) {
-	l, buf := captureLogger(t, logger.Debug)
-	l.WithField("key", "val").Debug("msg")
+func TestWithAttr(t *testing.T) {
+	l, buf := newBufLogger(t, logger.Debug)
+	l.With("key", "val").Debug("msg")
 	got := buf.String()
-	if !strings.Contains(got, "key:val") {
+	if !strings.Contains(got, "key=val") {
 		t.Errorf("expected field in output, got: %s", got)
 	}
 }
 
-func TestWithFields(t *testing.T) {
-	l, buf := captureLogger(t, logger.Debug)
-	l.WithFields(map[string]any{"a": "1", "b": "2"}).Debug("msg")
+func TestWithMultipleAttrOrder(t *testing.T) {
+	// 原生 slog With 按调用方给定的成对顺序输出（原 WithFields map 排序能力的等价物）
+	var buf bytes.Buffer
+	l := logger.New(logger.WithOutput(&buf), logger.WithColor(false))
+	l.With("a", 2, "m", 3, "z", 1).Info("msg")
+
 	got := buf.String()
-	if !strings.Contains(got, "a:1") || !strings.Contains(got, "b:2") {
-		t.Errorf("expected both fields in output, got: %s", got)
+	ai := strings.Index(got, "a=2")
+	mi := strings.Index(got, "m=3")
+	zi := strings.Index(got, "z=1")
+	if ai < 0 || mi < 0 || zi < 0 {
+		t.Fatalf("expected all fields in output, got: %s", got)
+	}
+	if !(ai < mi && mi < zi) {
+		t.Errorf("expected caller order a<m<z, got: %s", got)
 	}
 }
 
-func TestSetLevel(t *testing.T) {
-	l, buf := captureLogger(t, logger.Error)
+func TestSlogWithLog(t *testing.T) {
+	l, buf := newBufLogger(t, logger.Info)
 
-	l.Debug("hidden at error")
-	if buf.Len() > 0 {
-		t.Fatalf("expected no output at Error level, got: %s", buf.String())
+	l.With("key", "val").Log(context.Background(), logger.Info, "slog msg")
+	got := buf.String()
+	if !strings.Contains(got, "slog msg") {
+		t.Errorf("expected message in output, got: %s", got)
 	}
-	buf.Reset()
-
-	l.SetLevel(logger.Debug)
-	l.Debug("now visible")
-	if buf.Len() == 0 {
-		t.Fatal("expected Debug output after SetLevel(Debug)")
-	}
-	if !strings.Contains(buf.String(), "now visible") {
-		t.Errorf("expected message in output, got: %s", buf.String())
+	if !strings.Contains(got, "key=val") {
+		t.Errorf("expected key=val in output, got: %s", got)
 	}
 }
 
-func TestSetOutput(t *testing.T) {
-	l, firstBuf := captureLogger(t, logger.Info)
-	l.Info("first out")
-	if firstBuf.Len() == 0 {
-		t.Fatal("expected output in first buffer")
-	}
+func TestWithAttrKind(t *testing.T) {
+	l, buf := newBufLogger(t, logger.Info)
 
-	var secondBuf bytes.Buffer
-	l.SetOutput(&secondBuf)
-	l.Info("second out")
-
-	if secondBuf.Len() == 0 {
-		t.Fatal("expected output in second buffer after SetOutput")
+	// slog.Attr 直接作为 With 参数：保持 Value Kind（等价 WithAttrs 语义；
+	// 本工具链的 slog.Logger 无 WithAttrs 方法）
+	l.With(slog.String("k", "v")).Info("msg")
+	got := buf.String()
+	if !strings.Contains(got, "k=v") {
+		t.Errorf("expected k=v in output, got: %s", got)
 	}
-	if !strings.Contains(secondBuf.String(), "second out") {
-		t.Errorf("expected redirected message, got: %s", secondBuf.String())
+	if !strings.Contains(got, "msg") {
+		t.Errorf("expected msg in output, got: %s", got)
+	}
+}
+
+func TestLogAttrs(t *testing.T) {
+	l, buf := newBufLogger(t, logger.Info)
+
+	l.LogAttrs(context.Background(), logger.Info, "msg", slog.Int("n", 1))
+	got := buf.String()
+	if !strings.Contains(got, "msg") {
+		t.Errorf("expected msg in output, got: %s", got)
+	}
+	if !strings.Contains(got, "n=1") {
+		t.Errorf("expected n=1 in output, got: %s", got)
+	}
+}
+
+func TestWithGroup(t *testing.T) {
+	l, buf := newBufLogger(t, logger.Info)
+
+	l.WithGroup("g").With(slog.String("k", "v")).Info("msg")
+	if !strings.Contains(buf.String(), "g.k=v") {
+		t.Errorf("expected g.k=v in output, got: %s", buf.String())
+	}
+}
+
+func TestTraceLevel(t *testing.T) {
+	// Trace 级别经 slog 原生 Log 输出 [TRAC]
+	l, buf := newBufLogger(t, logger.Trace)
+	l.Log(context.Background(), logger.Trace, "trace msg")
+	if !strings.Contains(buf.String(), "[TRAC] trace msg") {
+		t.Errorf("expected trace output, got: %s", buf.String())
 	}
 }
 
 func TestDefaultLogger(t *testing.T) {
 	// Should not panic
 	l := logger.DefaultLogger
+	if l == nil {
+		t.Fatal("expected non-nil DefaultLogger")
+	}
 	l.Info("default ok")
 }
 
-func TestExitFunc(t *testing.T) {
-	var exitCode int
-	orig := logger.ExitFunc
-	logger.ExitFunc = func(code int) { exitCode = code }
-	defer func() { logger.ExitFunc = orig }()
-
-	var buf bytes.Buffer
-	l := logger.New(logger.WithRecorder(&mockRecorder{}), logger.WithLevel(logger.Fatal), logger.WithOutput(&buf))
-	l.Fatal("exit test")
-
-	if exitCode != 1 {
-		t.Errorf("expected exit code 1, got %d", exitCode)
-	}
-	if !strings.Contains(buf.String(), "exit test") {
-		t.Errorf("expected fatal message, got: %s", buf.String())
-	}
-}
-
-func TestContext(t *testing.T) {
-	l, buf := captureLogger(t, logger.Info)
-
-	ctx := l.WithContext(context.Background())
-	if ctx == nil {
-		t.Fatal("expected non-nil context")
-	}
-
-	retrieved := logger.FromContext(ctx)
-	retrieved.Info("from ctx")
-	if buf.Len() == 0 {
-		t.Error("expected output from context logger")
-	}
-}
-
-func TestTraceLevel(t *testing.T) {
-	// 走默认 slog 实现验证 [TRAC] 输出
-	var buf bytes.Buffer
-	l := logger.New(logger.WithOutput(&buf), logger.WithLevel(logger.Trace), logger.WithColor(false))
-	l.Trace("trace msg")
-	if !strings.Contains(buf.String(), "[TRAC] trace msg") {
-		t.Errorf("expected trace output, got: %s", buf.String())
-	}
-}
-
-// --- 新增：默认 slog 实现 ---
-
 func TestNewSlogDefault(t *testing.T) {
-	// 无参 New() 不 panic，返回可用 logger
+	// 无参 New() 不 panic，返回可用 *slog.Logger
 	l := logger.New()
 	if l == nil {
 		t.Fatal("expected non-nil logger")
@@ -182,95 +160,177 @@ func TestNewSlogDefault(t *testing.T) {
 	}
 }
 
-func TestSlogWithLog(t *testing.T) {
+// SetDefault 生效：New 返回的 logger 即 slog.Default()，包级函数走同一条 handler 链
+func TestSetDefaultApplied(t *testing.T) {
 	var buf bytes.Buffer
 	l := logger.New(logger.WithOutput(&buf), logger.WithColor(false))
 
-	l.With("key", "val").Log(logger.Info, "slog msg")
-	got := buf.String()
-	if !strings.Contains(got, "slog msg") {
-		t.Errorf("expected message in output, got: %s", got)
+	if slog.Default() != l {
+		t.Error("expected New to slog.SetDefault the returned logger")
 	}
-	if !strings.Contains(got, "key=val") {
-		t.Errorf("expected key=val in output, got: %s", got)
+	slog.Info("via package fn")
+	if !strings.Contains(buf.String(), "via package fn") {
+		t.Errorf("expected package-level slog.Info routed to New logger, got: %s", buf.String())
 	}
 }
 
-// --- 新增：slog.Attr 接口能力与 context 注入 ---
-
-func TestWithAttrs(t *testing.T) {
+// WithService/WithEnv 注入 service/env 属性
+func TestServiceEnvInjection(t *testing.T) {
 	var buf bytes.Buffer
-	l := logger.New(logger.WithOutput(&buf), logger.WithColor(false))
+	l := logger.New(logger.WithOutput(&buf), logger.WithColor(false),
+		logger.WithService("pay-svc"), logger.WithEnv("prod"))
 
-	l.WithAttrs(slog.String("k", "v")).Info("msg")
+	l.Info("msg")
 	got := buf.String()
+	if !strings.Contains(got, "service=pay-svc") {
+		t.Errorf("expected service attr, got: %s", got)
+	}
+	if !strings.Contains(got, "env=prod") {
+		t.Errorf("expected env attr, got: %s", got)
+	}
+
+	// 未设置时不出现对应属性
+	var buf2 bytes.Buffer
+	l2 := logger.New(logger.WithOutput(&buf2), logger.WithColor(false))
+	l2.Info("msg")
+	if strings.Contains(buf2.String(), "service=") || strings.Contains(buf2.String(), "env=") {
+		t.Errorf("expected no service/env attrs when not configured, got: %s", buf2.String())
+	}
+}
+
+// 包级 SetLevel 动态调整最近一次 New 实例的级别
+func TestSetLevelPackage(t *testing.T) {
+	var buf bytes.Buffer
+	l := logger.New(logger.WithLevel(logger.Error), logger.WithOutput(&buf), logger.WithColor(false))
+
+	l.Debug("hidden")
+	if buf.Len() > 0 {
+		t.Fatalf("expected no output at Error level, got: %s", buf.String())
+	}
+
+	logger.SetLevel(logger.Debug)
+	defer logger.SetLevel(logger.Info) // 复位，避免影响其他测试的默认级别直觉
+	l.Debug("now visible")
+	if !strings.Contains(buf.String(), "now visible") {
+		t.Errorf("expected Debug output after SetLevel(Debug), got: %s", buf.String())
+	}
+}
+
+// WithLeveler 自定义 Leveler 优先于 WithLevel 静态级别，运行时可动态调整
+func TestLevelerDynamic(t *testing.T) {
+	var buf bytes.Buffer
+	dl := logger.NewDynamicLevel(logger.Error)
+	l := logger.New(logger.WithLeveler(dl), logger.WithLevel(logger.Info), logger.WithOutput(&buf), logger.WithColor(false))
+
+	l.Info("hidden") // Leveler=Error，Info 应被过滤
+	if buf.Len() > 0 {
+		t.Fatalf("expected Leveler to override WithLevel, got: %s", buf.String())
+	}
+
+	dl.Set(logger.Debug)
+	l.Debug("now visible")
+	if !strings.Contains(buf.String(), "now visible") {
+		t.Errorf("expected Debug output after leveler.Set(Debug), got: %s", buf.String())
+	}
+}
+
+// TraceHandler：*Context 方法自动注入 trace_id/req_id；非 Context 方法不注入
+func TestTraceContextInjection(t *testing.T) {
+	l, buf := newBufLogger(t, logger.Info)
+
+	ctx := logger.WithTraceID(context.Background(), "t-1")
+	ctx = logger.WithReqID(ctx, "r-1")
+
+	l.InfoContext(ctx, "with trace")
+	got := buf.String()
+	if !strings.Contains(got, "trace_id=t-1") {
+		t.Errorf("expected trace_id in output, got: %s", got)
+	}
+	if !strings.Contains(got, "req_id=r-1") {
+		t.Errorf("expected req_id in output, got: %s", got)
+	}
+
+	// 未注入 trace 的 ctx：不出现属性
+	buf.Reset()
+	l.InfoContext(context.Background(), "no trace")
+	if strings.Contains(buf.String(), "trace_id") || strings.Contains(buf.String(), "req_id") {
+		t.Errorf("expected no trace attrs without ctx injection, got: %s", buf.String())
+	}
+
+	// 便捷方法（ctx 为 nil）：直接透传，不 panic、无属性
+	buf.Reset()
+	l.Info("convenience")
+	if strings.Contains(buf.String(), "trace_id") {
+		t.Errorf("expected no trace attrs for convenience method, got: %s", buf.String())
+	}
+}
+
+// TraceHandler 对 With/WithGroup 派生实例仍生效（派生后装饰器不丢失）
+func TestTraceOnDerivedLogger(t *testing.T) {
+	l, buf := newBufLogger(t, logger.Info)
+
+	ctx := logger.WithTraceID(context.Background(), "t-2")
+	l.With("k", "v").InfoContext(ctx, "derived")
+	if !strings.Contains(buf.String(), "trace_id=t-2") || !strings.Contains(buf.String(), "k=v") {
+		t.Errorf("expected trace_id on With-derived logger, got: %s", buf.String())
+	}
+
+	buf.Reset()
+	l.WithGroup("g").InfoContext(ctx, "grouped")
+	if !strings.Contains(buf.String(), "trace_id=t-2") {
+		t.Errorf("expected trace_id on WithGroup-derived logger, got: %s", buf.String())
+	}
+}
+
+// trace ctx 工具函数的存取语义
+func TestTraceCtxHelpers(t *testing.T) {
+	if got := logger.GetTraceID(context.Background()); got != "" {
+		t.Errorf("expected empty trace id, got %q", got)
+	}
+	if got := logger.GetReqID(context.Background()); got != "" {
+		t.Errorf("expected empty req id, got %q", got)
+	}
+
+	ctx := logger.WithTraceID(logger.WithReqID(context.Background(), "r9"), "t9")
+	if logger.GetTraceID(ctx) != "t9" || logger.GetReqID(ctx) != "r9" {
+		t.Error("expected trace/req id round-trip")
+	}
+}
+
+// 包级 Fatal/Fatalf：ExitFunc 注入替换，Fatal 级别记录 + 退出码 1
+func TestFatalPackageLevel(t *testing.T) {
+	var exitCode int
+	origExit := logger.ExitFunc
+	logger.ExitFunc = func(code int) { exitCode = code }
+	defer func() { logger.ExitFunc = origExit }()
+
+	origDefault := logger.DefaultLogger
+	defer func() { logger.DefaultLogger = origDefault }()
+
+	l, buf := newBufLogger(t, logger.Info)
+	logger.DefaultLogger = l
+
+	logger.Fatal("exit test", "k", "v")
+	if exitCode != 1 {
+		t.Errorf("expected exit code 1, got %d", exitCode)
+	}
+	got := buf.String()
+	if !strings.Contains(got, "[FATA] exit test") {
+		t.Errorf("expected fatal message with FATA level, got: %s", got)
+	}
 	if !strings.Contains(got, "k=v") {
-		t.Errorf("expected k=v in output, got: %s", got)
-	}
-	if !strings.Contains(got, "msg") {
-		t.Errorf("expected msg in output, got: %s", got)
-	}
-}
-
-func TestLogAttrs(t *testing.T) {
-	var buf bytes.Buffer
-	l := logger.New(logger.WithOutput(&buf), logger.WithColor(false))
-
-	l.LogAttrs(logger.Info, "msg", slog.Int("n", 1))
-	got := buf.String()
-	if !strings.Contains(got, "msg") {
-		t.Errorf("expected msg in output, got: %s", got)
-	}
-	if !strings.Contains(got, "n=1") {
-		t.Errorf("expected n=1 in output, got: %s", got)
-	}
-}
-
-func TestWithGroup(t *testing.T) {
-	var buf bytes.Buffer
-	l := logger.New(logger.WithOutput(&buf), logger.WithColor(false))
-
-	l.WithGroup("g").WithAttrs(slog.String("k", "v")).Info("msg")
-	if !strings.Contains(buf.String(), "g.k=v") {
-		t.Errorf("expected g.k=v in output, got: %s", buf.String())
-	}
-}
-
-func TestContextInject(t *testing.T) {
-	var buf bytes.Buffer
-	l := logger.New(logger.WithOutput(&buf), logger.WithColor(false))
-
-	ctx := logger.WithContext(context.Background(), l)
-	if ctx == nil {
-		t.Fatal("expected non-nil context")
+		t.Errorf("expected attrs in fatal output, got: %s", got)
 	}
 
-	retrieved := logger.FromContext(ctx)
-	retrieved.Info("from inject ctx")
-	if !strings.Contains(buf.String(), "from inject ctx") {
-		t.Errorf("expected output from context logger, got: %s", buf.String())
+	// Fatalf：格式化消息
+	exitCode = 0
+	buf.Reset()
+	logger.Fatalf("fmt %s %d", "abc", 42)
+	if exitCode != 1 {
+		t.Errorf("expected exit code 1 for Fatalf, got %d", exitCode)
 	}
-
-	// 空 ctx / 无值 ctx 回退 DefaultLogger 不 panic
-	if got := logger.FromContext(nil); got == nil {
-		t.Fatal("expected fallback logger for nil ctx")
-	}
-	if got := logger.FromContext(context.Background()); got == nil {
-		t.Fatal("expected fallback logger for empty ctx")
-	}
-}
-
-func TestWithGroupRecorder(t *testing.T) {
-	var buf bytes.Buffer
-	l := logger.New(logger.WithRecorder(&mockRecorder{}), logger.WithOutput(&buf), logger.WithColor(false), logger.WithLevel(logger.Debug))
-
-	l.WithGroup("g").WithAttrs(slog.String("k", "v")).Debug("msg")
-	got := buf.String()
-	if !strings.Contains(got, "g.k:v") {
-		t.Errorf("expected g.k:v in output, got: %s", got)
-	}
-	if !strings.Contains(got, "msg") {
-		t.Errorf("expected msg in output, got: %s", got)
+	if !strings.Contains(buf.String(), "fmt abc 42") {
+		t.Errorf("expected formatted output, got: %s", buf.String())
 	}
 }
 
@@ -296,7 +356,7 @@ func TestConsoleColor(t *testing.T) {
 }
 
 func TestFileOutput(t *testing.T) {
-	// 手动创建临时目录：Windows 上 lumberjack 不主动释放文件句柄，
+	// 手动创建临时目录：lumberjack 不主动释放文件句柄，
 	// 若用 t.TempDir 自动清理会因句柄占用而失败。
 	dir, err := os.MkdirTemp("", "logger-file-test-*")
 	if err != nil {
@@ -318,214 +378,33 @@ func TestFileOutput(t *testing.T) {
 	}
 }
 
-func TestFileOutputWithRecorder(t *testing.T) {
-	// 手动创建临时目录：Windows 上 lumberjack 不主动释放文件句柄，
-	// 若用 t.TempDir 自动清理会因句柄占用而失败（同 TestFileOutput）。
-	dir, err := os.MkdirTemp("", "logger-recorder-file-test-*")
+// 文件 + trace ctx：JSON 文件输出同样带 trace_id
+func TestFileOutputWithTrace(t *testing.T) {
+	dir, err := os.MkdirTemp("", "logger-file-trace-test-*")
 	if err != nil {
 		t.Fatalf("failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(dir) // 句柄占用时删除会失败，进程退出后自动释放，忽略错误
+	defer os.RemoveAll(dir)
 
 	path := filepath.Join(dir, "app.log")
+	l := logger.New(logger.WithOutput(os.Stdout), logger.WithFile(path))
 
-	var buf bytes.Buffer
-	l := logger.New(logger.WithRecorder(&mockRecorder{}), logger.WithOutput(&buf), logger.WithFile(path))
-	l.Info("hello file")
+	ctx := logger.WithTraceID(context.Background(), "file-trace-1")
+	l.InfoContext(ctx, "traced file msg")
 
-	// 1. 控制台仍输出
-	if buf.Len() == 0 {
-		t.Fatal("expected console output with file output enabled")
-	}
-
-	// 2. 文件存在且内容包含消息（recorder 输出原样落盘）
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("failed to read log file: %v", err)
 	}
-	if !strings.Contains(string(data), "hello file") {
-		t.Errorf("expected message in file, got: %s", string(data))
+	if !strings.Contains(string(data), `"trace_id":"file-trace-1"`) {
+		t.Errorf("expected trace_id in file JSON, got: %s", string(data))
 	}
 }
 
-func TestSetOutputKeepsFile(t *testing.T) {
-	dir, err := os.MkdirTemp("", "logger-setoutput-file-test-*")
-	if err != nil {
-		t.Fatalf("failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(dir) // 同上，忽略清理错误
-
-	path := filepath.Join(dir, "app.log")
-
-	var buf bytes.Buffer
-	l := logger.New(logger.WithRecorder(&mockRecorder{}), logger.WithOutput(&buf), logger.WithFile(path))
-	l.Info("before redirect")
-
-	var secondBuf bytes.Buffer
-	l.SetOutput(&secondBuf)
-	l.Info("after redirect")
-
-	// 文件继续增长：两条消息都在文件中
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("failed to read log file: %v", err)
-	}
-	if !strings.Contains(string(data), "before redirect") {
-		t.Errorf("expected first message in file, got: %s", string(data))
-	}
-	if !strings.Contains(string(data), "after redirect") {
-		t.Errorf("expected second message in file after SetOutput, got: %s", string(data))
-	}
-
-	// 新输出目标非空
-	if secondBuf.Len() == 0 {
-		t.Fatal("expected output in second buffer after SetOutput")
-	}
-	if !strings.Contains(secondBuf.String(), "after redirect") {
-		t.Errorf("expected redirected message, got: %s", secondBuf.String())
-	}
-}
-
-func TestSetLevelDynamic(t *testing.T) {
-	var buf bytes.Buffer
-	l := logger.New(logger.WithOutput(&buf), logger.WithLevel(logger.Error), logger.WithColor(false))
-
-	l.Debug("hidden")
-	if buf.Len() > 0 {
-		t.Fatalf("expected no output at Error level, got: %s", buf.String())
-	}
-
-	l.SetLevel(logger.Debug)
-	l.Debug("now visible")
-	if buf.Len() == 0 {
-		t.Fatal("expected Debug output after SetLevel(Debug)")
-	}
-	if !strings.Contains(buf.String(), "now visible") {
-		t.Errorf("expected message in output, got: %s", buf.String())
-	}
-}
-
-// A8：WithFields 输出顺序确定（map key 排序后按序输出，不再随机）
-func TestWithFieldsOrder(t *testing.T) {
-	var buf bytes.Buffer
-	l := logger.New(logger.WithOutput(&buf), logger.WithColor(false))
-	l.WithFields(map[string]any{"z": 1, "a": 2, "m": 3}).Info("msg")
-
-	got := buf.String()
-	ai := strings.Index(got, "a=2")
-	mi := strings.Index(got, "m=3")
-	zi := strings.Index(got, "z=1")
-	if ai < 0 || mi < 0 || zi < 0 {
-		t.Fatalf("expected all fields in output, got: %s", got)
-	}
-	if !(ai < mi && mi < zi) {
-		t.Errorf("expected sorted order a<m<z, got: %s", got)
-	}
-}
-
-// A9：helper.Log 的 args 不再静默丢弃——转为 recorder 字段输出
-func TestRecorderLogArgs(t *testing.T) {
-	var buf bytes.Buffer
-	l := logger.New(logger.WithRecorder(&mockRecorder{}), logger.WithOutput(&buf), logger.WithLevel(logger.Debug))
-	l.Log(logger.Info, "msg", "k", "v")
-
-	got := buf.String()
-	if !strings.Contains(got, "k:v") {
-		t.Errorf("expected args as fields in output, got: %s", got)
-	}
-	if !strings.Contains(got, "msg") {
-		t.Errorf("expected msg in output, got: %s", got)
-	}
-}
-
-// A9：attrsToMap 递归展开 Group——组内 key 用 "group.key" 连接
-func TestRecorderLogAttrsGroup(t *testing.T) {
-	var buf bytes.Buffer
-	l := logger.New(logger.WithRecorder(&mockRecorder{}), logger.WithOutput(&buf), logger.WithLevel(logger.Debug))
-	l.LogAttrs(logger.Info, "msg", slog.Group("db", slog.String("user", "u")))
-
-	got := buf.String()
-	if !strings.Contains(got, "db.user:u") {
-		t.Errorf("expected group key expanded, got: %s", got)
-	}
-}
-
-// --- mock ---
-
-type mockRecorder struct {
-	mu     sync.Mutex
-	opt    logger.Options
-	fields map[string]any
-}
-
-func (m *mockRecorder) Init(opt logger.Options) {
-	m.mu.Lock()
-	m.opt = opt
-	m.mu.Unlock()
-}
-func (m *mockRecorder) Fields(fields map[string]any) logger.LogRecorder {
-	m.mu.Lock()
-	cp := make(map[string]any, len(m.fields))
-	for k, v := range m.fields {
-		cp[k] = v
-	}
-	opt := m.opt
-	m.mu.Unlock()
-
-	for k, v := range fields {
-		cp[k] = v
-	}
-	return &mockRecorder{opt: opt, fields: cp}
-}
-func (m *mockRecorder) Log(level logger.Level, v ...any) {
-	m.mu.Lock()
-	out := m.opt.Out
-	fields := ""
-	if len(m.fields) > 0 {
-		parts := make([]string, 0, len(m.fields))
-		for k, v := range m.fields {
-			parts = append(parts, k+":"+fmt.Sprint(v))
-		}
-		fields = "[" + strings.Join(parts, " ") + "] "
-	}
-	s := level.String() + " " + fields + joinStrings(v...) + "\n"
-	_, _ = out.Write([]byte(s))
-	m.mu.Unlock()
-}
-func (m *mockRecorder) Logf(level logger.Level, format string, v ...any) {
-	m.mu.Lock()
-	out := m.opt.Out
-	fields := ""
-	if len(m.fields) > 0 {
-		parts := make([]string, 0, len(m.fields))
-		for k, v := range m.fields {
-			parts = append(parts, k+":"+fmt.Sprint(v))
-		}
-		fields = "[" + strings.Join(parts, " ") + "] "
-	}
-	s := level.String() + " " + fields + fmt.Sprintf(format, v...) + "\n"
-	_, _ = out.Write([]byte(s))
-	m.mu.Unlock()
-}
-func (m *mockRecorder) String() string { return "mock" }
-
-func joinStrings(v ...any) string {
-	var s string
-	for i, a := range v {
-		if i > 0 {
-			s += " "
-		}
-		str, ok := a.(string)
-		if !ok {
-			continue
-		}
-		s += str
-	}
-	return s
-}
+// --- 并发安全 ---
 
 func TestConcurrentSafety(t *testing.T) {
-	l := logger.New(logger.WithRecorder(&mockRecorder{}), logger.WithLevel(logger.Debug), logger.WithOutput(blackHole{}))
+	l := logger.New(logger.WithLevel(logger.Debug), logger.WithOutput(blackHole{}), logger.WithColor(false))
 
 	var wg sync.WaitGroup
 
@@ -537,37 +416,28 @@ func TestConcurrentSafety(t *testing.T) {
 			for range 100 {
 				l.Info("concurrent info")
 				l.Debug("concurrent debug")
-				l.WithField("key", "val").Warn("with field")
+				l.With("key", "val").Warn("with attr")
 			}
 		}()
 	}
 
-	// SetLevel and SetOutput concurrently with logging
+	// 包级 SetLevel 与日志并发（DynamicLevel 原子级别）
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		for range 50 {
-			l.SetLevel(logger.Warn)
-			l.SetLevel(logger.Debug)
+			logger.SetLevel(logger.Warn)
+			logger.SetLevel(logger.Debug)
 		}
 	}()
 
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		for range 50 {
-			l.SetOutput(blackHole{})
-			l.SetOutput(blackHole{})
-		}
-	}()
-
-	// WithFields while logging
+	// With 派生与日志并发
 	for range 5 {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			for range 50 {
-				l.WithFields(map[string]any{"k": "v"}).Info("derived")
+				l.With("k", "v").Info("derived")
 			}
 		}()
 	}

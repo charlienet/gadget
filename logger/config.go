@@ -5,6 +5,12 @@ type Config struct {
 	// Level 日志级别：trace, debug, info, warn, error, fatal
 	Level string `yaml:"level" mapstructure:"level"`
 
+	// Service 服务名（非空时注入为 service 日志属性）
+	Service string `yaml:"service" mapstructure:"service"`
+
+	// Env 运行环境标识（非空时注入为 env 日志属性）
+	Env string `yaml:"env" mapstructure:"env"`
+
 	// Output 输出目标：console, file, both
 	Output string `yaml:"output" mapstructure:"output"`
 
@@ -26,7 +32,7 @@ type Config struct {
 	// Async 是否启用异步写入
 	Async bool `yaml:"async" mapstructure:"async"`
 
-	// QueueSize 异步队列大小（默认 10000）
+	// QueueSize 异步队列大小（默认 10240，与 async.go 引擎默认一致）
 	QueueSize int `yaml:"queue_size" mapstructure:"queue_size"`
 
 	// Source 是否记录调用者源码位置（文件名:行号）
@@ -43,6 +49,6 @@ func DefaultConfig() Config {
 		MaxBackups: 10,
 		Compress:   true,
 		Async:      false,
-		QueueSize:  10000,
+		QueueSize:  10240,
 	}
 }

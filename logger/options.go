@@ -3,59 +3,26 @@ package logger
 import (
 	"io"
 	"log/slog"
-	"os"
 )
 
 type Option func(*Options)
 
 type Options struct {
 	Level         slog.Level        // 默认 slog.LevelInfo
-	Out           io.Writer         // 默认 os.Stderr（控制台输出）
+	Out           io.Writer         // 默认 os.Stdout（控制台输出）
 	File          string            // 文件路径，空 = 不写文件
 	FileOpts      *FileOptions      // 文件轮换配置（nil 用默认）
 	Color         *bool             // 控制台颜色：nil=自动(NO_COLOR 环境变量)，非 nil 显式开关
 	Source        bool              // 是否输出源码位置 file:line
-	Recorder      LogRecorder       // 非 nil 时走旧适配器路径（logrus 插件兼容）
 	Async         bool              // 异步写入：日志队列后台消费，不阻塞主业务
 	QueueSize     int               // 异步队列容量（<=0 默认 10240）
 	AsyncBlocking bool              // 异步队列满时阻塞背压（默认 false=丢弃并计数）
 	Sensitive     *SensitiveOptions // 敏感信息过滤（nil 不启用）
 	StackTrace    bool              // 错误堆栈：对 Wrap 过的错误自动附加 stack 属性
 	Sampling      *SamplingOptions  // 日志采样（nil 不启用）
-}
-
-func New(opts ...Option) Logger {
-	opt := Options{
-		Level: slog.LevelInfo,
-		Out:   os.Stderr,
-	}
-
-	for _, o := range opts {
-		o(&opt)
-	}
-
-	if opt.Recorder != nil {
-		// 旧适配器路径（外部插件，如 logrus）：仅负责基础输出/级别/文件落盘。
-		// 能力边界：Sensitive/StackTrace/Sampling/Async 只在默认 slog 实现中生效，
-		// recorder 路径无法承载（静默忽略 = 安全机制静默失效），显式失败优于静默失效。
-		if opt.Sensitive != nil || opt.StackTrace || opt.Sampling != nil || opt.Async {
-			panic("logger: recorder 路径不支持 Sensitive/StackTrace/Sampling/Async 选项，请使用默认 slog 实现或移除这些选项")
-		}
-
-		// 文件输出与轮换由 logger 包统一负责，插件只管格式，落盘开箱即用。
-		var fw io.Writer
-		if opt.File != "" {
-			fwc := buildFileWriter(opt.File, opt.FileOpts) // nil FileOpts 内部用默认配置
-			fw = fwc
-			opt.Out = io.MultiWriter(opt.Out, fw) // 插件原样输出同时落盘
-			registerFileCloser(fwc)               // 包级 Close 时释放文件句柄
-		}
-		opt.Recorder.Init(opt)
-		return newHelper(opt, opt.Recorder, fw)
-	}
-
-	// 默认 slog 实现
-	return newSlogLogger(opt)
+	Service       string            // 服务名：非空时 New 预置 service 属性
+	Env           string            // 运行环境：非空时 New 预置 env 属性
+	Leveler       slog.Leveler      // 自定义级别来源：非 nil 时优先于 Level/包级 SetLevel 动态调级
 }
 
 func WithLevel(lvl slog.Level) Option {
@@ -67,6 +34,29 @@ func WithLevel(lvl slog.Level) Option {
 func WithOutput(output io.Writer) Option {
 	return func(o *Options) {
 		o.Out = output
+	}
+}
+
+// WithService 设置服务名（非空时注入为 service 日志属性，随每条日志输出）
+func WithService(name string) Option {
+	return func(o *Options) {
+		o.Service = name
+	}
+}
+
+// WithEnv 设置运行环境标识（非空时注入为 env 日志属性，随每条日志输出）
+func WithEnv(env string) Option {
+	return func(o *Options) {
+		o.Env = env
+	}
+}
+
+// WithLeveler 指定自定义级别来源（如原子配置、按请求动态开关）。
+// 非 nil 时优先于 WithLevel 的静态级别：handler 级别判断完全经该 Leveler，
+// 包级 SetLevel 对该实例无效（级别控制权在调用方）。
+func WithLeveler(l slog.Leveler) Option {
+	return func(o *Options) {
+		o.Leveler = l
 	}
 }
 
@@ -94,13 +84,6 @@ func WithColor(enabled bool) Option {
 func WithSource(enabled bool) Option {
 	return func(o *Options) {
 		o.Source = enabled
-	}
-}
-
-// WithRecorder 兼容外部插件（logrus）
-func WithRecorder(r LogRecorder) Option {
-	return func(o *Options) {
-		o.Recorder = r
 	}
 }
 

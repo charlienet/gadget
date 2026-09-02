@@ -18,7 +18,7 @@ func TestLevelString(t *testing.T) {
 		{logger.Info, "INFO"},
 		{logger.Warn, "WARN"},
 		{logger.Error, "ERROR"},
-		{logger.Fatal, "ERROR+4"},
+		{logger.FatalLevel, "ERROR+4"},
 	}
 
 	for _, tt := range tests {
@@ -39,7 +39,7 @@ func TestGetLevel(t *testing.T) {
 		{"INFO", logger.Info},
 		{"WARN", logger.Warn},
 		{"ERROR", logger.Error},
-		{"FATAL", logger.Fatal},
+		{"FATAL", logger.FatalLevel},
 		// case insensitive
 		{"trace", logger.Trace},
 		{"Trace", logger.Trace},

@@ -2,12 +2,16 @@ package logger
 
 import (
 	"context"
-	"io"
+	"fmt"
 	"log/slog"
 	"sync"
 	"sync/atomic"
 	"time"
 )
+
+// defaultAsyncQueueSize 异步队列默认容量（Options.QueueSize <= 0 时生效；
+// rebuild 与 NewAsyncHandler 共用同一常量，避免双处魔数漂移）。
+const defaultAsyncQueueSize = 10240
 
 // AsyncHandler 异步日志处理器：非阻塞入队 + 后台消费 goroutine。
 // 相比参考实现修正的缺陷：
@@ -22,6 +26,8 @@ type AsyncHandler struct {
 // asyncItem 入队单元：Record 复制品 + 当前实例的 handler。
 // handler 随 record 一起入队，保证 WithAttrs/WithGroup 派生的预设属性/分组
 // 由各自的底层 handler 在消费时合并（process 启动时捕获的原始 handler 不含派生 attrs）。
+// ctx 有意不入队：trace_id/req_id 由最外层 TraceHandler 在入队前同步写入 record，
+// 长命异步队列不应持有请求级 ctx（取消/超时语义与队列生命周期冲突）。
 type asyncItem struct {
 	handler slog.Handler
 	rec     slog.Record
@@ -44,7 +50,7 @@ type asyncState struct {
 // queueSize <= 0 时默认 10240；启动后台 process goroutine 消费队列。
 func NewAsyncHandler(handler slog.Handler, queueSize int, blocking bool) *AsyncHandler {
 	if queueSize <= 0 {
-		queueSize = 10240
+		queueSize = defaultAsyncQueueSize
 	}
 
 	h := &AsyncHandler{
@@ -66,6 +72,7 @@ func (h *AsyncHandler) Enabled(ctx context.Context, level slog.Level) bool {
 }
 
 // Handle 复制 Record 入队后立即返回（不落盘，不阻塞主业务）。
+// ctx 不透传给队列：trace 属性已由链最外层 TraceHandler 在 Handle 前写入 record。
 // 检查+入队在 state.mu 锁内完成：与 Close 的 close(ch) 互斥，
 // 保证「closed 检查通过时 channel 必然未关闭」，杜绝 send on closed channel panic。
 func (h *AsyncHandler) Handle(_ context.Context, r slog.Record) error {
@@ -112,7 +119,8 @@ func (h *AsyncHandler) WithGroup(name string) slog.Handler {
 	return &AsyncHandler{handler: h.handler.WithGroup(name), state: h.state}
 }
 
-// process 后台消费 goroutine：从队列取 asyncItem，用 item 自带的 handler 落盘，
+// process 后台消费 goroutine：从队列取 asyncItem，用 item 自带的 handler
+// 落盘（ctx 传 Background：入队方 ctx 不属于异步生命周期），
 // 退出时发消费完成信号
 func (h *AsyncHandler) process() {
 	for item := range h.state.ch {
@@ -122,7 +130,9 @@ func (h *AsyncHandler) process() {
 }
 
 // Close 幂等关闭：锁内检查/置位 + close(ch)，放锁后才等待消费完成（等待期间不持锁）。
-// timeout <= 0 时默认 2s；超时强制返回。
+// timeout <= 0 时默认 2s。
+// 队列在超时内排空返回 nil；超时则返回携带残余条数的错误——此时消费 goroutine
+// 仍在向底层 writer 写入，调用方不应继续复用该实例，也不应假定数据已全部落盘。
 func (h *AsyncHandler) Close(timeout time.Duration) error {
 	// 锁内置位 + close(ch)：与 Handle 的「closed 检查 + 入队」互斥，
 	// 锁内 send 到已关闭 channel 不可能发生（检查与 close 同锁互斥）。
@@ -140,9 +150,10 @@ func (h *AsyncHandler) Close(timeout time.Duration) error {
 
 	select {
 	case <-h.state.done:
-	case <-time.After(timeout): // 超时强制返回
+		return nil
+	case <-time.After(timeout): // 超时：报告残余，错误向上可达（slogLogger.close 聚合）
+		return fmt.Errorf("logger: async queue not drained within %v, %d records still pending", timeout, len(h.state.ch))
 	}
-	return nil
 }
 
 // Stats 返回累计统计：total=写入总数，dropped=因队列满被丢弃数
@@ -157,15 +168,15 @@ var (
 	loggerList []*slogLogger
 )
 
-// registerLogger 注册 slogLogger 实例（newSlogLogger 创建时调用）。
-// 实例持有 async 处理器与文件 writer，由包级 Close 或实例 Close() 统一释放。
+// registerLogger 注册 slogLogger 实例（New 创建时调用）。
+// 实例持有 async 处理器与文件 writer，由包级 Close 统一释放。
 func registerLogger(l *slogLogger) {
 	loggerMu.Lock()
 	defer loggerMu.Unlock()
 	loggerList = append(loggerList, l)
 }
 
-// unregisterLogger 从包级注册表注销实例（实例 Close() 时调用，幂等）
+// unregisterLogger 从包级注册表注销实例（实例内部 close 时调用，幂等）
 func unregisterLogger(l *slogLogger) {
 	loggerMu.Lock()
 	defer loggerMu.Unlock()
@@ -175,22 +186,6 @@ func unregisterLogger(l *slogLogger) {
 			return
 		}
 	}
-}
-
-// ---- 包级文件 writer 注册表 ----
-// 仅 recorder 路径（options.go WithRecorder）注册的文件 writer 需要包级 Close 兜底；
-// slog 路径的文件句柄由各自实例 Close() 释放（见 slogLogger.close）。
-
-var (
-	fileCloseMu     sync.Mutex
-	fileClosersList []io.Closer
-)
-
-// registerFileCloser 注册文件 writer 到包级注册表（recorder 路径创建时调用）
-func registerFileCloser(c io.Closer) {
-	fileCloseMu.Lock()
-	defer fileCloseMu.Unlock()
-	fileClosersList = append(fileClosersList, c)
 }
 
 // Stats 返回所有已注册 logger 实例的异步累计统计（total, dropped）。
@@ -212,10 +207,15 @@ func Stats() (total, dropped uint64) {
 }
 
 // Close 优雅关闭所有已注册 logger 实例（进程退出前调用）：
-// 关闭各实例的异步处理器（确保队列日志落盘）与文件 writer，并关闭 recorder 路径注册的文件 writer。
+// flush 各实例的异步队列（确保日志落盘）并关闭文件 writer。
 // 幂等：重复调用安全。
-// 注意：异步 logger 建议进程退出前调用包级 logger.Close()，或对关键实例调用其 Close() 方法。
+// 注意：异步 logger 建议进程退出前调用包级 logger.Close()。
 // 用 copy 快照遍历，避免持锁时 Close 内部等待；重复调用第二次注册表已空，安全。
+//
+// ⚠ 超时语义（M-4）：返回非 nil 错误表示某实例异步队列未在 timeout 内排空，
+// 其消费 goroutine 之后仍可能写入并借 writer「写时重开」产生永不关闭的残余句柄。
+// 调用方不应再复用相关实例使用其日志能力，只能假定进程即将退出；
+// 需要确定性落盘请传入足够大的 timeout 或改用同步 writer。
 func Close(timeout time.Duration) error {
 	loggerMu.Lock()
 	ls := make([]*slogLogger, len(loggerList))
@@ -223,20 +223,9 @@ func Close(timeout time.Duration) error {
 	loggerList = nil
 	loggerMu.Unlock()
 
-	fileCloseMu.Lock()
-	fcs := make([]io.Closer, len(fileClosersList))
-	copy(fcs, fileClosersList)
-	fileClosersList = nil
-	fileCloseMu.Unlock()
-
 	var err error
 	for _, l := range ls {
 		if e := l.close(timeout); e != nil {
-			err = e
-		}
-	}
-	for _, c := range fcs {
-		if e := c.Close(); e != nil {
 			err = e
 		}
 	}
