@@ -11,23 +11,26 @@ import (
 // 显式 WithTTL 后生效，有效域 1 ~ 9e9 秒（内部以 int 秒数累加，超出 int 范围可能
 // 溢出），<= 0 表示永不过期（与 Put 的 expireSecond 语义一致）。
 type Options struct {
-	localStore          Store
-	remoteStore         Store
-	listener            Listener
-	serializer          Serializer
-	metrics             Metrics
-	Logger              *slog.Logger
-	TTL                 int
-	ttlSet              bool // 是否显式调用过 WithTTL（区分"未设置→默认 60s"与"显式 <=0→永不过期"）
-	Name                string
-	cleanupInterval     time.Duration
-	maxItems            int
-	maxBytes            int64
-	degradeThreshold    int
-	degradeRecovery     time.Duration
-	ttlJitter           time.Duration
-	ttlJitterSet        bool // 是否显式调用过 WithTTLJitter（区分"未设置"与"显式 0 关闭"）
-	slidingWindow       time.Duration
+	localStore       Store
+	remoteStore      Store
+	listener         Listener
+	serializer       Serializer
+	metrics          Metrics
+	Logger           *slog.Logger
+	TTL              int
+	ttlSet           bool // 是否显式调用过 WithTTL（区分"未设置→默认 60s"与"显式 <=0→永不过期"）
+	Name             string
+	cleanupInterval  time.Duration
+	maxItems         int
+	maxBytes         int64
+	degradeThreshold int
+	degradeRecovery  time.Duration
+	ttlJitter        time.Duration
+	ttlJitterSet     bool // 是否显式调用过 WithTTLJitter（区分"未设置"与"显式 0 关闭"）
+	slidingWindow    time.Duration
+	// hotKeyThreshold 是 L1 容量驱逐的热 key 豁免阈值：一个清理周期内命中 >= 该值
+	// 的条目在驱逐时被优先跳过。<= 0 关闭（默认，退化为纯 LRU）。见 WithHotKeyThreshold。
+	hotKeyThreshold     int
 	verifyEvery         int
 	versionSyncInterval time.Duration
 	// storeSet 是否显式设置过任一 store（WithStore/WithMemStore），
@@ -174,6 +177,27 @@ func WithTTLJitter(d time.Duration) Option {
 func WithSlidingWindow(d time.Duration) Option {
 	return func(o *Options) {
 		o.slidingWindow = d
+	}
+}
+
+// WithHotKeyThreshold 开启 L1 内存层容量驱逐的热 key 豁免：在一个清理周期
+// （WithCleanupInterval，默认 1 分钟）内命中次数 >= n 的条目被视为"热 key"，
+// 容量驱逐时优先跳过、转而驱逐更冷的尾部条目，避免高频访问项被偶发批量写入挤出。
+//
+// 语义与边界：
+//   - n <= 0（默认）关闭豁免，退化为纯 LRU。
+//   - 豁免额度有上限：单轮驱逐最多跳过 budget = max(1, len(items)/4) 个热条目，
+//     超过后一律驱逐（降级），保证 len <= maxItems 不变量恒成立；即便全部条目都
+//     "够热"也不会撑破容量。
+//   - 热度计数（hits）在每个清理周期结束时清零，故"热度窗口"等于 cleanupInterval；
+//     窗口外的历史命中不计。
+//   - 豁免只免"容量驱逐"，绝不免 TTL：惰性过期、后台过期清理、Delete、监听器失效、
+//     版本同步发现远程已删而清本地，均无视热度照常生效。
+//
+// 仅对内置 mem_store（L1）生效。
+func WithHotKeyThreshold(n int) Option {
+	return func(o *Options) {
+		o.hotKeyThreshold = n
 	}
 }
 

@@ -1015,7 +1015,7 @@ func TestWithMetricsWiresEviction(t *testing.T) {
 	defer c.Close()
 	ctx := context.Background()
 
-	// maxItems=1：写入第 2 个 key 触发一次 FIFO 驱逐。
+	// maxItems=1：写入第 2 个 key 触发一次 LRU 驱逐。
 	assert.Nil(t, c.Put(ctx, "a", "1", 60))
 	assert.Nil(t, c.Put(ctx, "b", "2", 60))
 
@@ -1027,28 +1027,34 @@ func TestWithMetricsWiresEviction(t *testing.T) {
 
 // --- Capacity eviction tests ---
 
-func TestCapacityMaxItemsFIFO(t *testing.T) {
+func TestCapacityMaxItemsLRU(t *testing.T) {
 	c := cache.New(
 		cache.WithMemStore(),
 		cache.WithMaxItems(3),
 	)
 	ctx := context.Background()
 
-	// Insert 3 items
+	// Insert 3 items → 链表 head→tail = c, b, a
 	_ = c.Put(ctx, "a", "1", 60)
 	_ = c.Put(ctx, "b", "2", 60)
 	_ = c.Put(ctx, "c", "3", 60)
 
+	// 访问 a → a 提升为 MRU：head→tail = a, c, b（b 成为最久未使用）
 	var s string
 	assert.Nil(t, c.Get(ctx, "a", &s))
 	assert.Equal(t, "1", s)
 
-	// Insert 4th item, should evict "a" (FIFO)
+	// Insert 4th item → 超容量，按 LRU 逐最久未使用 b（FIFO 旧语义会逐 a，此为有意更新）
 	_ = c.Put(ctx, "d", "4", 60)
 
-	err := c.Get(ctx, "a", &s)
-	assert.ErrorIs(t, err, cache.ErrEntityNotExist, "a should be evicted")
+	err := c.Get(ctx, "b", &s)
+	assert.ErrorIs(t, err, cache.ErrEntityNotExist, "b should be evicted (LRU: least recently used)")
 
+	// a（被访问过）与 c、d 应仍在
+	assert.Nil(t, c.Get(ctx, "a", &s))
+	assert.Equal(t, "1", s)
+	assert.Nil(t, c.Get(ctx, "c", &s))
+	assert.Equal(t, "3", s)
 	assert.Nil(t, c.Get(ctx, "d", &s))
 	assert.Equal(t, "4", s)
 }
@@ -1068,7 +1074,7 @@ func TestCapacityMaxBytes(t *testing.T) {
 	// Eviction removes k1 (21 bytes → 42 remaining, under limit)
 	var s string
 	err := c.Get(ctx, "k1", &s)
-	assert.ErrorIs(t, err, cache.ErrEntityNotExist, "k1 should be evicted (FIFO)")
+	assert.ErrorIs(t, err, cache.ErrEntityNotExist, "k1 should be evicted (LRU: 无 Get 介入，退化为逐最旧插入)")
 
 	// k2 and k3 should still exist (42 bytes ≤ 50 limit)
 	assert.Nil(t, c.Get(ctx, "k2", &s))
@@ -1087,10 +1093,10 @@ func TestCapacityOverwriteKey(t *testing.T) {
 	_ = c.Put(ctx, "a", "1", 60)
 	_ = c.Put(ctx, "b", "2", 60)
 
-	// Overwrite "a" - should not count as a new entry for FIFO
+	// Overwrite "a" - 原地更新并提升到 MRU（不重新分配节点、不计为新条目）
 	_ = c.Put(ctx, "a", "updated", 60)
 
-	// Insert new key - should evict "b" (FIFO: "a" was re-inserted and is now newest)
+	// Insert new key - 逐 LRU 端 b（覆写使 a 成为 MRU，b 退为最久未使用）
 	_ = c.Put(ctx, "c", "3", 60)
 
 	var s string

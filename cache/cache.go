@@ -114,7 +114,7 @@ type cache struct {
 	// Version sync (background cache coherence)
 	versionSyncInterval time.Duration
 	versionSyncBatch    int
-	versionCursor       int
+	versionCursor       string // LRU 采样游标：上一批最后一个 key（空串=从头开始）
 	versionStop         chan struct{}
 
 	// Close 幂等保护
@@ -209,6 +209,9 @@ func New(opts ...Option) *cache {
 			}
 			if opt.slidingWindow > 0 {
 				ms.slidingWindow = opt.slidingWindow
+			}
+			if opt.hotKeyThreshold > 0 {
+				ms.hotKeyThreshold = opt.hotKeyThreshold
 			}
 
 			ms.startEviction()
@@ -687,19 +690,15 @@ func (c *cache) syncBatch() {
 		return
 	}
 
-	total := ms.Len()
-	if total == 0 {
-		c.versionCursor = 0
+	// LRU 采样游标：从上一批最后一个 key 之后继续取一批；afterKey 不存在（被驱逐/
+	// 首轮回绕）时 SampleKeys 自动从 head 重来。空批代表已扫到链表尾 → 重置游标，
+	// 下一轮从头开始（回绕判定由"空批"驱动，取代旧版基于 offset/total 的整数环绕）。
+	batch := ms.SampleKeys(c.versionCursor, c.versionSyncBatch)
+	if len(batch) == 0 {
+		c.versionCursor = ""
 		return
 	}
-
-	// Wrap cursor to prevent unbounded growth
-	if c.versionCursor >= total {
-		c.versionCursor = 0
-	}
-
-	batch := ms.SampleKeys(c.versionCursor, c.versionSyncBatch)
-	c.versionCursor += len(batch)
+	c.versionCursor = batch[len(batch)-1]
 
 	ctx := context.Background()
 	for _, key := range batch {
@@ -708,7 +707,11 @@ func (c *cache) syncBatch() {
 			continue // transient error, try next cycle
 		}
 
-		localData, localExist, _ := c.localStore.Get(ctx, key)
+		// 采样读取用 peek（只读、不提升、不扰动 LRU 顺序）：若走 Get 会 moveToFront，
+		// 令游标在 head 端簇震荡、tail 端冷 key 长期饿死。此处 localStore 必为
+		// *mem_store（上方 !ok 已 return），故直接 peek；若将来放开其他本地 store，
+		// 需按 Store 类型回退到其 Get。
+		localData, localExist := ms.peek(key)
 
 		lv := versionOf(localData)
 		rv := versionOf(remoteData)

@@ -182,12 +182,18 @@ c := cache.New(
     cache.WithMemStore(),
     cache.WithMaxItems(10000),    // 最大条目数
     cache.WithMaxBytes(1<<20),    // 最大字节数（约1MB）
-    cache.WithCleanupInterval(30*time.Second), // 后台清理间隔
+    cache.WithCleanupInterval(30*time.Second), // 后台清理间隔（= 热度窗口）
+    cache.WithHotKeyThreshold(100), // 周期内命中≥100 的 key 豁免容量驱逐（默认关闭）
 )
 ```
 
-- **TTL 过期清理**：后台协程定期扫描删除过期条目
-- **FIFO 容量驱逐**：超出上限时按插入顺序驱逐最旧条目，已过期的优先清理
+L1 内存层为自研 map + 侵入式双向链表：
+
+- **TTL 过期清理**：惰性（`Get` 命中即判断并摘除过期项）+ 后台协程按 `WithCleanupInterval`（默认 1 分钟）周期扫描清理
+- **LRU 容量驱逐**：超出 `WithMaxItems`/`WithMaxBytes` 上限时，按"最近最少使用"从链表尾部逐出；读、覆写、`GetMulti`/`SetMulti` 命中都会把条目提到 MRU 端
+- **热 key 豁免**（`WithHotKeyThreshold(n)`，`n<=0` 关闭）：在一个清理周期内命中 ≥ n 的条目，容量驱逐时优先跳过、转逐更冷的尾部条目。单轮最多跳过 `max(1, len(items)/4)`（约 25%）个热条目，达到预算后一律驱逐（降级），因此 **`len ≤ maxItems` 恒成立**、不会撑破容量；`maxItems=0` 仅设 `maxBytes` 时该预算同样生效。热度窗口 = `cleanupInterval`（每周期结束清零一次命中计数）
+- **豁免只免容量驱逐，绝不免 TTL**：惰性过期、后台过期清理、`Delete`/`DeletePattern`、监听器失效、版本同步发现远程已删而清本地，全部无视热度照常生效
+- **字节口径**：`usedBytes` 仅累计各条目 `len(值)`（不含 key 与结构开销），覆写精确扣旧加新
 - **同步检查**：Put 时即时检查容量，无需等待后台周期
 
 ## 优雅降级

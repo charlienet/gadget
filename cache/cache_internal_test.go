@@ -195,21 +195,24 @@ func TestSyncBatchEmptyStore(t *testing.T) {
 		stopChan:         make(chan struct{}),
 	}
 
-	// Empty store → cursor reset to 0, no error
+	// 空 store：syncBatch 采到空批 → 游标保持/重置为空串，无错误
 	c.syncBatch()
-	assert.Equal(t, 0, c.versionCursor)
+	assert.Equal(t, "", c.versionCursor)
 
-	// Put some items, sync once
-	_ = local.Put(context.Background(), "a", []byte("1"), 60)
-	_ = local.Put(context.Background(), "b", []byte("2"), 60)
+	// 放入两个 key（remote 为空 → 本轮会把它们当作"远程已删"清本地，但采样与
+	// 游标推进逻辑照常执行：游标指向本批最后一个 key）。
+	ctx := context.Background()
+	_ = local.Put(ctx, "a", []byte("1"), 60)
+	_ = local.Put(ctx, "b", []byte("2"), 60)
 	c.syncBatch()
-	// After syncing, cursor moves forward
-	assert.Greater(t, c.versionCursor, 0)
+	// 采样发生 → 游标推进为非空串
+	assert.NotEqual(t, "", c.versionCursor)
 
-	// Sync again to trigger cursor wrap
-	c.versionCursor = 100 // force wrap
+	// 游标指向不存在的 key → SampleKeys 回绕从 head 开始；此时 store 已被上一轮
+	// 清空 → 空批 → 游标重置为 ""（回绕判定由"空批"驱动，取代旧版整数环绕）。
+	c.versionCursor = "ghost-key-not-present"
 	c.syncBatch()
-	assert.LessOrEqual(t, c.versionCursor, local.Len())
+	assert.Equal(t, "", c.versionCursor)
 }
 
 // --- versionSyncLoop ---
@@ -275,9 +278,9 @@ func TestSampleKeysAndLen(t *testing.T) {
 	s := newMemStore()
 	ctx := context.Background()
 
-	// Should return 0 for empty store
+	// 空表：无 key，SampleKeys 返回 nil
 	assert.Equal(t, 0, s.Len())
-	assert.Nil(t, s.SampleKeys(0, 10))
+	assert.Nil(t, s.SampleKeys("", 10))
 
 	_ = s.Put(ctx, "a", []byte("1"), 60)
 	_ = s.Put(ctx, "b", []byte("2"), 60)
@@ -285,18 +288,24 @@ func TestSampleKeysAndLen(t *testing.T) {
 
 	assert.Equal(t, 3, s.Len())
 
-	keys := s.SampleKeys(0, 2)
-	assert.Equal(t, 2, len(keys))
-	assert.Equal(t, "a", keys[0])
-	assert.Equal(t, "b", keys[1])
+	// LRU 遍历序 head→tail：c(MRU) → b → a(LRU)。从头取 2 个 → [c, b]
+	keys := s.SampleKeys("", 2)
+	assert.Equal(t, []string{"c", "b"}, keys)
 
-	keys = s.SampleKeys(2, 10)
-	assert.Equal(t, 1, len(keys))
-	assert.Equal(t, "c", keys[0])
+	// afterKey=c → 从 c 之后继续 → [b, a]
+	keys = s.SampleKeys("c", 2)
+	assert.Equal(t, []string{"b", "a"}, keys)
 
-	// Offset past end
-	keys = s.SampleKeys(10, 5)
+	// afterKey=a(tail) → 其后无节点 → nil（触发调用方回绕重置游标）
+	keys = s.SampleKeys("a", 5)
 	assert.Nil(t, keys)
+
+	// afterKey 不存在 → 回绕从 head 开始，n 足够时取全部
+	keys = s.SampleKeys("ghost", 3)
+	assert.Equal(t, []string{"c", "b", "a"}, keys)
+
+	// n <= 0 → nil
+	assert.Nil(t, s.SampleKeys("", 0))
 }
 
 // --- MemStore DeletePattern ---
