@@ -180,6 +180,13 @@ func New(opts ...Option) *cache {
 
 	opt.init()
 
+	// metrics 必须先于下方 store 配置循环赋值：循环内 ms.metrics = c.metrics 将
+	// 驱逐事件回调接线到 mem_store；若晚于此，WithMetrics 注入的实例会被
+	// noopMetrics 覆盖，导致驱逐事件丢失。
+	if opt.metrics != nil {
+		c.metrics = opt.metrics
+	}
+
 	// Configure memory stores (eviction, capacity, metrics)
 	for _, store := range []Store{c.localStore, c.remoteStore} {
 		if ms, ok := store.(*mem_store); ok {
@@ -208,12 +215,11 @@ func New(opts ...Option) *cache {
 		}
 	}
 
-	if opt.TTL > 0 {
+	// TTL：仅当显式调用 WithTTL 时覆盖默认值（defaultExpiresSeconds）；
+	// WithTTL(<=0) 语义为永不过期（回填/回写经 mem_store.Put(<=0)，
+	// mem_store 对 Expiration==0 视为永不过期）。
+	if opt.ttlSet {
 		c.ttl = opt.TTL
-	}
-
-	if opt.metrics != nil {
-		c.metrics = opt.metrics
 	}
 
 	if opt.degradeThreshold > 0 {
@@ -444,7 +450,7 @@ func (c *cache) Get(ctx context.Context, key string, v any) error {
 }
 
 // Getfn 读取 key；本地与 remote 均未命中时调用 fn 回源并缓存。
-// 并发语义：同一 key 的并发 Getfn 共享单一 singleflight（key:%s，与 Update 互斥），
+// 并发语义：同一 key 的并发 Getfn 共享单一 singleflight（key:%s，与 Invalidate 互斥），
 // 覆盖「查缓存 → miss → fn 回源 → 回填」全流程——其他线程在 Do 上等待并共享
 // 最终结果，不会各自执行 fn。
 // v 的所有权归调用方：并发场景下每个调用方应传入独立的 v——
@@ -538,8 +544,8 @@ func (c *cache) Put(ctx context.Context, key string, v any, expireSecond int) er
 }
 
 // Invalidate 使 key 对应的源数据变更后缓存收敛：mutateFn 内对数据源
-// （DB 等）执行更新或删除，成功后自动失效缓存——本地与远程双删、删除
-// 失败进 pending 补偿队列重试、并经 listener 向集群广播，其他实例同步
+// （DB 等）执行更新或删除，成功后自动失效缓存——本地与远程双删、降级期间
+// 删除失败进 pending 补偿队列重试、并经 listener 向集群广播，其他实例同步
 // 失效本地副本。
 //
 // 与 Getfn 的回源共享 singleflight 互斥（同一 key 的变更与回填不并发），
@@ -547,7 +553,7 @@ func (c *cache) Put(ctx context.Context, key string, v any, expireSecond int) er
 // （源未变更）。推荐写路径：凡涉及源数据的写/删一律经本方法包装，
 // 由库承包失效与集群收敛，避免业务侧遗漏清理造成缓存不一致。
 func (c *cache) Invalidate(ctx context.Context, key string, mutateFn MutateFn) error {
-	// 与 getFromSource 共用同一 singleflight key，使 delete 与 load 互斥。
+	// 与 Getfn 回源共用同一 singleflight key，使 delete 与 load 互斥。
 	fnKey := fmt.Sprintf("key:%s", key)
 	defer c.sg.Forget(fnKey)
 
@@ -578,17 +584,17 @@ func (c *cache) Delete(ctx context.Context, keys ...string) {
 		c.resetVerifyCount(key)
 	}
 
-	c.noticeRemoved(keys...)
+	c.noticeRemoved(ctx, keys...)
 }
 
-func (c *cache) noticeRemoved(keys ...string) {
+func (c *cache) noticeRemoved(ctx context.Context, keys ...string) {
 	if c.closed.Load() {
 		return
 	}
 	if c.listener != nil && len(keys) > 0 {
 		for _, key := range keys {
 			if err := c.listener.Publish(key); err != nil {
-				c.logger.Warn("publish removed key failed", "key", key, "err", err)
+				c.logger.WarnContext(ctx, "publish removed key failed", "key", key, "err", err)
 			}
 		}
 	}
@@ -1228,8 +1234,8 @@ func acquireDefaultCache() *cache {
 	return &cache{
 		notExistPlaceholder: []byte(defaultNotExistPlaceholder),
 		serializer:          jsonSerializer{},
-		// slog.Default() 每次动态解析当前默认实例：应用运行期重建默认日志器
-		// （logger.Init/New 内部已调用 slog.SetDefault）后 cache 自动跟随，无需重建。
+		// slog.Default() 在构造时快照当前默认日志器实例：请在完成 logger
+		// 初始化/替换（如 slog.SetDefault）之后再构造 cache，否则将捕获到旧默认实例。
 		logger:           slog.Default().With("module", "cache"),
 		sg:               singleflight.Group{},
 		stats:            newStats(),

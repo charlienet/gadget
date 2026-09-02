@@ -76,8 +76,6 @@ func TestGetFromFn(t *testing.T) {
 	var wg = new(sync.WaitGroup)
 	ctx := context.Background()
 
-	errors.Is(nil, nil)
-
 	g := 10
 	wg.Add(g)
 	for range g {
@@ -140,32 +138,6 @@ func TestSourceError(t *testing.T) {
 	}, 20))
 
 	assert.Equal(t, uint64(1), c.Stats().QueryFail)
-}
-
-func TestChan(t *testing.T) {
-	c := make(chan int)
-	go func() {
-		time.Sleep(time.Second)
-		c <- 1
-		c <- 1
-		close(c)
-	}()
-
-	var wg = new(sync.WaitGroup)
-	for range 5 {
-		wg.Add(1)
-
-		go func() {
-			defer wg.Done()
-
-			fmt.Println("开始等待")
-
-			cc := <-c
-			fmt.Println("获取值:", cc)
-		}()
-	}
-
-	wg.Wait()
 }
 
 // mockStore implements cache.Store for testing
@@ -510,7 +482,7 @@ func TestStats(t *testing.T) {
 	assert.GreaterOrEqual(t, st.TotalHits(), uint64(1))
 }
 
-func TestUpdateThenGet(t *testing.T) {
+func TestInvalidateThenGet(t *testing.T) {
 	c := cache.New(cache.WithMemStore())
 	ctx := context.Background()
 
@@ -530,7 +502,7 @@ func TestUpdateThenGet(t *testing.T) {
 	assert.ErrorIs(t, err, cache.ErrEntityNotExist)
 }
 
-func TestUpdateError(t *testing.T) {
+func TestInvalidateError(t *testing.T) {
 	c := cache.New(cache.WithMemStore())
 	ctx := context.Background()
 
@@ -594,7 +566,7 @@ func TestConcurrentGetfn(t *testing.T) {
 func TestConcurrentGetfnSourceNotFound(t *testing.T) {
 	// 并发防穿透核心场景：fn 返回 (false, nil)（源中不存在）。
 	// 断言依据（读 cache.go 实现）：
-	// - getFromSource 使用 singleflight（key:%s），并发 miss 合并为一次 fn 调用；
+	// - Getfn 回源使用 singleflight（key:%s），并发 miss 合并为一次 fn 调用；
 	// - exist=false 时写入 notExistPlaceholder（"*"）到 L1；
 	// - verifyEvery=0（默认）时，占位命中后 getFromCache 提前返回（local hit 且不
 	//   需要校验），不再访问 remote → 占位在 L1 生效，后续调用不穿透到 fn；
@@ -642,7 +614,7 @@ func TestConcurrentGetfnSourceNotFound(t *testing.T) {
 func TestConcurrentGetfnLoadFnError(t *testing.T) {
 	// 并发 fn 返回 error：singleflight 合并，错误传播给所有共享者。
 	// 断言依据（读 cache.go 实现）：
-	// - getFromSource 闭包对 fn error 直接 return storeItem{}, err（不写缓存、
+	// - Getfn 回源闭包对 fn error 直接 return storeItem{}, err（不写缓存、
 	//   不写占位）；sg.Do 完成后 Forget → 后续调用同 key 会重新执行 fn。
 	// - 因此"fn 失败不缓存、下次调用重试"是固化的错误语义。
 	c := cache.New(cache.WithMemStore())
@@ -903,7 +875,7 @@ func TestConcurrentGetMultiDedupsRemoteAccessFallback(t *testing.T) {
 func TestConcurrentGetfnRemoteSlowFnFast(t *testing.T) {
 	// 边界回归：remote Get 慢（150ms）而 fn 快（1ms）。
 	// 修复前（Getfn 分两层 singleflight 串行释放）：leader 完成 getFromCache
-	// （含 150ms remote 查询）后立即执行快 fn 并在 waiter 进入 getFromSource 前
+	// （含 150ms remote 查询）后立即执行快 fn 并在 waiter 进入 Getfn 回源 singleflight 前
 	// Forget → waiter 会重新执行 fn（loadCount > 1）。
 	// 修复后（Getfn 单一 singleflight 覆盖全流程）：waiter 在整个闭包（remote 查询
 	// + fn）完成前一直等待并共享结果，fn 恒为 1 次。
@@ -1028,6 +1000,29 @@ func TestMetricsSetDegraded(t *testing.T) {
 	)
 	assert.NotNil(t, c)
 	assert.False(t, spy.degraded.Load())
+}
+
+// TestWithMetricsWiresEviction 是 M1 回归：WithMetrics 必须在 store 配置循环
+// （ms.metrics = c.metrics）之前完成赋值，否则 mem_store 的驱逐回调仍指向
+// 构造默认的 noopMetrics，注入的 spyMetrics 永远收不到驱逐事件。
+func TestWithMetricsWiresEviction(t *testing.T) {
+	spy := &spyMetrics{}
+	c := cache.New(
+		cache.WithMemStore(),
+		cache.WithMaxItems(1),
+		cache.WithMetrics(spy),
+	)
+	defer c.Close()
+	ctx := context.Background()
+
+	// maxItems=1：写入第 2 个 key 触发一次 FIFO 驱逐。
+	assert.Nil(t, c.Put(ctx, "a", "1", 60))
+	assert.Nil(t, c.Put(ctx, "b", "2", 60))
+
+	spy.mu.Lock()
+	got := spy.evictionCount
+	spy.mu.Unlock()
+	assert.Equal(t, 1, got, "WithMetrics 注入后 mem_store 驱逐事件应计数（接线顺序回归）")
 }
 
 // --- Capacity eviction tests ---

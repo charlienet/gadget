@@ -7,8 +7,9 @@ import (
 
 // Options represents the options for the cache.
 //
-// TTL 有效域：1 ~ 9e9 秒（内部以 int 秒数累加，超出 int 范围可能溢出）；
-// <= 0 表示永不过期（与 Put 的 expireSecond 语义一致）。
+// TTL 为全局默认过期秒数：未调用 WithTTL 时默认 60s（defaultExpiresSeconds）；
+// 显式 WithTTL 后生效，有效域 1 ~ 9e9 秒（内部以 int 秒数累加，超出 int 范围可能
+// 溢出），<= 0 表示永不过期（与 Put 的 expireSecond 语义一致）。
 type Options struct {
 	localStore          Store
 	remoteStore         Store
@@ -17,6 +18,7 @@ type Options struct {
 	metrics             Metrics
 	Logger              *slog.Logger
 	TTL                 int
+	ttlSet              bool // 是否显式调用过 WithTTL（区分"未设置→默认 60s"与"显式 <=0→永不过期"）
 	Name                string
 	cleanupInterval     time.Duration
 	maxItems            int
@@ -98,9 +100,12 @@ func WithSerializer(s Serializer) Option {
 	}
 }
 
+// WithTTL 设置全局默认过期秒数（回填/回写路径使用）。不调用则默认 60s；
+// 传 <= 0 表示永不过期。
 func WithTTL(ttl int) Option {
 	return func(o *Options) {
 		o.TTL = ttl
+		o.ttlSet = true
 	}
 }
 
@@ -172,10 +177,10 @@ func WithSlidingWindow(d time.Duration) Option {
 	}
 }
 
-// WithVerifyEvery enables probabilistic local cache verification. After N local
-// cache hits for a key, the next Get skips local and checks remote. If remote
-// no longer has the data, the stale local entry is cleared immediately.
-// 0 (default) disables verification.
+// WithVerifyEvery enables probabilistic local cache verification：第 N 次本地命中
+// 当次即触发对 remote 的校验（内部实现为 count >= N，而非"命中 N 次之后的下一次
+// Get"）。若 remote 已无该数据，则立即清除过期的本地条目。0 (default) disables
+// verification.
 func WithVerifyEvery(n int) Option {
 	return func(o *Options) {
 		o.verifyEvery = n

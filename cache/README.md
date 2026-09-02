@@ -54,7 +54,9 @@ c = cache.New(
 | `Put(ctx, key, val, expire)` | 写入缓存（local + remote） |
 | `Delete(ctx, keys...)` | 删除缓存并通知其他实例 |
 | `PreLoad(ctx, loadFn, expire)` | 预加载批量数据 |
-| `Update(ctx, key, updateFn)` | 更新数据后自动删除缓存（singleflight 保护） |
+| `Invalidate(ctx, key, mutateFn)` | mutateFn 内写/删数据源，成功后自动失效缓存（本地+远程双删，并经 listener 向集群广播收敛） |
+| `DeletePattern(ctx, pattern)` | 按 glob 模式批量删除匹配键（不发送集群通知） |
+| `Stats()` | 返回命中/未命中/回源等统计只读快照 |
 | `GetMulti(ctx, keys...)` | 批量获取 |
 | `SetMulti(ctx, items, expire)` | 批量写入 |
 | `Close()` | 关闭缓存（停止后台 goroutine） |

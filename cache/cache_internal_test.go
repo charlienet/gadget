@@ -909,7 +909,7 @@ func TestNoticeRemovedPublishErrorWarns(t *testing.T) {
 		logger:   slog.New(ml),
 		stopChan: make(chan struct{}),
 	}
-	c.noticeRemoved("k")
+	c.noticeRemoved(context.Background(), "k")
 	assert.Len(t, ml.warns, 1, "publish failure should be logged via Warn")
 	assert.Contains(t, ml.warns[0], "publish removed key")
 }
@@ -1690,9 +1690,9 @@ func TestVerifySkipsEvictionForPendingKey(t *testing.T) {
 	assert.True(t, localExist)
 }
 
-// --- P1-3: Update 与 Getfn 的 singleflight 互斥 ---
+// --- P1-3: Invalidate 与 Getfn 的 singleflight 互斥 ---
 
-func TestUpdateConcurrentGetfnSharesSingleflight(t *testing.T) {
+func TestInvalidateConcurrentGetfnSharesSingleflight(t *testing.T) {
 	c := &cache{
 		localStore: newMemStore(),
 		serializer: jsonSerializer{},
@@ -1711,14 +1711,14 @@ func TestUpdateConcurrentGetfnSharesSingleflight(t *testing.T) {
 	go func() {
 		close(updateStarted)
 		updateErr <- c.Invalidate(ctx, "k", func(ctx context.Context, key string) error {
-			<-releaseUpdate // 阻塞，保证 Update 持有 singleflight
+			<-releaseUpdate // 阻塞，保证 Invalidate 持有 singleflight
 			return nil
 		})
 	}()
 	<-updateStarted
 	time.Sleep(20 * time.Millisecond)
 
-	// 并发 Getfn：应共享 Update 的 singleflight（key:%s 一致），不执行 loadFn
+	// 并发 Getfn：应共享 Invalidate 的 singleflight（key:%s 一致），不执行 loadFn
 	loadCount := 0
 	getfnErr := make(chan error, 1)
 	go func() {
@@ -1728,16 +1728,16 @@ func TestUpdateConcurrentGetfnSharesSingleflight(t *testing.T) {
 			return true, nil
 		}, 60)
 	}()
-	// 等待 Getfn 完成 getFromCache（本地 miss，微秒级）并进入 getFromSource 的
-	// singleflight 阻塞；Update 仍在持锁，Getfn 只能共享其结果。
+	// 等待 Getfn 完成 getFromCache（本地 miss，微秒级）并进入 Getfn 回源的
+	// singleflight 阻塞；Invalidate 仍在持锁，Getfn 只能共享其结果。
 	time.Sleep(100 * time.Millisecond)
 
-	close(releaseUpdate) // 放行 Update
+	close(releaseUpdate) // 放行 Invalidate
 	assert.Nil(t, <-updateErr)
-	assert.ErrorIs(t, <-getfnErr, ErrEntityNotExist, "Getfn should share Update result (deleted) instead of loading")
-	assert.Equal(t, 0, loadCount, "loadFn must not run while Update holds the singleflight")
+	assert.ErrorIs(t, <-getfnErr, ErrEntityNotExist, "Getfn should share Invalidate result (deleted) instead of loading")
+	assert.Equal(t, 0, loadCount, "loadFn must not run while Invalidate holds the singleflight")
 
-	// Update 完成后 Getfn 正常回源
+	// Invalidate 完成后 Getfn 正常回源
 	var s2 string
 	assert.Nil(t, c.Getfn(ctx, "k", &s2, func(ctx context.Context, key string, v any) (bool, error) {
 		if sv, ok := v.(*string); ok {
@@ -2632,4 +2632,37 @@ func TestExplicitLocalStoreNoInjection(t *testing.T) {
 	c := New(func(o *Options) { o.WithStore(local) })
 	assert.Equal(t, local, c.localStore, "explicit local store must be used, not injected")
 	c.Close()
+}
+
+// TestTTLZeroMeansNoExpiry 是 M4 回归：WithTTL(0) 显式表示永不过期——Getfn
+// 回填条目在 mem_store 中 Expiration==0 且持续可读；未调用 WithTTL 时保持默认
+// defaultExpiresSeconds（60s）。
+func TestTTLZeroMeansNoExpiry(t *testing.T) {
+	ctx := context.Background()
+
+	c := New(WithMemStore(), WithTTL(0))
+	assert.Equal(t, 0, c.ttl, "WithTTL(0) 应覆盖默认 ttl")
+
+	var s string
+	err := c.Getfn(ctx, "gk", &s, func(ctx context.Context, key string, v any) (bool, error) {
+		*(v.(*string)) = "loaded"
+		return true, nil
+	}, 0)
+	assert.Nil(t, err)
+
+	ms := c.localStore.(*mem_store)
+	it, ok := ms.items["gk"]
+	assert.True(t, ok, "Getfn 回填应写入 L1")
+	assert.Equal(t, int64(0), it.Expiration, "WithTTL(0) → 回填条目永不过期（Expiration==0）")
+
+	// 回填条目仍可读（未过期）。
+	var s2 string
+	assert.Nil(t, c.Get(ctx, "gk", &s2))
+	assert.Equal(t, "loaded", s2)
+	c.Close()
+
+	// 未调用 WithTTL：回落默认 60s。
+	c2 := New(WithMemStore())
+	assert.Equal(t, defaultExpiresSeconds, c2.ttl, "未设 WithTTL 应回落默认 60s")
+	c2.Close()
 }
