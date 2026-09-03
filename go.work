@@ -22,9 +22,11 @@ use (
 	./plugins/config/source/etcd
 	./plugins/config/source/nacos
 	./plugins/lock/redis
+	./plugins/ratelimit/redis
 	./plugins/store/consul
 	./plugins/store/file
 	./plugins/store/redis
+	./ratelimit
 	./redis
 	./retry
 	./store

@@ -13,6 +13,7 @@
 | `github.com/charlienet/gadget/cache` | 缓存组件：L1 内存缓存（LRU、热 key 容量驱逐、TTL jitter）+ 可插拔远程 Store，二级缓存语义 |
 | `github.com/charlienet/gadget/redis` | Redis 客户端包装：失效兜底机制、熔断器、优雅关闭、多模式 URL 解析；`IsUnavailable` 连接类错误判定 |
 | `github.com/charlienet/gadget/lock` | 分布式锁：基于 `Backend` 抽象（TryAcquire/Release/Renew），token 防误删/误续，后端不可用时按 FailPolicy（FailClosed/FailOpen）兜底 |
+| `github.com/charlienet/gadget/ratelimit` | 限流器：后端可插拔（`Backend` 批发通道 + `Memory()` 单机），默认"远程批发、本地零售"租约模式，支持精确模式（AllOrNothing 防蒸发），FailOpen/FailClosed 兜底 |
 | `github.com/charlienet/gadget/broker` | 消息代理抽象 |
 | `github.com/charlienet/gadget/config` | 配置管理：支持环境变量、文件与远程配置源（etcd、nacos、consul） |
 | `github.com/charlienet/gadget/store` | 存储抽象 |
@@ -27,6 +28,7 @@
 |---|---|
 | `plugins/cache/redis` `bigcache` `freecache` `gcache` | `cache.Store`（Redis / 内存 LRU 后端） |
 | `plugins/lock/redis` | `lock.Backend` + `lock.Renewer`（SETNX + Lua 原子释放/续期） |
+| `plugins/ratelimit/redis` | `ratelimit.Backend`（GCRA 批发脚本，BestEffort 租约 / AllOrNothing 精确双模式） |
 | `plugins/broker/kafka` `nats` `rabbitmq` `redis` | `broker` 消息代理 |
 | `plugins/config/source/consul` `etcd` `nacos` | `config` 远程配置源 |
 | `plugins/store/consul` `file` `redis` | `store` 存储后端 |
@@ -74,6 +76,6 @@ func TestSomething(t *testing.T) {
 
 ## 仓库结构与开发
 
-- 多模块工作区：根目录 `go.work` 纳入全部 23 个模块；`go build ./...` 默认走 workspace
+- 多模块工作区：根目录 `go.work` 纳入全部 29 个模块；`go build ./...` 默认走 workspace
 - **发布前必须用 `GOWORK=off` 验证单模块**（workspace 会掩盖模块图问题）：`GOWORK=off go build ./... && go vet ./... && go test ./...`
 - tag 规范：`<模块相对路径>/v<semver>`（如 `cache/v0.4.1`、`plugins/cache/redis/v0.1.11`），tag 打在评审通过的提交上
