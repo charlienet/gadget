@@ -13,7 +13,7 @@ import (
 
 	"github.com/alicebob/miniredis"
 	"github.com/charlienet/gadget/redis"
-	"github.com/charlienet/gadget/test"
+	"github.com/charlienet/gadget/redis/test"
 	goredis "github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -154,6 +154,52 @@ func TestParseUrlNoPasswordLeak(t *testing.T) {
 	_, err := redis.ParseURL("redis://:topsecret@,")
 	require.Error(t, err, "空 host 列表应返回错误")
 	assert.NotContains(t, err.Error(), "topsecret", "错误消息不应包含 userinfo 密码")
+}
+
+// TestParseUrlQueryParams 验证 6 节点集群线上 URL 形态的 query 参数透传：
+// 主机 h1:7001 + 5 个 addr= 追加 → Addrs 6 个节点；密码、连接池、超时、重试等
+// 参数全部经 ParseClusterURL → setupClusterQueryParams → universalOptionsFromCluster
+// 解析后透传到 RedisOptions（内嵌 redis.UniversalOptions）。
+func TestParseUrlQueryParams(t *testing.T) {
+	// 对应 6 节点集群线上 URL 形态（主机名、密码均为占位符）
+	ropt, err := redis.ParseURL(
+		"redis://:secret@h1:7001?addr=h2:7002&addr=h3:7003&addr=h4:7004" +
+			"&addr=h5:7005&addr=h6:7006" +
+			"&pool_size=300&min_idle_conns=20&max_idle_conns=300&max_active_conns=300" +
+			"&pool_timeout=3s&conn_max_idle_time=5m" +
+			"&max_retries=3&min_retry_backoff=50ms&max_retry_backoff=2s" +
+			"&dial_timeout=5s&read_timeout=10s&write_timeout=10s" +
+			"&max_redirects=3",
+	)
+	require.NoError(t, err, "解析 6 节点集群 URL 应成功")
+
+	// Addrs == 6 个节点（host + 5 个 addr= 追加）
+	assert.Equal(t, []string{"h1:7001", "h2:7002", "h3:7003", "h4:7004", "h5:7005", "h6:7006"},
+		ropt.Addrs, "Addrs 应为 6 节点列表")
+
+	// 密码
+	assert.Equal(t, "secret", ropt.Password, "Password 应正确")
+
+	// 连接池参数
+	assert.Equal(t, 300, ropt.PoolSize, "PoolSize")
+	assert.Equal(t, 20, ropt.MinIdleConns, "MinIdleConns")
+	assert.Equal(t, 300, ropt.MaxIdleConns, "MaxIdleConns")
+	assert.Equal(t, 300, ropt.MaxActiveConns, "MaxActiveConns")
+
+	// 超时参数
+	assert.Equal(t, 3*time.Second, ropt.PoolTimeout, "PoolTimeout")
+	assert.Equal(t, 5*time.Minute, ropt.ConnMaxIdleTime, "ConnMaxIdleTime")
+	assert.Equal(t, 5*time.Second, ropt.DialTimeout, "DialTimeout")
+	assert.Equal(t, 10*time.Second, ropt.ReadTimeout, "ReadTimeout")
+	assert.Equal(t, 10*time.Second, ropt.WriteTimeout, "WriteTimeout")
+
+	// 重试参数
+	assert.Equal(t, 3, ropt.MaxRetries, "MaxRetries")
+	assert.Equal(t, 50*time.Millisecond, ropt.MinRetryBackoff, "MinRetryBackoff")
+	assert.Equal(t, 2*time.Second, ropt.MaxRetryBackoff, "MaxRetryBackoff")
+
+	// 集群路由参数
+	assert.Equal(t, 3, ropt.MaxRedirects, "MaxRedirects")
 }
 
 func TestParseUrl(t *testing.T) {

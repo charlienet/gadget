@@ -21,7 +21,7 @@ const (
 	FailOpen
 )
 
-// isUnavailable 判定 err 是否为"Redis 服务不可用"类错误（连接/服务层故障），
+// IsUnavailable 判定 err 是否为"Redis 服务不可用"类错误（连接/服务层故障），
 // 这类错误才触发兜底；命令级错误（WRONGTYPE、语法错误、业务语义错误等）
 // 必须照常返回，不能兜底吞掉。
 //
@@ -35,7 +35,7 @@ const (
 //   - io.EOF / io.ErrUnexpectedEOF：连接被服务端关闭
 //   - net.Error（Timeout() 为 true）：读写超时（服务端未响应），但排除
 //     context.DeadlineExceeded（调用方超时约束，非服务失效）
-func isUnavailable(err error) bool {
+func IsUnavailable(err error) bool {
 	if err == nil {
 		return false
 	}
@@ -75,14 +75,6 @@ func isUnavailable(err error) bool {
 // ErrRedisUnavailable 表示 Redis 服务不可用、已按 FailPolicy 执行兜底。
 // 各扩展兜底生效时返回该哨兵错误（包装原始错误，errors.Is 可命中），
 // 应用层可感知脱机事件并自行处理（告警、降级、重试策略等）。
-//
-// 用法示例：
-//
-//	ok, err := lock.TryLock(ctx)
-//	if errors.Is(err, redis.ErrRedisUnavailable) {
-//		// Redis 不可用，锁已按策略兜底（默认 FailClosed：ok=false）
-//		notifyAlert() // 自行处理：告警/降级
-//	}
 var ErrRedisUnavailable = errors.New("redis: server unavailable")
 
 // fallbackErr 包装原始错误为兜底哨兵错误：errors.Is(err, ErrRedisUnavailable)
@@ -91,7 +83,7 @@ func fallbackErr(err error) error {
 	return fmt.Errorf("%w: %v", ErrRedisUnavailable, err)
 }
 
-// failPolicyConfig 内嵌于各扩展的 config（LockOption/BloomOption 等对应的
+// failPolicyConfig 内嵌于各扩展的 config（BloomOption/CuckooOption 等对应的
 // 配置结构），统一失效兜底策略字段与设置方法。
 type failPolicyConfig struct {
 	policy FailPolicy
@@ -110,13 +102,11 @@ type failPolicySetter interface {
 
 // WithFailPolicy 设置 Redis 服务失效时的兜底策略，返回对应扩展的 Option。
 // Go 不支持同名函数重载，各扩展的 Option 是不同类型
-// （LockOption/BloomOption/CuckooOption/LeakyBucketOption/...），因此以
+// （BloomOption/CuckooOption/LeakyBucketOption/...），因此以
 // 泛型提供统一入口：类型参数 C 为扩展的 config 类型（指针实现 setPolicy）。
 //
 // 用法（配合各扩展导出的 config 类型别名）：
 //
-//	// 锁：默认 FailClosed，可显式 FailOpen（警告：失效放行临界区有并发风险）
-//	lock := rdb.NewLock("k", redis.WithFailPolicy[*redis.LockConfig](redis.FailClosed))
 //	// 限流器/过滤器：默认 FailOpen
 //	rl := rdb.NewRateLimiter("login", redis.WithFailPolicy[*redis.RateLimiter](redis.FailOpen))
 //	cf := rdb.NewCuckooFilter("cf:1", redis.WithFailPolicy[*redis.CuckooConfig](redis.FailOpen))

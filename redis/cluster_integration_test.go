@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/charlienet/gadget/redis"
-	"github.com/charlienet/gadget/test"
+	"github.com/charlienet/gadget/redis/test"
 	goredis "github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"

@@ -247,7 +247,7 @@ func (rl *RateLimiter) fallbackRateResult(err error) (*RateResult, error) {
 // allow 执行 GCRA 检查并处理失效兜底（Allow/AllowN/AllowAtMost 使用）。
 func (rl *RateLimiter) allow(ctx context.Context, key string, rate int, period time.Duration) (*RateResult, error) {
 	res, err := rl.allowRaw(ctx, key, rate, period)
-	if err != nil && isUnavailable(err) {
+	if err != nil && IsUnavailable(err) {
 		return rl.fallbackRateResult(err)
 	}
 	return res, err
@@ -313,7 +313,7 @@ func (rl *RateLimiter) allowAtMostRaw(ctx context.Context, key string, rate int,
 // FailOpen → (Allowed=true, Consumed=1) 放行；FailClosed → (Allowed=false)。
 func (rl *RateLimiter) allowAtMost(ctx context.Context, key string, rate int, period time.Duration, cost int) (*RateResult, error) {
 	res, err := rl.allowAtMostRaw(ctx, key, rate, period, cost)
-	if err != nil && isUnavailable(err) {
+	if err != nil && IsUnavailable(err) {
 		return rl.fallbackRateResult(err)
 	}
 	return res, err
@@ -344,7 +344,7 @@ func (rl *RateLimiter) Reset(ctx context.Context, key string) error {
 func (rl *RateLimiter) Wait(ctx context.Context, key string, ratePerSec int) error {
 	return waitLoop(ctx, func(ctx context.Context) (*RateResult, error) {
 		res, err := rl.allowRaw(ctx, key, ratePerSec, time.Second)
-		if err != nil && isUnavailable(err) {
+		if err != nil && IsUnavailable(err) {
 			if rl.policy == FailOpen {
 				// FailOpen：放行但返回哨兵错误（应用层感知"放行是兜底的"）
 				return &RateResult{Allowed: true}, fallbackErr(err)
@@ -359,7 +359,7 @@ func (rl *RateLimiter) Wait(ctx context.Context, key string, ratePerSec int) err
 func (rl *RateLimiter) WaitN(ctx context.Context, key string, n int, per time.Duration) error {
 	return waitLoop(ctx, func(ctx context.Context) (*RateResult, error) {
 		res, err := rl.allowRaw(ctx, key, n, per)
-		if err != nil && isUnavailable(err) {
+		if err != nil && IsUnavailable(err) {
 			if rl.policy == FailOpen {
 				return &RateResult{Allowed: true}, fallbackErr(err)
 			}

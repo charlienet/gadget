@@ -115,7 +115,7 @@ func WithBreaker(enable bool) Option {
 }
 
 // WithBreakerThreshold 设置熔断的连续失败阈值（默认 3；n<=0 时用默认值）。
-// 仅连接类错误（isUnavailable 判定）计数，命令级错误不计入。
+// 仅连接类错误（IsUnavailable 判定）计数，命令级错误不计入。
 func WithBreakerThreshold(n int) Option {
 	return func(ro *RedisOptions) {
 		ro.breakerThreshold = n

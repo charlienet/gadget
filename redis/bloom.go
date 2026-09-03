@@ -137,7 +137,7 @@ func (b *bfCmdImpl) fallbackBools(n int, err error) ([]bool, error) {
 func (b *bfCmdImpl) Add(ctx context.Context, item string) (bool, error) {
 	added, err := b.client.BFAdd(ctx, b.key, item).Result()
 	if err != nil {
-		if isUnavailable(err) {
+		if IsUnavailable(err) {
 			return b.fallbackBool(err)
 		}
 		return false, err
@@ -148,7 +148,7 @@ func (b *bfCmdImpl) Add(ctx context.Context, item string) (bool, error) {
 func (b *bfCmdImpl) Exists(ctx context.Context, item string) (bool, error) {
 	exists, err := b.client.BFExists(ctx, b.key, item).Result()
 	if err != nil {
-		if isUnavailable(err) {
+		if IsUnavailable(err) {
 			return b.fallbackBool(err)
 		}
 		return false, err
@@ -172,7 +172,7 @@ func (b *bfCmdImpl) AddMulti(ctx context.Context, items ...string) ([]bool, erro
 	// BF.MADD returns ints: 1 if newly inserted, 0 if already present
 	added, err := b.client.BFMAdd(ctx, b.key, toInterfaceSlice(items)...).Result()
 	if err != nil {
-		if isUnavailable(err) {
+		if IsUnavailable(err) {
 			return b.fallbackBools(len(items), err)
 		}
 		return nil, err
@@ -188,7 +188,7 @@ func (b *bfCmdImpl) ExistsMulti(ctx context.Context, items ...string) ([]bool, e
 
 	results, err := b.client.BFMExists(ctx, b.key, toInterfaceSlice(items)...).Result()
 	if err != nil {
-		if isUnavailable(err) {
+		if IsUnavailable(err) {
 			return b.fallbackBools(len(items), err)
 		}
 		return nil, err
@@ -199,7 +199,7 @@ func (b *bfCmdImpl) ExistsMulti(ctx context.Context, items ...string) ([]bool, e
 func (b *bfCmdImpl) Info(ctx context.Context) (*BloomInfo, error) {
 	info, err := b.client.BFInfo(ctx, b.key).Result()
 	if err != nil {
-		if isUnavailable(err) {
+		if IsUnavailable(err) {
 			// Info 非关键：兜底返回空结构体 + 哨兵错误（errors.Is 可感知）
 			return &BloomInfo{}, fallbackErr(err)
 		}
@@ -344,7 +344,7 @@ func (b *bitmapImpl) add(ctx context.Context, item string) (bool, error) {
 		return added == 1, nil
 	}
 	// 服务不可用：直接兜底（fallback 同样会失败）
-	if isUnavailable(err) {
+	if IsUnavailable(err) {
 		return b.fallbackBool(err)
 	}
 	// 服务器不支持 Lua（如代理类服务器）时回退到非原子多命令实现
@@ -355,7 +355,7 @@ func (b *bitmapImpl) add(ctx context.Context, item string) (bool, error) {
 func (b *bitmapImpl) addFallback(ctx context.Context, item string) (bool, error) {
 	exists, err := b.existsFallback(ctx, item)
 	if err != nil {
-		if isUnavailable(err) {
+		if IsUnavailable(err) {
 			return b.fallbackBool(err)
 		}
 		return false, err
@@ -363,7 +363,7 @@ func (b *bitmapImpl) addFallback(ctx context.Context, item string) (bool, error)
 
 	for _, pos := range b.hashs(item) {
 		if err := b.client.SetBit(ctx, b.key, int64(pos), 1).Err(); err != nil {
-			if isUnavailable(err) {
+			if IsUnavailable(err) {
 				return b.fallbackBool(err)
 			}
 			return false, err
@@ -384,7 +384,7 @@ func (b *bitmapImpl) exists(ctx context.Context, item string) (bool, error) {
 		return exists == 1, nil
 	}
 	// 服务不可用：直接兜底
-	if isUnavailable(err) {
+	if IsUnavailable(err) {
 		return b.fallbackBool(err)
 	}
 	// 服务器不支持 Lua 时回退到多命令实现
@@ -396,7 +396,7 @@ func (b *bitmapImpl) existsFallback(ctx context.Context, item string) (bool, err
 	for _, pos := range b.hashs(item) {
 		bit, err := b.client.GetBit(ctx, b.key, int64(pos)).Result()
 		if err != nil {
-			if isUnavailable(err) {
+			if IsUnavailable(err) {
 				return b.fallbackBool(err)
 			}
 			return false, err
@@ -440,7 +440,7 @@ func (b *bitmapImpl) Info(ctx context.Context) (*BloomInfo, error) {
 	// For the bitmap fallback, we estimate current item count
 	strLen, err := b.client.StrLen(ctx, b.key).Result()
 	if err != nil {
-		if isUnavailable(err) {
+		if IsUnavailable(err) {
 			// Info 非关键：兜底返回空结构体 + 哨兵错误（errors.Is 可感知）
 			return &BloomInfo{}, fallbackErr(err)
 		}

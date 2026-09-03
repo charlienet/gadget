@@ -24,5 +24,4 @@ use (
 	./plugins/store/redis
 	./redis
 	./store
-	./test
 )

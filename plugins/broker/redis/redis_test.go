@@ -5,7 +5,7 @@ import (
 
 	b "github.com/charlienet/gadget/plugins/broker/redis"
 	"github.com/charlienet/gadget/redis"
-	"github.com/charlienet/gadget/test"
+	"github.com/charlienet/gadget/redis/test"
 )
 
 func TestRedisBroker(t *testing.T) {

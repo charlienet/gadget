@@ -153,7 +153,7 @@ func (lb *LeakyBucket) fallbackRateResult(err error) (*RateResult, error) {
 // allow 执行漏桶检查并处理失效兜底（Allow/AllowN 使用）。
 func (lb *LeakyBucket) allow(ctx context.Context, key string, n int, per time.Duration) (*RateResult, error) {
 	res, err := lb.allowRaw(ctx, key, n, per)
-	if err != nil && isUnavailable(err) {
+	if err != nil && IsUnavailable(err) {
 		return lb.fallbackRateResult(err)
 	}
 	return res, err
@@ -178,7 +178,7 @@ func (lb *LeakyBucket) AllowN(ctx context.Context, key string, n int, per time.D
 func (lb *LeakyBucket) Wait(ctx context.Context, key string, ratePerSec int) error {
 	return waitLoop(ctx, func(ctx context.Context) (*RateResult, error) {
 		res, err := lb.allowRaw(ctx, key, ratePerSec, time.Second)
-		if err != nil && isUnavailable(err) {
+		if err != nil && IsUnavailable(err) {
 			if lb.policy == FailOpen {
 				// FailOpen：放行但返回哨兵错误（应用层感知"放行是兜底的"）
 				return &RateResult{Allowed: true}, fallbackErr(err)
@@ -193,7 +193,7 @@ func (lb *LeakyBucket) Wait(ctx context.Context, key string, ratePerSec int) err
 func (lb *LeakyBucket) WaitN(ctx context.Context, key string, n int, per time.Duration) error {
 	return waitLoop(ctx, func(ctx context.Context) (*RateResult, error) {
 		res, err := lb.allowRaw(ctx, key, n, per)
-		if err != nil && isUnavailable(err) {
+		if err != nil && IsUnavailable(err) {
 			if lb.policy == FailOpen {
 				return &RateResult{Allowed: true}, fallbackErr(err)
 			}

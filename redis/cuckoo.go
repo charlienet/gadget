@@ -138,7 +138,7 @@ func (cf *CuckooFilter) fallbackBool(err error) (bool, error) {
 // Redis 服务失效时按兜底策略：FailOpen → (true, nil)；FailClosed → (false, nil)。
 func (cf *CuckooFilter) Add(ctx context.Context, item string) (bool, error) {
 	added, err := cf.impl.Add(ctx, item)
-	if err != nil && isUnavailable(err) {
+	if err != nil && IsUnavailable(err) {
 		return cf.fallbackBool(err)
 	}
 	return added, err
@@ -149,7 +149,7 @@ func (cf *CuckooFilter) Add(ctx context.Context, item string) (bool, error) {
 // 但放行业务）；FailClosed → (false, nil)。
 func (cf *CuckooFilter) Exists(ctx context.Context, item string) (bool, error) {
 	exists, err := cf.impl.Exists(ctx, item)
-	if err != nil && isUnavailable(err) {
+	if err != nil && IsUnavailable(err) {
 		return cf.fallbackBool(err)
 	}
 	return exists, err
@@ -161,7 +161,7 @@ func (cf *CuckooFilter) Exists(ctx context.Context, item string) (bool, error) {
 // FailClosed → (false, nil)。
 func (cf *CuckooFilter) Del(ctx context.Context, item string) (bool, error) {
 	deleted, err := cf.impl.Del(ctx, item)
-	if err != nil && isUnavailable(err) {
+	if err != nil && IsUnavailable(err) {
 		return cf.fallbackBool(err)
 	}
 	return deleted, err
@@ -171,7 +171,7 @@ func (cf *CuckooFilter) Del(ctx context.Context, item string) (bool, error) {
 // Redis 服务失效时按兜底策略：FailOpen → 空结构体 nil；FailClosed → 返回错误。
 func (cf *CuckooFilter) Info(ctx context.Context) (*CuckooInfo, error) {
 	info, err := cf.impl.Info(ctx)
-	if err != nil && isUnavailable(err) {
+	if err != nil && IsUnavailable(err) {
 		// Info 非关键：兜底返回空结构体 + 哨兵错误（errors.Is 可感知）
 		return &CuckooInfo{}, fallbackErr(err)
 	}

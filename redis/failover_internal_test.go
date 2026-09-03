@@ -52,8 +52,8 @@ func TestIsUnavailable(t *testing.T) {
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := isUnavailable(c.err); got != c.want {
-				t.Errorf("isUnavailable(%v) = %v, want %v", c.err, got, c.want)
+			if got := IsUnavailable(c.err); got != c.want {
+				t.Errorf("IsUnavailable(%v) = %v, want %v", c.err, got, c.want)
 			}
 		})
 	}

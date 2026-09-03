@@ -7,7 +7,7 @@ import (
 
 	"github.com/charlienet/gadget/cache"
 	r "github.com/charlienet/gadget/redis"
-	"github.com/charlienet/gadget/test"
+	"github.com/charlienet/gadget/redis/test"
 	"github.com/stretchr/testify/assert"
 )
 

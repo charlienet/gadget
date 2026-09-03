@@ -138,7 +138,7 @@ func TestBreakerCommandError(t *testing.T) {
 }
 
 // TestBreakerFailoverLink 验证熔断与兜底联动：
-// 熔断 Open 快速失败的错误（lastErr 为连接类错误）能被扩展层 isUnavailable
+// 熔断 Open 快速失败的错误（lastErr 为连接类错误）能被扩展层 IsUnavailable
 // 识别并走 FailPolicy 兜底（errors.Is(ErrRedisUnavailable) 命中）。
 func TestBreakerFailoverLink(t *testing.T) {
 	ctx := context.Background()
@@ -168,8 +168,8 @@ func TestBreakerFailoverLink(t *testing.T) {
 		"熔断拦截的错误应被识别并走兜底（哨兵错误）")
 	assert.True(t, res.Allowed, "FailOpen 限流应放行")
 
-	lock := rdb.NewLock("lk") // 默认 FailClosed
-	ok, err := lock.TryLock(ctx)
+	bf := rdb.NewBloomFilter("bf:failover", redis.WithFailPolicy[*redis.BloomConfig](redis.FailClosed))
+	added, err := bf.Add(ctx, "x")
 	require.ErrorIs(t, err, redis.ErrRedisUnavailable)
-	assert.False(t, ok, "FailClosed 锁应拒绝")
+	assert.False(t, added, "FailClosed 布隆过滤器应拒绝")
 }

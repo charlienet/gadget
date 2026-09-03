@@ -34,7 +34,6 @@ type Client interface {
 	// NewBloomFilter(key, WithCapacity(n), WithFalsePositive(p))。
 	NewBloomFilterWithEstimate(key string, capacity int64, falsePositive float64) BloomFilter
 	NewCuckooFilter(key string, opts ...CuckooOption) *CuckooFilter   // 创建布谷鸟过滤器（需 RedisBloom cuckoo 模块）
-	NewLock(key string, opts ...LockOption) *Lock                     // 创建分布式锁
 	NewDelayedQueue(key string, opts ...QueueOption) *DelayedQueue    // 创建延迟队列（ZSET 实现）
 	NewRateLimiter(name string, opts ...RateLimiterOption) *RateLimiter // 创建限流器（按名称隔离限流 key 空间，空名称不隔离）
 	NewLeakyBucket(name string, opts ...LeakyBucketOption) *LeakyBucket // 创建漏桶限流器（恒定输出速率、拒绝突发；name 隔离同限流器）

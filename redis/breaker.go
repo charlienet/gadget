@@ -135,7 +135,7 @@ func (b *CircuitBreaker) Fail(err error) {
 
 // onResult 处理一次命令结果（hook 调用）：
 //   - 成功 → Success（半开探测成功自动闭合）
-//   - 连接类错误（isUnavailable）→ Fail（计入熔断）
+//   - 连接类错误（IsUnavailable）→ Fail（计入熔断）
 //   - 其他错误（命令级，如 WRONGTYPE）→ 不计入熔断；若处于半开探测
 //     说明服务可达（连接正常），闭合恢复
 func (b *CircuitBreaker) onResult(err error) {
@@ -143,7 +143,7 @@ func (b *CircuitBreaker) onResult(err error) {
 		b.Success()
 		return
 	}
-	if isUnavailable(err) {
+	if IsUnavailable(err) {
 		b.Fail(err)
 		return
 	}
@@ -189,7 +189,7 @@ func (h *breakerHook) ProcessPipelineHook(next goredis.ProcessPipelineHook) gore
 			return err
 		}
 		err := next(ctx, cmds)
-		// 管道整体统计：最后一个错误判定（isUnavailable 才计入熔断）
+		// 管道整体统计：最后一个错误判定（IsUnavailable 才计入熔断）
 		h.breaker.onResult(err)
 		return err
 	}

@@ -136,17 +136,6 @@ SubscribeWithPrefix
 
 扩展能力
 
-分布式锁（SET NX EX + Lua 原子释放/续期）：
-
-```go
-lock := rdb.NewLock("job:1", redis.WithTTL(10*time.Second))
-if ok, err := lock.TryLock(ctx); err != nil || !ok {
-    return err // 锁被他人持有
-}
-defer lock.Unlock(ctx) // 仅 token 匹配时删除，防误删他人锁
-// Renew(ctx, ttl) 可作看门狗续期；WithToken 可指定 token 检测重入
-```
-
 CAS 原子操作（Lua 比较并设置/删除）：
 
 ```go
@@ -226,7 +215,6 @@ Redis 服务不可用时（dial 失败、读写超时、连接池超时、连接
 
 | 扩展 | 默认策略 | 兜底语义 |
 |---|---|---|
-| 锁（Lock） | FailClosed | 不获取锁、不放行临界区（避免并发写数据） |
 | 限流（RateLimiter/LeakyBucket） | FailOpen | Allow 返回放行、Wait 直接放行（保护性能力，宁可多放） |
 | 布隆/布谷鸟过滤器 | FailOpen | Add/Exists 返回成功值（防穿透失效但放行业务） |
 | CAS / 延迟队列 | 无策略 | 写操作不可降级，直接返回原始错误 |
@@ -234,7 +222,6 @@ Redis 服务不可用时（dial 失败、读写超时、连接池超时、连接
 显式配置（各扩展 Option 通过 WithFailPolicy 泛型设置）：
 
 ```go
-lock := rdb.NewLock("k", redis.WithFailPolicy[*redis.LockConfig](redis.FailClosed))
 rl := rdb.NewRateLimiter("login", redis.WithFailPolicy[*redis.RateLimiter](redis.FailOpen))
 cf := rdb.NewCuckooFilter("cf:1", redis.WithFailPolicy[*redis.CuckooConfig](redis.FailOpen))
 ```
@@ -247,19 +234,19 @@ cf := rdb.NewCuckooFilter("cf:1", redis.WithFailPolicy[*redis.CuckooConfig](redi
   `errors.Is(err, redis.ErrRedisUnavailable)` 可判断脱机事件，应用层自行
   处理告警/降级）：
   ```go
-  ok, err := lock.TryLock(ctx)
+  ok, err := rl.Allow(ctx, "user:1", 5)
   if errors.Is(err, redis.ErrRedisUnavailable) {
-      // Redis 不可用，锁已按策略兜底（默认 FailClosed：ok=false）
+      // Redis 不可用，扩展已按策略兜底
       notifyAlert() // 自行处理：告警/降级
   }
   ```
-- FailClosed 的阻塞/循环语义不会死循环：Lock 失效返回错误、Wait 失效返回错误。
+- FailClosed 的阻塞/循环语义不会死循环：Wait 失效返回错误。
 
 自动重连
 
 Redis 宕机恢复后 client 自动重连，无需额外配置——这是 go-redis 连接池的
 固有行为：请求时获取连接、失败时重新 dial 并丢弃坏连接；宕机期间操作报
-连接错误（可被 isUnavailable 判定触发兜底），恢复后新请求自动重建连接
+连接错误（可被 IsUnavailable 判定触发兜底），恢复后新请求自动重建连接
 （集群 client 还会自动刷新拓扑）。测试 TestAutoReconnect 以 miniredis
 固定端口模拟"宕机→恢复"验证了该行为。
 
@@ -284,5 +271,5 @@ Redis 服务失效后避免每次请求都等待连接超时：连续失败达�
   ```
 
 - 与兜底联动：熔断 Open 快速失败返回的连接类错误同样被扩展层
-  isUnavailable 识别并走 FailPolicy 兜底（errors.Is(ErrRedisUnavailable)
+  IsUnavailable 识别并走 FailPolicy 兜底（errors.Is(ErrRedisUnavailable)
   命中）；半开探测成功即自动闭合恢复，无需人工干预。

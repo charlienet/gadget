@@ -11,7 +11,7 @@ import (
 
 	"github.com/charlienet/gadget/cache"
 	"github.com/charlienet/gadget/redis"
-	"github.com/charlienet/gadget/test"
+	"github.com/charlienet/gadget/redis/test"
 	"github.com/stretchr/testify/assert"
 )
 

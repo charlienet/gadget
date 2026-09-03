@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"testing"
-	"time"
 
 	"github.com/alicebob/miniredis"
 	"github.com/charlienet/gadget/redis"
@@ -142,40 +141,6 @@ func TestFailoverCuckooFilter(t *testing.T) {
 	added, err = cfClosed.Add(ctx, "x")
 	require.ErrorIs(t, err, redis.ErrRedisUnavailable)
 	assert.False(t, added, "FailClosed Add 应返回 false")
-}
-
-// TestFailoverLock 验证分布式锁失效兜底（默认 FailClosed）。
-func TestFailoverLock(t *testing.T) {
-	rdb := newFailedClient(t)
-	ctx := context.Background()
-
-	t.Run("默认 FailClosed：TryLock 返回 false + 哨兵错误", func(t *testing.T) {
-		lock := rdb.NewLock("lk")
-		ok, err := lock.TryLock(ctx)
-		require.ErrorIs(t, err, redis.ErrRedisUnavailable)
-		assert.False(t, ok, "FailClosed TryLock 应返回 false（不放行临界区）")
-	})
-
-	t.Run("显式 FailOpen：TryLock 返回 true + 哨兵错误", func(t *testing.T) {
-		lock := rdb.NewLock("lk2", redis.WithFailPolicy[*redis.LockConfig](redis.FailOpen))
-		ok, err := lock.TryLock(ctx)
-		require.ErrorIs(t, err, redis.ErrRedisUnavailable)
-		assert.True(t, ok, "FailOpen TryLock 应返回 true（显式选择，风险自担）")
-	})
-
-	t.Run("FailClosed：Lock/Unlock/Renew 返回哨兵错误", func(t *testing.T) {
-		lock := rdb.NewLock("lk3")
-		require.ErrorIs(t, lock.Lock(ctx), redis.ErrRedisUnavailable, "FailClosed Lock 应返回哨兵错误")
-		require.ErrorIs(t, lock.Unlock(ctx), redis.ErrRedisUnavailable, "FailClosed Unlock 应返回哨兵错误")
-		_, err := lock.Renew(ctx, time.Second)
-		require.ErrorIs(t, err, redis.ErrRedisUnavailable, "FailClosed Renew 应返回哨兵错误")
-	})
-
-	t.Run("FailOpen：Lock/Unlock 返回哨兵错误（放行但仍可感知）", func(t *testing.T) {
-		lock := rdb.NewLock("lk4", redis.WithFailPolicy[*redis.LockConfig](redis.FailOpen))
-		require.ErrorIs(t, lock.Lock(ctx), redis.ErrRedisUnavailable, "FailOpen Lock 放行但返回哨兵错误")
-		require.ErrorIs(t, lock.Unlock(ctx), redis.ErrRedisUnavailable, "FailOpen Unlock 返回哨兵错误")
-	})
 }
 
 // TestFailoverCommandError 验证命令级错误不触发兜底：
