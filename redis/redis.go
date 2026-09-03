@@ -33,10 +33,10 @@ type Client interface {
 	// NewBloomFilterWithEstimate 按容量与误判率创建布隆过滤器，等价于
 	// NewBloomFilter(key, WithCapacity(n), WithFalsePositive(p))。
 	NewBloomFilterWithEstimate(key string, capacity int64, falsePositive float64) BloomFilter
-	NewCuckooFilter(key string, opts ...CuckooOption) *CuckooFilter   // 创建布谷鸟过滤器（需 RedisBloom cuckoo 模块）
-	NewDelayedQueue(key string, opts ...QueueOption) *DelayedQueue    // 创建延迟队列（ZSET 实现）
-	NewRateLimiter(name string, opts ...RateLimiterOption) *RateLimiter // 创建限流器（按名称隔离限流 key 空间，空名称不隔离）
-	NewLeakyBucket(name string, opts ...LeakyBucketOption) *LeakyBucket // 创建漏桶限流器（恒定输出速率、拒绝突发；name 隔离同限流器）
+	NewCuckooFilter(key string, opts ...CuckooOption) *CuckooFilter     // 创建布谷鸟过滤器（需 RedisBloom cuckoo 模块）
+	NewDelayedQueue(key string, opts ...QueueOption) *DelayedQueue      // 创建延迟队列（ZSET 实现）
+	NewRateLimiter(name string, opts ...RateLimiterOption) *RateLimiter // 创建限流器（按名称隔离限流 key 空间，空名称不隔离）；已弃用，见 ratelimit 模块，为兼容保留于接口
+	NewLeakyBucket(name string, opts ...LeakyBucketOption) *LeakyBucket // 创建漏桶限流器（恒定输出速率、拒绝突发；name 隔离同限流器）；已弃用，见 ratelimit 模块，为兼容保留于接口
 	// CompareAndSet 原子比较并设置：key 当前值等于 oldValue 时设置为 newValue。
 	// oldValue=nil 表示"仅当 key 不存在时设置"（SETNX 语义）。
 	CompareAndSet(ctx context.Context, key string, oldValue, newValue any) (bool, error)
@@ -55,7 +55,7 @@ type redisClient struct {
 	conf     *redis.UniversalOptions
 	cap      *Capability
 	state    *closeState
-	ownsPool bool // 是否拥有底层连接池：NewWithClient 包装外部 uc 时为 false
+	ownsPool bool            // 是否拥有底层连接池：NewWithClient 包装外部 uc 时为 false
 	breaker  *CircuitBreaker // 熔断器（默认启用；nil 表示禁用）
 }
 

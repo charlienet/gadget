@@ -120,6 +120,22 @@ return {cost, remaining, tostring(-1), tostring(reset_after)}
 //
 // 失效兜底策略默认 FailOpen（保护性能力，服务不可用时宁可多放也不阻塞业务）；
 // 可用 WithFailPolicy 显式改为 FailClosed。
+//
+// Deprecated: 请改用独立模块 github.com/charlienet/gadget/ratelimit（限流器抽象），
+// 配合后端插件 github.com/charlienet/gadget/plugins/ratelimit/redis（GCRA 批发脚本）。
+// 迁移时的语义差异：
+//
+//   - 速率/突发：旧接口每次调用传参（ratePerSec/per），新模块经
+//     ratelimit.WithRate/WithBurst 在 Limiter 实例级固定；不同速率组合需建多个 Limiter。
+//   - 结果表达：旧 RateResult{Allowed,Remaining,Consumed,RetryAfter} 用结构体字段表达
+//     超限；新模块用 (bool, error)，判定 errors.Is(err, ratelimit.ErrExceeded)，经
+//     errors.As(*ratelimit.ExceededError) 取 RetryAfter，Remaining 不回传。
+//   - 尽力扣减：AllowAtMost*（能扣多少扣多少）对应新模块 Backend 层的
+//     ratelimit.GrantBestEffort 授予模式。
+//   - Reset：新模块无逐 key 重置对应，靠闲置回收（WithIdleRetention）或后端 TTL 自然过期。
+//   - 精确逐次判定：可用 ratelimit.WithoutLocalLease() 关闭本地租约。
+//
+// 本类型是 Client 导出接口成员，为兼容保留，不再演进。
 type RateLimiter struct {
 	client    *redisClient
 	name      string // 命名空间（空字符串表示不隔离，key 直通）
@@ -129,6 +145,8 @@ type RateLimiter struct {
 
 // RateLimiterOption 配置限流器（WithFailPolicy 泛型参数使用
 // *RateLimiter 类型，见 failover.go）。
+//
+// Deprecated: 随 RateLimiter 一并弃用，请改用 ratelimit 模块的 Option。
 type RateLimiterOption func(*RateLimiter)
 
 // setPolicy 实现 failPolicySetter（供 WithFailPolicy 泛型约束使用）。
@@ -137,6 +155,10 @@ func (rl *RateLimiter) setPolicy(p FailPolicy) {
 }
 
 // RateResult contains the result of a rate limit check.
+// 令牌桶（RateLimiter）与漏桶（LeakyBucket）两族共享此结果类型。
+//
+// Deprecated: 随旧限流族一并弃用，请改用 ratelimit 模块的 (bool, error) 返回，
+// 超限细节经 errors.As(*ratelimit.ExceededError) 取出（Remaining 不再回传）。
 type RateResult struct {
 	// Allowed indicates whether the request is allowed.
 	// AllowAtMost 场景下部分放行（消耗了部分配额）也算 true。
@@ -167,6 +189,8 @@ type RateResult struct {
 //	// login 与 pay 对相同业务 key 互不影响（key 空间按名称隔离）
 //	login.Allow(ctx, "user:1", 5)
 //	pay.Allow(ctx, "user:1", 10)
+//
+// Deprecated: 请改用 ratelimit.New（配合 plugins/ratelimit/redis 后端），差异见 RateLimiter。
 func (rdb *redisClient) NewRateLimiter(name string, opts ...RateLimiterOption) *RateLimiter {
 	sep := rdb.prefix.separator
 	if sep == "" {
@@ -255,6 +279,8 @@ func (rl *RateLimiter) allow(ctx context.Context, key string, rate int, period t
 
 // Allow checks if a request identified by key is allowed at the given rate
 // (operations per second). Returns the result including remaining quota.
+//
+// Deprecated: 请改用 ratelimit.Limiter.Allow（速率经 WithRate 固定），差异见 RateLimiter。
 func (rl *RateLimiter) Allow(ctx context.Context, key string, ratePerSec int) (*RateResult, error) {
 	return rl.allow(ctx, key, ratePerSec, time.Second)
 }
@@ -262,6 +288,8 @@ func (rl *RateLimiter) Allow(ctx context.Context, key string, ratePerSec int) (*
 // AllowN checks if a request identified by key is allowed at the given rate
 // with a custom period. For example, AllowN(ctx, "api:1", 100, time.Minute)
 // allows 100 operations per minute.
+//
+// Deprecated: 请改用 ratelimit.Limiter.Allow（速率经 WithRate 固定），差异见 RateLimiter。
 func (rl *RateLimiter) AllowN(ctx context.Context, key string, n int, per time.Duration) (*RateResult, error) {
 	return rl.allow(ctx, key, n, per)
 }
@@ -322,17 +350,23 @@ func (rl *RateLimiter) allowAtMost(ctx context.Context, key string, rate int, pe
 // AllowAtMost 请求消耗 ratePerSec 配额的部分配额：配额充足时消耗 cost 全部放行
 // （Consumed=cost）；不足时消耗剩余配额部分放行（Consumed=剩余量）；无剩余配额
 // 时拒绝（Allowed=false、RetryAfter>0）。rate 语义同 Allow（每秒速率）。
+//
+// Deprecated: 尽力扣减语义对应 ratelimit 的 GrantBestEffort 授予模式（Backend 层），差异见 RateLimiter。
 func (rl *RateLimiter) AllowAtMost(ctx context.Context, key string, ratePerSec int, cost int) (*RateResult, error) {
 	return rl.allowAtMost(ctx, key, ratePerSec, time.Second, cost)
 }
 
 // AllowAtMostN 同 AllowAtMost，rate 语义同 AllowN（per 窗口内 n 个）。
+//
+// Deprecated: 随 AllowAtMost 一并弃用，对应 ratelimit 的 GrantBestEffort，差异见 RateLimiter。
 func (rl *RateLimiter) AllowAtMostN(ctx context.Context, key string, n int, per time.Duration, cost int) (*RateResult, error) {
 	return rl.allowAtMost(ctx, key, n, per, cost)
 }
 
 // Reset 重置限流状态（删除状态 key），配额恢复满额。
 // 适用于运维解除限流、限流配置变更后清空历史状态的场景。
+//
+// Deprecated: 新模块无逐 key 重置对应，靠闲置回收/后端 TTL 过期，差异见 RateLimiter。
 func (rl *RateLimiter) Reset(ctx context.Context, key string) error {
 	return rl.client.Del(ctx, "rate:"+rl.limitKey(key)).Err()
 }
@@ -341,6 +375,8 @@ func (rl *RateLimiter) Reset(ctx context.Context, key string) error {
 // 被拒时等待 RetryAfter 后重试；RetryAfter 为 0 时最小等待 1ms 防忙循环。
 // Redis 服务失效时按兜底策略：FailOpen → 直接放行返回 nil；FailClosed →
 // 返回错误（不能吞错死循环等待）。
+//
+// Deprecated: 请改用 ratelimit.Limiter.Wait（速率经 WithRate 固定），差异见 RateLimiter。
 func (rl *RateLimiter) Wait(ctx context.Context, key string, ratePerSec int) error {
 	return waitLoop(ctx, func(ctx context.Context) (*RateResult, error) {
 		res, err := rl.allowRaw(ctx, key, ratePerSec, time.Second)
@@ -356,6 +392,8 @@ func (rl *RateLimiter) Wait(ctx context.Context, key string, ratePerSec int) err
 }
 
 // WaitN 阻塞直到配额放行或 ctx 取消/超时（AllowN 的等待版）。
+//
+// Deprecated: 请改用 ratelimit.Limiter.Wait（速率经 WithRate 固定），差异见 RateLimiter。
 func (rl *RateLimiter) WaitN(ctx context.Context, key string, n int, per time.Duration) error {
 	return waitLoop(ctx, func(ctx context.Context) (*RateResult, error) {
 		res, err := rl.allowRaw(ctx, key, n, per)

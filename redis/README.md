@@ -153,6 +153,15 @@ payload, ok, err := q.Dequeue(ctx)                   // 原子取一个到期任
 items, err := q.DequeueBatch(ctx, 10)                // 原子批量取
 ```
 
+### ⚠ 已弃用 / 迁移指引
+
+本模块内嵌的 `RateLimiter`（令牌桶）与 `LeakyBucket`（漏桶）已弃用，新代码请优先使用独立模块：
+
+- `github.com/charlienet/gadget/ratelimit` —— 限流器抽象（`ratelimit.New` + `WithRate`/`WithBurst` 实例级固定速率）
+- `github.com/charlienet/gadget/plugins/ratelimit/redis` —— 其 Redis 后端（GCRA 批发脚本）
+
+一句话差异：旧接口速率/突发为每次调用传参、结果用 `RateResult` 结构体表达；新模块速率在 Limiter 实例级固定、用 `(bool, error)` + `errors.As(*ExceededError)` 取 `RetryAfter`（不提供漏桶变体，恒定速率可用精确模式 `WithoutLocalLease` 近似）。以下示例保留供存量代码参考，不再演进。
+
 限流器（按名称隔离 key 空间）：
 
 ```go

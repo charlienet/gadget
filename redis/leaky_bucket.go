@@ -9,6 +9,8 @@ import (
 )
 
 // LeakyBucketOption 配置漏桶。
+//
+// Deprecated: 随 LeakyBucket 一并弃用，新模块不提供漏桶变体（见 LeakyBucket）。
 type LeakyBucketOption func(*leakyBucketConfig)
 
 type leakyBucketConfig struct {
@@ -17,12 +19,17 @@ type leakyBucketConfig struct {
 }
 
 // LeakyBucketConfig 是 LeakyBucket 的配置类型别名，供 WithFailPolicy 泛型参数使用。
+//
+// Deprecated: 随 LeakyBucket 一并弃用，新模块不提供漏桶变体（见 LeakyBucket）。
 type LeakyBucketConfig = leakyBucketConfig
 
 func defaultLeakyBucketConfig() leakyBucketConfig { return leakyBucketConfig{} }
 
 // WithBurst 设置漏桶容量（允许的最大排队请求数），默认等于速率。
 // burst=1 时不允许任何排队：同一时刻仅一个请求放行，其余拒绝。
+//
+// Deprecated: 本包漏桶选项，随 LeakyBucket 一并弃用；新模块的 ratelimit.WithBurst
+// 语义不同（令牌桶实例级突发，非漏桶容量），差异见 LeakyBucket。
 func WithBurst(n int) LeakyBucketOption {
 	return func(c *leakyBucketConfig) {
 		if n > 0 {
@@ -48,6 +55,12 @@ func WithBurst(n int) LeakyBucketOption {
 //	if !res.Allowed {
 //		// 排队超过桶容量：res.RetryAfter 为建议等待时长
 //	}
+//
+// Deprecated: 独立模块 github.com/charlienet/gadget/ratelimit（配合
+// github.com/charlienet/gadget/plugins/ratelimit/redis 后端）在 v1 明确不做漏桶
+// 变体，故无直接对等替代。需要恒定输出速率的场景，可用 ratelimit 精确模式
+// （ratelimit.WithoutLocalLease，每次判定直连后端）近似替代；或继续使用本实现
+// （仍可用，仅不再演进）。
 type LeakyBucket struct {
 	client    *redisClient
 	name      string
@@ -59,6 +72,8 @@ type LeakyBucket struct {
 // NewLeakyBucket 创建漏桶限流器（挂 *redisClient）。
 // name 语义与 NewRateLimiter 一致：非空按名称隔离限流 key 空间，
 // 空名称不隔离。
+//
+// Deprecated: 随 LeakyBucket 一并弃用，新模块无漏桶变体，差异见 LeakyBucket。
 func (rdb *redisClient) NewLeakyBucket(name string, opts ...LeakyBucketOption) *LeakyBucket {
 	cfg := defaultLeakyBucketConfig()
 	cfg.policy = FailOpen // 漏桶默认 FailOpen：保护性能力，宁可多放
@@ -161,12 +176,16 @@ func (lb *LeakyBucket) allow(ctx context.Context, key string, n int, per time.Du
 
 // Allow 检查请求是否放行：ratePerSec 为每秒输出速率（burst 默认 = ratePerSec）。
 // 被拒（Allowed=false）时 RetryAfter 为建议等待时长，可用 Wait 阻塞等待。
+//
+// Deprecated: 随 LeakyBucket 一并弃用，新模块无漏桶变体，差异见 LeakyBucket。
 func (lb *LeakyBucket) Allow(ctx context.Context, key string, ratePerSec int) (*RateResult, error) {
 	return lb.allow(ctx, key, ratePerSec, time.Second)
 }
 
 // AllowN 检查请求是否放行：per 时间窗口内允许 n 个请求
 // （interval = per/n，burst 默认 = n）。
+//
+// Deprecated: 随 LeakyBucket 一并弃用，新模块无漏桶变体，差异见 LeakyBucket。
 func (lb *LeakyBucket) AllowN(ctx context.Context, key string, n int, per time.Duration) (*RateResult, error) {
 	return lb.allow(ctx, key, n, per)
 }
@@ -175,6 +194,8 @@ func (lb *LeakyBucket) AllowN(ctx context.Context, key string, n int, per time.D
 // 被拒时等待 RetryAfter 后重试；RetryAfter 为 0 时最小等待 1ms 防忙循环。
 // Redis 服务失效时按兜底策略：FailOpen → 直接放行返回 nil；FailClosed →
 // 返回错误（不能吞错死循环等待）。
+//
+// Deprecated: 随 LeakyBucket 一并弃用，新模块无漏桶变体，差异见 LeakyBucket。
 func (lb *LeakyBucket) Wait(ctx context.Context, key string, ratePerSec int) error {
 	return waitLoop(ctx, func(ctx context.Context) (*RateResult, error) {
 		res, err := lb.allowRaw(ctx, key, ratePerSec, time.Second)
@@ -190,6 +211,8 @@ func (lb *LeakyBucket) Wait(ctx context.Context, key string, ratePerSec int) err
 }
 
 // WaitN 阻塞直到配额放行或 ctx 取消/超时（AllowN 的等待版）。
+//
+// Deprecated: 随 LeakyBucket 一并弃用，新模块无漏桶变体，差异见 LeakyBucket。
 func (lb *LeakyBucket) WaitN(ctx context.Context, key string, n int, per time.Duration) error {
 	return waitLoop(ctx, func(ctx context.Context) (*RateResult, error) {
 		res, err := lb.allowRaw(ctx, key, n, per)
