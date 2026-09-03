@@ -176,7 +176,8 @@ func TestStoreMeta(t *testing.T) {
 
 // TestCacheOptionIntegration exercises the store end-to-end through the cache
 // package (serialization + version wrapping).
-func TestCacheOptionIntegration(t *testing.T) {	opt, err := New(10)
+func TestCacheOptionIntegration(t *testing.T) {
+	opt, err := New(10)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
