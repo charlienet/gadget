@@ -2,13 +2,9 @@ module github.com/charlienet/gadget/plugins/cache/redis
 
 go 1.26
 
-// redis/test 子包（测试辅助）随本次收编迁入本地 redis 模块，尚未发布，
-// 用 replace 指向本地，保证 GOWORK=off 下消费模块测试可编译。
-replace github.com/charlienet/gadget/redis => ../../../redis
-
 require (
 	github.com/charlienet/gadget/cache v0.4.1
-	github.com/charlienet/gadget/redis v0.3.0
+	github.com/charlienet/gadget/redis v0.4.0
 	github.com/redis/go-redis/v9 v9.22.0
 	github.com/stretchr/testify v1.11.1
 )
