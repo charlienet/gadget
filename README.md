@@ -1,6 +1,6 @@
 # gadget
 
-一套 Go 基础设施组件集：常用模块的统一实现与充分测试，供个人项目跨项目复用，避免每写一个项目就重复实现一遍缓存、配置、消息、分布式锁等基础能力。
+一套 Go 基础设施组件集：常用模块的统一实现与充分测试，供个人项目跨项目复用，避免每写一个项目就重复实现一遍缓存、配置、消息、分布式锁、限流、熔断、选举、优雅关闭等基础能力。
 
 ## 模块总览
 
@@ -19,6 +19,10 @@
 | `github.com/charlienet/gadget/store` | 存储抽象 |
 | `github.com/charlienet/gadget/logger` | 日志组件：基于 slog 的默认实现与扩展能力 |
 | `github.com/charlienet/gadget/id_generator` | ID 生成器 |
+| `github.com/charlienet/gadget/breaker` | 通用三态熔断器（Closed/Open/HalfOpen），Execute 一站式与 TwoStep hook 形态，纯标准库零依赖 |
+| `github.com/charlienet/gadget/leader` | 基于分布式锁的 leader 选举状态机（LeaseDuration/RenewDeadline/RetryPeriod + 任期 term） |
+| `github.com/charlienet/gadget/lifecycle` | 进程优雅关闭编排（注册逆序串行、Component 幂等契约、错误聚合） |
+| `github.com/charlienet/gadget/retry` | context 感知重试执行器（退避 × 终止条件 × 错误分类） |
 
 ### 插件
 
