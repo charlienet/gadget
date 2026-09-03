@@ -5,6 +5,7 @@ use (
 	./cache
 	./config
 	./id_generator
+	./lock
 	./logger
 	./plugins/broker/kafka
 	./plugins/broker/nats
@@ -17,6 +18,7 @@ use (
 	./plugins/config/source/consul
 	./plugins/config/source/etcd
 	./plugins/config/source/nacos
+	./plugins/lock/redis
 	./plugins/store/consul
 	./plugins/store/file
 	./plugins/store/redis
