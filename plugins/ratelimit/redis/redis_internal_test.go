@@ -18,6 +18,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/charlienet/gadget/ratelimit"
+	r "github.com/charlienet/gadget/redis"
 )
 
 func TestNewNilPanics(t *testing.T) {
@@ -108,7 +109,7 @@ func TestIsUnavailable(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := isUnavailable(tc.err); got != tc.want {
+			if got := r.IsUnavailable(tc.err); got != tc.want {
 				t.Fatalf("isUnavailable(%v) = %v，期望 %v", tc.err, got, tc.want)
 			}
 		})

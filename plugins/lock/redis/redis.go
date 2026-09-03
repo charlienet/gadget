@@ -24,16 +24,13 @@ package redis
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"io"
-	"net"
-	"strings"
 	"time"
 
 	goredis "github.com/redis/go-redis/v9"
 
 	"github.com/charlienet/gadget/lock"
+	"github.com/charlienet/gadget/redis"
 )
 
 var _ lock.Backend = &Backend{}
@@ -50,7 +47,7 @@ type Backend struct {
 // Redis 服务不可用时返回 lock.ErrBackendUnavailable 哨兵错误。
 func (b *Backend) TryAcquire(ctx context.Context, key, token string, ttl time.Duration) (bool, error) {
 	ok, err := b.rdb.SetNX(ctx, key, token, ttl).Result()
-	if err != nil && isUnavailable(err) {
+	if err != nil && redis.IsUnavailable(err) {
 		return false, fmt.Errorf("%w: %v", lock.ErrBackendUnavailable, err)
 	}
 	return ok, err
@@ -69,7 +66,7 @@ var unlockScript = goredis.NewScript(`
 // 不匹配时静默返回 nil（锁已丢失/已被释放）。
 func (b *Backend) Release(ctx context.Context, key, token string) error {
 	_, err := unlockScript.Run(ctx, b.rdb, []string{key}, token).Int()
-	if err != nil && isUnavailable(err) {
+	if err != nil && redis.IsUnavailable(err) {
 		return fmt.Errorf("%w: %v", lock.ErrBackendUnavailable, err)
 	}
 	return err
@@ -88,40 +85,10 @@ var renewScript = goredis.NewScript(`
 func (b *Backend) Renew(ctx context.Context, key, token string, ttl time.Duration) (bool, error) {
 	n, err := renewScript.Run(ctx, b.rdb, []string{key}, token, ttl.Milliseconds()).Int()
 	if err != nil {
-		if isUnavailable(err) {
+		if redis.IsUnavailable(err) {
 			return false, fmt.Errorf("%w: %v", lock.ErrBackendUnavailable, err)
 		}
 		return false, err
 	}
 	return n == 1, nil
-}
-
-// isUnavailable 判定 err 是否为"Redis 服务不可用"类错误（连接/服务层故障）。
-// 与 github.com/charlienet/gadget/redis.IsUnavailable 逻辑一致，
-// 此处独立实现以避免引入对 gadget/redis 包的循环依赖。
-func isUnavailable(err error) bool {
-	if err == nil {
-		return false
-	}
-	// 调用方主动取消 / 自身 ctx 超时约束：不触发兜底
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return false
-	}
-	msg := err.Error()
-	if strings.Contains(msg, "redis: connection pool timeout") ||
-		strings.Contains(msg, "redis: client is closed") {
-		return true
-	}
-	var opErr *net.OpError
-	if errors.As(err, &opErr) {
-		return true
-	}
-	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
-		return true
-	}
-	var netErr net.Error
-	if errors.As(err, &netErr) && netErr.Timeout() {
-		return true
-	}
-	return false
 }

@@ -34,17 +34,15 @@ package redis
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
-	"net"
 	"strconv"
-	"strings"
 	"time"
 
 	goredis "github.com/redis/go-redis/v9"
 
 	"github.com/charlienet/gadget/ratelimit"
+	"github.com/charlienet/gadget/redis"
 )
 
 var (
@@ -114,7 +112,7 @@ func (b *Backend) Wholesale(ctx context.Context, key string, want int, spec rate
 		if e := ctx.Err(); e != nil {
 			return 0, 0, e
 		}
-		if isUnavailable(err) {
+		if redis.IsUnavailable(err) {
 			return 0, 0, fmt.Errorf("%w: %v", ratelimit.ErrBackendUnavailable, err)
 		}
 		return 0, 0, err // 命令级错误（含 Lua 运行错误）原样透传，不兜底
@@ -175,34 +173,4 @@ func parseSeconds(v any) (time.Duration, error) {
 		return 0, nil
 	}
 	return time.Duration(sec * float64(time.Second)), nil
-}
-
-// isUnavailable 判定 err 是否为"Redis 服务不可用"类错误（连接/服务层故障）。
-// 与 github.com/charlienet/gadget/redis.IsUnavailable 及 plugins/lock/redis
-// 的同名函数逻辑一致，此处独立实现以避免引入 gadget/redis 全家桶依赖。
-func isUnavailable(err error) bool {
-	if err == nil {
-		return false
-	}
-	// 调用方主动取消 / 自身 ctx 超时约束：不触发兜底
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return false
-	}
-	msg := err.Error()
-	if strings.Contains(msg, "redis: connection pool timeout") ||
-		strings.Contains(msg, "redis: client is closed") {
-		return true
-	}
-	var opErr *net.OpError
-	if errors.As(err, &opErr) {
-		return true
-	}
-	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
-		return true
-	}
-	var netErr net.Error
-	if errors.As(err, &netErr) && netErr.Timeout() {
-		return true
-	}
-	return false
 }
