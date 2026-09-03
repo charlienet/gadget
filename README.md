@@ -16,7 +16,6 @@
 | `github.com/charlienet/gadget/ratelimit` | 限流器：后端可插拔（`Backend` 批发通道 + `Memory()` 单机），默认"远程批发、本地零售"租约模式，支持精确模式（AllOrNothing 防蒸发），FailOpen/FailClosed 兜底 |
 | `github.com/charlienet/gadget/broker` | 消息代理抽象 |
 | `github.com/charlienet/gadget/config` | 配置管理：支持环境变量、文件与远程配置源（etcd、nacos、consul） |
-| `github.com/charlienet/gadget/store` | 存储抽象 |
 | `github.com/charlienet/gadget/logger` | 日志组件：基于 slog 的默认实现与扩展能力 |
 | `github.com/charlienet/gadget/id_generator` | ID 生成器 |
 | `github.com/charlienet/gadget/breaker` | 通用三态熔断器（Closed/Open/HalfOpen），Execute 一站式与 TwoStep hook 形态，纯标准库零依赖 |
@@ -35,7 +34,6 @@
 | `plugins/ratelimit/redis` | `ratelimit.Backend`（GCRA 批发脚本，BestEffort 租约 / AllOrNothing 精确双模式） |
 | `plugins/broker/kafka` `nats` `rabbitmq` `redis` | `broker` 消息代理 |
 | `plugins/config/source/consul` `etcd` `nacos` | `config` 远程配置源 |
-| `plugins/store/consul` `file` `redis` | `store` 存储后端 |
 
 示例：使用 Redis 作为缓存的远程 Store：
 

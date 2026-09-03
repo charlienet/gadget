@@ -123,9 +123,9 @@ case errors.As(err, &se):
 
 - cache 的 `Close` 会级联关闭其内部 localStore / remoteStore；
 - redis 的 `GracefulClose` 会级联关闭 `AddPrefix` 派生的全部子连接池；
-- 但上述级联仅对实现了 `interface{ Close() }`（无返回值）的内部依赖生效；gadget/store 约定的签名是 `Store.Close() error`，类型断言失败后该依赖被**静默跳过**——cache 并不会替你关掉一个 `store.Store`。
+- 但上述级联仅对实现了 `interface{ Close() }`（无返回值）的内部依赖生效；例如 redis 包客户端的签名是 `Close() error`，类型断言失败后该依赖被**静默跳过**——cache 并不会替你关掉一个 redis 客户端。
 
-结论：需要被关闭的底层依赖（store、redis 客户端等）**一律独立 `Register`**，不要指望容器组件代为关闭。若容器与内部依赖同时注册形成双路径关闭，本包不检测也不去重，由 Component 幂等契约兜底（实害为零，只是多一次调用）。
+结论：需要被关闭的底层依赖（redis 客户端等）**一律独立 `Register`**，不要指望容器组件代为关闭。若容器与内部依赖同时注册形成双路径关闭，本包不检测也不去重，由 Component 幂等契约兜底（实害为零，只是多一次调用）。
 
 ## 注册顺序要点
 

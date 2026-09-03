@@ -24,10 +24,10 @@
 //   - redis 的 GracefulClose 确实会级联关闭由 AddPrefix 派生出的全部子连接池
 //     （见 redis 包 GracefulClose 的子池级联循环处）。
 //   - 但上述级联仅对实现了 `interface{ Close() }`（无返回值）的内部依赖生效；
-//     gadget/store 包约定的签名是 `Store.Close() error`，二者不兼容，类型断言
-//     失败后该依赖会被静默跳过——也就是说 cache 并不会替你关掉一个 store.Store。
+//     例如 redis 包客户端的签名是 `Close() error`，二者不兼容，类型断言
+//     失败后该依赖会被静默跳过——也就是说 cache 并不会替你关掉一个 redis 客户端。
 //
-// 结论：需要被关闭的底层依赖（store、redis 客户端等）一律独立 Register，不要
+// 结论：需要被关闭的底层依赖（redis 客户端等）一律独立 Register，不要
 // 指望容器组件代为关闭；万一出现重复关闭，由 [Component] 的幂等契约兜底。
 //
 // # 触发路径
