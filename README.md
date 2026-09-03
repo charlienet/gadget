@@ -1,6 +1,6 @@
 # gadget
 
-一套 Go 基础设施组件集：常用模块的统一实现与充分测试，供个人项目跨项目复用，避免每写一个项目就重复实现一遍缓存、配置、消息、分布式锁、限流、熔断、选举、优雅关闭等基础能力。
+一套 Go 基础设施组件集：常用模块的统一实现与充分测试，供个人项目跨项目复用，避免每写一个项目就重复实现一遍缓存、消息、分布式锁、限流、熔断、选举、优雅关闭等基础能力。
 
 ## 模块总览
 
@@ -15,7 +15,6 @@
 | `github.com/charlienet/gadget/lock` | 分布式锁：基于 `Backend` 抽象（TryAcquire/Release/Renew），token 防误删/误续，后端不可用时按 FailPolicy（FailClosed/FailOpen）兜底 |
 | `github.com/charlienet/gadget/ratelimit` | 限流器：后端可插拔（`Backend` 批发通道 + `Memory()` 单机），默认"远程批发、本地零售"租约模式，支持精确模式（AllOrNothing 防蒸发），FailOpen/FailClosed 兜底 |
 | `github.com/charlienet/gadget/broker` | 消息代理抽象 |
-| `github.com/charlienet/gadget/config` | 配置管理：支持环境变量、文件与远程配置源（etcd、nacos、consul） |
 | `github.com/charlienet/gadget/logger` | 日志组件：基于 slog 的默认实现与扩展能力 |
 | `github.com/charlienet/gadget/id_generator` | ID 生成器 |
 | `github.com/charlienet/gadget/breaker` | 通用三态熔断器（Closed/Open/HalfOpen），Execute 一站式与 TwoStep hook 形态，纯标准库零依赖 |
@@ -33,7 +32,6 @@
 | `plugins/lock/redis` | `lock.Backend` + `lock.Renewer`（SETNX + Lua 原子释放/续期） |
 | `plugins/ratelimit/redis` | `ratelimit.Backend`（GCRA 批发脚本，BestEffort 租约 / AllOrNothing 精确双模式） |
 | `plugins/broker/kafka` `nats` `rabbitmq` `redis` | `broker` 消息代理 |
-| `plugins/config/source/consul` `etcd` `nacos` | `config` 远程配置源 |
 
 示例：使用 Redis 作为缓存的远程 Store：
 
@@ -50,6 +48,15 @@ if err != nil {
 }
 c := cache.New(cache.WithStore(cacheredis.New(rdb)))
 ```
+
+### 废弃与归档模块（abandoned）
+
+以下模块方向已永久关闭，代码已物理删除（可从 git 历史找回），已发布 tag 一律原地封存、不发新版：
+
+| 模块 | 处置说明 |
+|---|---|
+| `store` + `plugins/store/consul` `file` `redis` | 存储抽象，代码已物理移除；已发布的 `store/*`、`plugins/store/*` tag 原地封存 |
+| `config` + `plugins/config/source/consul` `etcd` `nacos` | 配置管理为空壳实现、从未有功能，该赛道无生态位；配置管理需求直接使用 koanf / viper 等成熟库，本库永久关闭该方向；已发布的 `config/*` 与 `plugins/config/*` tag（共 11 个）原地封存不发新版 |
 
 ## 测试
 
@@ -78,6 +85,6 @@ func TestSomething(t *testing.T) {
 
 ## 仓库结构与开发
 
-- 多模块工作区：根目录 `go.work` 纳入全部 29 个模块；`go build ./...` 默认走 workspace
+- 多模块工作区：根目录 `go.work` 纳入全部 21 个模块；`go build ./...` 默认走 workspace
 - **发布前必须用 `GOWORK=off` 验证单模块**（workspace 会掩盖模块图问题）：`GOWORK=off go build ./... && go vet ./... && go test ./...`
 - tag 规范：`<模块相对路径>/v<semver>`（如 `cache/v0.4.1`、`plugins/cache/redis/v0.1.11`），tag 打在评审通过的提交上

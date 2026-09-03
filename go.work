@@ -4,7 +4,6 @@ use (
 	./breaker
 	./broker
 	./cache
-	./config
 	./id_generator
 	./leader
 	./lifecycle
@@ -18,9 +17,6 @@ use (
 	./plugins/cache/freecache
 	./plugins/cache/gcache
 	./plugins/cache/redis
-	./plugins/config/source/consul
-	./plugins/config/source/etcd
-	./plugins/config/source/nacos
 	./plugins/lock/redis
 	./plugins/ratelimit/redis
 	./ratelimit
