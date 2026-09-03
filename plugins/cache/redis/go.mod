@@ -5,6 +5,7 @@ go 1.26
 require (
 	github.com/charlienet/gadget/cache v0.4.1
 	github.com/charlienet/gadget/redis v0.4.0
+	github.com/charlienet/gadget/retry v0.1.0
 	github.com/redis/go-redis/v9 v9.22.0
 	github.com/stretchr/testify v1.11.1
 )

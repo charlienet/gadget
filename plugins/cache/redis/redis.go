@@ -9,6 +9,7 @@ import (
 
 	"github.com/charlienet/gadget/cache"
 	"github.com/charlienet/gadget/redis"
+	"github.com/charlienet/gadget/retry"
 )
 
 const (
@@ -30,6 +31,8 @@ var (
 type redis_store struct {
 	rdb       redis.Client
 	ttlFactor int
+	retryOn   bool
+	retryOpts []retry.Option
 }
 
 func new(rdb redis.Client, opts ...option) cache.Store {
@@ -47,8 +50,39 @@ func (r *redis_store) Initialize(opt cache.Options) {
 	}
 }
 
+// do 是所有单次 Redis 命令的操作级重试汇聚点（opt-in）。
+// retryOn 关闭时直接执行 fn（行为与未接入重试完全一致）；开启时套用插件默认
+// 策略（3 次尝试 + EqualJitter 指数退避 + 仅 IsUnavailable 类错误可重试），
+// 并在默认之后追加用户自定义 opts 以允许覆盖。
+// 默认退避在每次调用时新建（EqualJitter(Exponential(...)) 返回全新实例），
+// 因此可被多个 goroutine 并发安全使用；用户若传入共享 Backoff 实例则不保证并发安全。
+//
+// 与熔断的分层关系：本重试位于熔断器（gadget/redis breakerHook）之外/之上层，
+// L3 退避累计时长可跨过 breaker 的冷却窗口，给其在重试间隙闭合的机会；
+// breaker 处于 Open 态时快速失败的错误属 IsUnavailable 类，因此可被本重试重试。
+func (r *redis_store) do(ctx context.Context, fn func(ctx context.Context) error) error {
+	if !r.retryOn {
+		return fn(ctx)
+	}
+
+	opts := make([]retry.Option, 0, 3+len(r.retryOpts))
+	opts = append(opts,
+		retry.WithMaxAttempts(3),
+		retry.WithBackoff(retry.EqualJitter(retry.Exponential(50*time.Millisecond, 2, time.Second))),
+		retry.WithRetryable(redis.IsUnavailable),
+	)
+	opts = append(opts, r.retryOpts...)
+
+	return retry.Do(ctx, fn, opts...)
+}
+
 func (r *redis_store) Get(ctx context.Context, key string) ([]byte, bool, error) {
-	data, err := r.rdb.Get(ctx, key).Bytes()
+	var data []byte
+	err := r.do(ctx, func(ctx context.Context) error {
+		var e error
+		data, e = r.rdb.Get(ctx, key).Bytes()
+		return e
+	})
 	if err != nil {
 		if errors.Is(err, redis.NotFound) {
 			return []byte{}, false, nil
@@ -61,7 +95,11 @@ func (r *redis_store) Get(ctx context.Context, key string) ([]byte, bool, error)
 }
 
 func (r *redis_store) Put(ctx context.Context, key string, data []byte, expireSeconds int) error {
-	return r.rdb.Set(ctx, key, data, r.ttl(expireSeconds)).Err()
+	ttl := r.ttl(expireSeconds)
+
+	return r.do(ctx, func(ctx context.Context) error {
+		return r.rdb.Set(ctx, key, data, ttl).Err()
+	})
 }
 
 // ttl 计算写入 TTL：
@@ -83,7 +121,9 @@ func (r *redis_store) ttl(expireSeconds int) time.Duration {
 }
 
 func (r *redis_store) Delete(ctx context.Context, key ...string) error {
-	return r.rdb.Del(ctx, key...).Err()
+	return r.do(ctx, func(ctx context.Context) error {
+		return r.rdb.Del(ctx, key...).Err()
+	})
 }
 
 // GetMulti 批量读取（MGET）。miss 的 key 不出现在返回的 map 中，
@@ -93,7 +133,12 @@ func (r *redis_store) GetMulti(ctx context.Context, keys ...string) (map[string]
 		return map[string][]byte{}, nil
 	}
 
-	vals, err := r.rdb.MGet(ctx, keys...).Result()
+	var vals []interface{}
+	err := r.do(ctx, func(ctx context.Context) error {
+		var e error
+		vals, e = r.rdb.MGet(ctx, keys...).Result()
+		return e
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -137,7 +182,9 @@ func (r *redis_store) SetMulti(ctx context.Context, items map[string][]byte, exp
 		pairs = append(pairs, key, val)
 	}
 
-	return r.rdb.MSet(ctx, pairs...).Err()
+	return r.do(ctx, func(ctx context.Context) error {
+		return r.rdb.MSet(ctx, pairs...).Err()
+	})
 }
 
 // DeletePattern 删除所有匹配 glob pattern 的 key（pattern 经业务前缀拼接，
@@ -158,8 +205,14 @@ func (r *redis_store) DeletePattern(ctx context.Context, pattern string) error {
 
 	var cursor uint64
 	for {
-		keys, next, err := r.rdb.Scan(ctx, cursor, fullPattern, scanBatchSize).Result()
-		if err != nil {
+		var keys []string
+		var next uint64
+		// 只包裹 Scan 单点：重试期间 cursor 尚未推进，语义安全。
+		if err := r.do(ctx, func(ctx context.Context) error {
+			var e error
+			keys, next, e = r.rdb.Scan(ctx, cursor, fullPattern, scanBatchSize).Result()
+			return e
+		}); err != nil {
 			return err
 		}
 
@@ -172,7 +225,10 @@ func (r *redis_store) DeletePattern(ctx context.Context, pattern string) error {
 				toDelete = append(toDelete, k)
 			}
 
-			if err := r.rdb.Del(ctx, toDelete...).Err(); err != nil {
+			// 只包裹批量 Del 单点：不包裹整个游标循环（保留部分成功语义）。
+			if err := r.do(ctx, func(ctx context.Context) error {
+				return r.rdb.Del(ctx, toDelete...).Err()
+			}); err != nil {
 				return err
 			}
 		}

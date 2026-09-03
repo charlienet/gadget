@@ -18,6 +18,8 @@ github.com/charlienet/gadget/cache v0.4.1 h1:/b5joaf+LsHcmrjqQ/jCCSyw7kJylCTgjBj
 github.com/charlienet/gadget/cache v0.4.1/go.mod h1:LWGCwtKgKzIM7NBaSUAvzcnoMn5mCx3fL/gir/uzcHw=
 github.com/charlienet/gadget/redis v0.4.0 h1:MBFfZnQOMXkoh7L3tWXzKkkRoW38kK2D0CO08YJ0AYw=
 github.com/charlienet/gadget/redis v0.4.0/go.mod h1:58FBEWxdPkqrIQXxQOfvzmHiyQWAqu9LTOAqy6CYsW8=
+github.com/charlienet/gadget/retry v0.1.0 h1:G89ADCZ/3kyjiDbJ5/pizNbxjM7KuJ4O2JTIJZP/dWw=
+github.com/charlienet/gadget/retry v0.1.0/go.mod h1:waIa0yYJ5tJkdfPEBUiNsBQe8QxKRe7th7A1n5E+Dd4=
 github.com/cloudwego/base64x v0.1.6 h1:t11wG9AECkCDk5fMSoxmufanudBtJ+/HemLstXDLI2M=
 github.com/cloudwego/base64x v0.1.6/go.mod h1:OFcloc187FXDaYHvrNIjxSe8ncn0OOM8gEHfghB2IPU=
 github.com/creack/pty v1.1.9/go.mod h1:oKZEueFk5CKHvIhNR5MUki03XCEU+Q6VDXinZuGJ33E=
