@@ -50,12 +50,12 @@ import (
 // at 1024 shards) and leaves HardMaxCacheSize at 0 (unlimited). Our defaults
 // cap the hard limit at 256MB and keep the pre-allocation around 37MB.
 const (
-	defaultHardMaxCacheSizeMB = 256          // hard memory limit in MB; 0 = unlimited
-	defaultShards             = 128          // must be a power of two
-	defaultLifeWindow         = time.Minute  // global entry lifetime
-	defaultCleanWindow        = time.Minute  // background cleanup interval
-	defaultMaxEntrySize       = 500          // bytes
-	defaultMaxEntriesInWindow = 585 * 128    // ~37MB pre-allocation (entries x entry size)
+	defaultHardMaxCacheSizeMB = 256         // hard memory limit in MB; 0 = unlimited
+	defaultShards             = 128         // must be a power of two
+	defaultLifeWindow         = time.Minute // global entry lifetime
+	defaultCleanWindow        = time.Minute // background cleanup interval
+	defaultMaxEntrySize       = 500         // bytes
+	defaultMaxEntriesInWindow = 585 * 128   // ~37MB pre-allocation (entries x entry size)
 )
 
 // bigcache_store adapts a *bigcache.BigCache to cache.Store.
