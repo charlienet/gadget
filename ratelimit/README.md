@@ -30,7 +30,7 @@ go get github.com/charlienet/gadget/ratelimit@latest
 | 全局速率 | 长期严格受 Spec 约束 | 严格逐次 |
 | 瞬时突发 | **≤ (实例数+1)×Burst**（见下方披露） | ≤ Burst |
 | 授予语义 | `GrantBestEffort`（能租多少租多少） | `GrantAllOrNothing`（不足额拒绝且**不扣减**，配额/计费不可蒸发场景） |
-| 后台协程 | 1 个闲置回收 sweeper | 无 |
+| 后台协程 | 1 个闲置回收 sweeper | Memory 后端且 `IdleRetention>0`（默认 60s）时同样启动 1 个（回收桶条目）；其余后端无 |
 
 本地租约账本是**纯存量**：`remain` 只能被批发 granted 注入、被 Allow 扣减，不存在任何按速率的自补充——速率语义 100% 由 Backend 的桶决定，杜绝"本地+远端双重发币"导致的速率翻倍。
 
@@ -131,7 +131,7 @@ type Backend interface {
 | `WithLeaseInterval(d)` | `1s` | `d<=0` 忽略 | 目标批发间隔（want 公式的 d） |
 | `WithLeaseRatio(r)` | `0.5` | `r<=0` 或 `r>1` 忽略 | 批量调节系数：小省远端、大贴精确 |
 | `WithBackendTimeout(d)` | `min(LeaseInterval, 5s)` | `d<=0` 忽略 | core 内部批发 ctx 超时（归 core 非插件） |
-| `WithIdleRetention(d)` | `60s` | `d<=0` 忽略 | 本地账本闲置回收阈值；随 `Spec.IdleRetention` 下发（Memory 用，GCRA 类忽略） |
+| `WithIdleRetention(d)` | `60s` | `d<=0` 忽略 | 闲置回收阈值，双重语义：本地账本条目 + Memory 后端桶条目；随 `Spec.IdleRetention` 下发（Memory 用，GCRA 类忽略） |
 | `WithFailPolicy(p)` | `FailOpen` | — | 后端不可用兜底；`FailOpen = iota` 零值即默认放行 |
 | `WithLogger(l)` | `slog.Default()` | `nil` 忽略 | FailOpen 兜底等内部事件记录 |
 | `WithClock(c)` | 系统时钟 | `nil` 忽略 | `Clock{ Now() time.Time }`，测试免 sleep |
@@ -146,8 +146,8 @@ type Backend interface {
 - 批发在途期间，同 key 存量充足的热路径请求与其他 key 的请求均不被阻塞；
 - in-flight 合并为自研最小实现（per-key pending + chan 广播），零第三方依赖；
 - leader 批发用内部 ctx（`context.WithTimeout(context.Background(), BackendTimeout)`），单个请求 ctx 取消不殃及共享结果的其他请求；
-- sweeper 为单后台协程（`Once + stopChan + WaitGroup` 受控退出，对齐 cache 先例，不加 recover），删除条目前持有目标条目锁并复检 `idleAt`（宁可延后一轮，不误删在途/刚触碰的条目）；
-- 闲置回收仅租约模式需要；Memory 后端不建后台协程（桶在 Wholesale 时惰性判 idle 并重置）。
+- sweeper 为单后台协程（`Once + stopChan + WaitGroup` 受控退出，对齐 cache 先例，不加 recover），删除条目在条目锁临界区内复检 `idleAt`/`pending` 后原子删除（宁可延后一轮，不误删在途/刚触碰的条目）；
+- Memory 后端桶条目为双层回收：`Wholesale` 访问路径惰性判 idle 即删除重建 + 由宿主 Limiter 的 sweepLoop 同一 tick 驱动 `reapIdle` 批量回收冷 key（后端自身不建协程，生命周期随 Limiter.Close）；精确模式下当后端为 Memory 且 `IdleRetention>0` 时该 sweepLoop 同样启动。
 
 ## 明确不做
 
