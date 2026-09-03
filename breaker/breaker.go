@@ -8,6 +8,7 @@
 package breaker
 
 import (
+	"fmt"
 	"sync"
 	"time"
 )
@@ -160,6 +161,23 @@ func (b *Breaker) Fail(err error) {
 		b.lastFailTime = time.Now()
 		b.lastErr = err
 	}
+}
+
+// probePanicked 处理半开探测 fn panic（由 [Execute] 在 recover 后调用）：
+// 语义等价于探测失败——回 Open、重置冷却并释放单飞标记，使熔断器不会因
+// 标记永久滞留而死锁；lastErr 记录 panic 值，冷却期内 Allow 按其快速失败。
+// Closed / Open 下无探测标记可言，不做任何计数（panic 不污染连续失败计数）。
+func (b *Breaker) probePanicked(p any) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if b.state != HalfOpen {
+		return
+	}
+	b.state = Open
+	b.lastFailTime = time.Now()
+	b.lastErr = fmt.Errorf("breaker: half-open probe panicked: %v", p)
+	b.halfOpenTrial = false
 }
 
 // Report 按 Classifier 对一次调用结果三分类记录：

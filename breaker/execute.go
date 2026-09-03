@@ -6,9 +6,10 @@ package breaker
 // fn 不会被执行。fn 返回后自动 Report(err)，消除 TwoStep 的探测泄漏坑
 // （Allow 放行后忘记 Success/Fail/Report）。
 //
-// fn panic 直接穿透、不计数（与 retry.Do 哲学一致，本包不做 recover）。
-// 注意：半开探测中 panic 会滞留探测标记（单飞被占用，后续 Allow 持续
-// 拒绝），调用方应自行保证 fn 不 panic。
+// fn panic 原样重新抛出给调用方（与 retry.Do 哲学一致，本包不吞 panic，
+// 也不改变正常路径的返回值语义）。唯一差别：若 panic 发生在半开探测中，
+// 抛出前先释放单飞标记并按探测失败语义回 Open（重置冷却），确保状态机
+// 不会因标记永久滞留而死锁。Closed 状态下的 panic 不做任何计数。
 func Execute[T any](b *Breaker, fn func() (T, error)) (T, error) {
 	if err := b.Allow(); err != nil {
 		var zero T
@@ -23,6 +24,13 @@ func Execute[T any](b *Breaker, fn func() (T, error)) (T, error) {
 	defer func() {
 		if returned {
 			b.Report(err)
+			return
+		}
+		// returned == false 只可能是 fn panic 中断执行（正常返回路径已置 true）：
+		// 先释放半开单飞标记（等价探测失败），再把 panic 原样重抛，不吞 panic。
+		if r := recover(); r != nil {
+			b.probePanicked(r)
+			panic(r)
 		}
 	}()
 

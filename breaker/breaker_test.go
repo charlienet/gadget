@@ -2,6 +2,8 @@ package breaker
 
 import (
 	"errors"
+	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -372,32 +374,46 @@ func TestExecutePanic(t *testing.T) {
 	}
 }
 
-// TestExecutePanicHalfOpenLeak 锁定文档化行为：半开探测中 fn panic
-// 会滞留探测标记（后续 Allow 持续拒绝），调用方自行 Report 可解除。
-func TestExecutePanicHalfOpenLeak(t *testing.T) {
+// TestExecutePanicHalfOpenReleasesTrial 是半开探测 panic 泄漏的回归测试：
+// fn panic 必须原样向上传播，同时释放单飞标记并按探测失败语义回 Open
+// （重置冷却）；冷却结束后能再次进入半开探测，状态机不死锁。
+// （旧行为：标记永久滞留，后续 Allow 持续拒绝。）
+func TestExecutePanicHalfOpenReleasesTrial(t *testing.T) {
 	b := New(WithThreshold(1), WithCooldown(30*time.Millisecond))
 	b.Report(errors.New("boom")) // Open
 	time.Sleep(40 * time.Millisecond)
 
+	// 冷却结束：Execute 内 Allow 放行探测（占用单飞标记），fn panic
+	var recovered any
 	func() {
-		defer func() { _ = recover() }()
-		_, _ = Execute(b, func() (int, error) { panic("boom") })
+		defer func() { recovered = recover() }()
+		_, _ = Execute(b, func() (int, error) { panic("probe boom") })
 	}()
+	if recovered == nil {
+		t.Fatal("fn panic 必须原样传播给调用方，不得吞掉")
+	}
+	if got := fmt.Sprint(recovered); got != "probe boom" {
+		t.Fatalf("panic 值应原样传递，got %q", got)
+	}
 
-	if got := b.State(); got != HalfOpen {
-		t.Fatalf("探测 panic 后应仍为 HalfOpen，got %v", got)
+	// panic 等价探测失败：回 Open 并重置冷却
+	if got := b.State(); got != Open {
+		t.Fatalf("探测 panic 后应回 Open，got %v", got)
 	}
 	if err := b.Allow(); err == nil {
-		t.Fatal("探测标记滞留：后续 Allow 应持续拒绝（文档化泄漏，fn 应保证不 panic）")
+		t.Fatal("刚回 Open、冷却未结束，应快速失败")
+	} else if !strings.Contains(err.Error(), "probe boom") {
+		t.Fatalf("快速失败应返回记录 panic 值的 lastErr，got %v", err)
 	}
 
-	// 调用方感知 panic 并自行补报后可恢复
-	b.Report(nil)
-	if got := b.State(); got != Closed {
-		t.Fatalf("补报后应恢复 Closed，got %v", got)
-	}
+	// 冷却结束后必须再次放行探测（修复前：标记滞留导致永久拒绝）
+	time.Sleep(40 * time.Millisecond)
 	if err := b.Allow(); err != nil {
-		t.Fatalf("恢复后应正常放行，got %v", err)
+		t.Fatalf("冷却结束应再次放行探测（标记未释放即死锁），got %v", err)
+	}
+	b.Report(nil) // 探测成功 → 闭合
+	if got := b.State(); got != Closed {
+		t.Fatalf("探测成功应闭合恢复，got %v", got)
 	}
 }
 

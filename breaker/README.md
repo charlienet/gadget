@@ -120,7 +120,7 @@ b := breaker.New(breaker.WithClassifier(redis.IsUnavailable))
 
 ## panic 注意事项
 
-`Execute` 的 fn panic 时**直接穿透、不做任何计数**（与 `retry.Do` 哲学一致，本包不 recover）。但注意：若 panic 发生在**半开探测**中，探测标记（单飞）会因未上报而滞留，后续 `Allow` 持续拒绝。调用方应自行保证 fn 不 panic；无法保证时在捕获 panic 后自行补一次 `b.Report(...)` 解除泄漏。
+`Execute` 的 fn panic 时**原样重新抛给调用方**（与 `retry.Do` 哲学一致，本包不吞 panic），且 **Closed 状态下不做任何计数**。唯一例外处理：**半开探测**中的 panic 在抛出前先释放单飞标记、按探测失败语义回 Open（重置冷却计时）——熔断器不会因标记永久滞留而死锁，冷却结束后照常放行下一次探测。TwoStep 场景下调用方自行 recover 时，请记得补一次 `b.Report(...)` 解除标记。
 
 ## 为什么全部方法不带 ctx
 
