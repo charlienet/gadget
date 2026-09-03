@@ -3,7 +3,8 @@ module github.com/charlienet/gadget/plugins/cache/redis
 go 1.26
 
 require (
-	github.com/charlienet/gadget/cache v0.4.1
+	github.com/alicebob/miniredis v2.5.0+incompatible
+	github.com/charlienet/gadget/cache v0.5.0
 	github.com/charlienet/gadget/redis v0.4.0
 	github.com/charlienet/gadget/retry v0.1.0
 	github.com/redis/go-redis/v9 v9.22.0
@@ -12,7 +13,6 @@ require (
 
 require (
 	github.com/alicebob/gopher-json v0.0.0-20230218143504-906a9b012302 // indirect
-	github.com/alicebob/miniredis v2.5.0+incompatible // indirect
 	github.com/bytedance/gopkg v0.1.3 // indirect
 	github.com/bytedance/sonic v1.15.2 // indirect
 	github.com/bytedance/sonic/loader v0.5.1 // indirect

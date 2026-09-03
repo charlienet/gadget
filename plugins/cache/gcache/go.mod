@@ -4,7 +4,7 @@ go 1.26
 
 require (
 	github.com/bluele/gcache v0.0.2
-	github.com/charlienet/gadget/cache v0.4.1
+	github.com/charlienet/gadget/cache v0.5.0
 )
 
 require (

@@ -3,7 +3,7 @@ module github.com/charlienet/gadget/plugins/cache/freecache
 go 1.26
 
 require (
-	github.com/charlienet/gadget/cache v0.4.1
+	github.com/charlienet/gadget/cache v0.5.0
 	github.com/coocood/freecache v1.2.4
 	github.com/stretchr/testify v1.11.1
 )
