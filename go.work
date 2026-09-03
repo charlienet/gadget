@@ -23,5 +23,6 @@ use (
 	./plugins/store/file
 	./plugins/store/redis
 	./redis
+	./retry
 	./store
 )
