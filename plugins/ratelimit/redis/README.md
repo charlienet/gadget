@@ -31,10 +31,12 @@ limiter := ratelimit.New(redislimit.New(rdb),
 	ratelimit.WithRate(100, time.Minute),
 	ratelimit.WithBurst(200),
 )
-defer limiter.Close() // 经本包 Close 释放 rdb 连接资源
+ok, err := limiter.Allow(ctx, "user:42", 1) // 批发经 Redis GCRA 脚本，本地租约期内零网络
 
-ok, err := limiter.Allow(ctx, "user:42", 1)
+defer limiter.Close() // ⚠ 会经本包 Close 关闭注入的 rdb（见下方生命周期警示）
 ```
+
+> **client 生命周期警示**：本包实现 `io.Closer`，`ratelimit.Limiter.Close()`（含其对本包 `Close()` 的转调）**会关闭注入的 go-redis client**。若该 client 被多个组件共享（cache / lock / 其他 limiter 实例等），不要依赖 `Limiter.Close` 释放连接——应由组合根（main / 依赖注入容器）统一管理 client 生命周期；需要由 Limiter 负责释放时，请给它独配的 client 实例。
 
 多实例部署时各实例创建相同配置的 Limiter 即共享同一份 Redis 全局配额。租约模式下全局瞬时突发上界为 **(实例数+1)×Burst**（各实例本地租约存量叠加远端桶容量），详见 `ratelimit` 包 doc 的披露；要求全局严格配额用 `ratelimit.WithoutLocalLease()`。
 

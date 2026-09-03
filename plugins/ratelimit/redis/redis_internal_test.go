@@ -200,6 +200,42 @@ func TestSentinelNotExportedTwice(t *testing.T) {
 	}
 }
 
+// TestAllOrNothingRetryAfterExactFormula 验证 N-E：AllOrNothing 且
+// remaining < 1 时，拒绝分支按"凑够 cost 个"的精确公式给 retry_after，
+// 而非旧顺序（remaining<1 先判）按"凑够 1 个"的低估值。
+//
+// 参数 rate=1/10s（emission_interval=10s）、预置 remaining≈0.3、cost=5：
+//   - 正确行为：retry_after ≈ (5-0.3)×10s = 47s，断言落 [40s, 50s]
+//     （即 [凑够4个, 凑够5个]，留时间漂移余量）；
+//   - 修复前行为：retry_after ≈ (1-0.3)×10s = 7s → 必然落在窗外，测试变红。
+//
+// 同时断言拒绝零副作用：TAT 值与永不过期状态原样保留（不推进、不 SET）。
+func TestAllOrNothingRetryAfterExactFormula(t *testing.T) {
+	rdb := newRealRedis(t)
+	ctx := context.Background()
+	key := scriptKey(t, rdb, "aon-retry")
+
+	const (
+		rate  = 1
+		burst = 5
+	)
+	per := 10 * time.Second
+	initTAT := serverTat(t, rdb, burst, rate, per, 0.3)
+	require.NoError(t, rdb.Set(ctx, key, initTAT, 0).Err())
+
+	res := runScript(t, wholesaleScript, rdb, key, burst, rate, per.Seconds(), 5, modeAllOrNothing)
+	require.Equal(t, int64(0), res.granted, "不足额必须拒绝")
+	assert.GreaterOrEqual(t, res.retryAfter, 40.0, "retry_after 不得低于凑够 4 个令牌的时长（低估即旧行为）")
+	assert.LessOrEqual(t, res.retryAfter, 50.0, "retry_after 不得超过凑够 5 个令牌的时长")
+
+	stored, err := rdb.Get(ctx, key).Result()
+	require.NoError(t, err)
+	assert.Equal(t, initTAT, stored, "拒绝后 TAT 必须原样保留（不推进、不 SET）")
+	ttl, err := rdb.TTL(ctx, key).Result()
+	require.NoError(t, err)
+	assert.Equal(t, time.Duration(-1), ttl, "拒绝不得重设过期（预置为永不过期）")
+}
+
 // --- BestEffort 对照测试（真实 wholesaleScript，floor 回归可被拦截）---
 
 // 与外部集成测试同源的 REDIS_URL 守卫（N4：不 import gadget/redis 的 test 包）。

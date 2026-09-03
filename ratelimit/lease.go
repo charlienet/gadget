@@ -136,6 +136,11 @@ func (l *Limiter) leaderBatch(ent *entry, p *pendingBatch, ctx context.Context, 
 	// 不随单个请求 ctx 取消而殃及共享者。
 	p.res = l.wholesale(key)
 
+	// N-F：同一批发结果的 FailOpen 兜底日志只由 leader 记一条，且在
+	// ent.mu 临界区之外——followers 共享同一错误返回（ErrFailOpen 可判，
+	// 处置归应用层），不重复刷日志（防故障期日志风暴）。
+	l.logFailOpenFallback(ctx, p.res.err, key, n)
+
 	ent.mu.Lock()
 	defer ent.mu.Unlock()
 
@@ -199,14 +204,26 @@ func (l *Limiter) wholesale(key string) batchResult {
 //   - 含 ErrBackendUnavailable → 按 FailPolicy：Open 全员放行并返回
 //     双可判包装错误；Closed 全员拒绝返回包装错误；
 //   - 其余错误（命令级、内部批发 ctx 超时等）原样透传、不进兜底。
+//
+// 本函数**不记日志**（N-F）：兜底事件日志由批发发起方（leaderBatch /
+// strictAllow）在锁外统一记录——同一批发结果恰一条，followers 共享裁决
+// 时不重复输出（防故障期日志风暴）；错误返回值与双可判语义不变。
 func (l *Limiter) triageBackendErr(ctx context.Context, err error, key string, n int) (bool, error) {
 	if errors.Is(err, ErrBackendUnavailable) {
 		if l.policy == FailOpen {
-			l.logger.WarnContext(ctx, "后端不可用，按 FailOpen 兜底放行",
-				"key", key, "n", n, "err", err)
 			return true, wrapFailOpen(err)
 		}
 		return false, wrapUnavailable(err)
 	}
 	return false, err
+}
+
+// logFailOpenFallback 在后端不可用错误即将按 FailOpen 兜底放行时记录一条
+// Warn。调用约束：批发发起方（leaderBatch 结算前 / strictAllow 独立批发）、
+// ent.mu 临界区之外——同一批发结果恰记录一次。
+func (l *Limiter) logFailOpenFallback(ctx context.Context, err error, key string, n int) {
+	if err != nil && errors.Is(err, ErrBackendUnavailable) && l.policy == FailOpen {
+		l.logger.WarnContext(ctx, "后端不可用，按 FailOpen 兜底放行",
+			"key", key, "n", n, "err", err)
+	}
 }

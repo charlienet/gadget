@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -855,6 +856,120 @@ func TestExecuteFailOpenRunsFnButPerceivable(t *testing.T) {
 	}
 	if !errors.Is(err, ErrFailOpen) {
 		t.Fatalf("兜底放行应可感知，got %v", err)
+	}
+}
+
+// --- FailOpen 兜底日志纪律（N-F）：同一批发结果仅 leader 记一条、锁外 ---
+
+// capturingHandler 是极简 slog.Handler：计数 Warn 及以上级别记录。
+type capturingHandler struct {
+	mu      sync.Mutex
+	warns   int
+	records []string
+}
+
+func (h *capturingHandler) Enabled(context.Context, slog.Level) bool { return true }
+
+func (h *capturingHandler) Handle(_ context.Context, r slog.Record) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if r.Level >= slog.LevelWarn {
+		h.warns++
+		h.records = append(h.records, r.Message)
+	}
+	return nil
+}
+
+func (h *capturingHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *capturingHandler) WithGroup(string) slog.Handler      { return h }
+
+func (h *capturingHandler) count() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.warns
+}
+
+func unavailableFn(context.Context, string, int, Spec, GrantMode) (int, time.Duration, error) {
+	return 0, 0, fmt.Errorf("%w: dial refused", ErrBackendUnavailable)
+}
+
+func TestFailOpenLogsOncePerMergedBatch(t *testing.T) {
+	gate := make(chan struct{})
+	entered := make(chan struct{}, 1)
+	var once sync.Once
+	release := func() { once.Do(func() { close(gate) }) }
+	defer release()
+
+	var calls atomic.Int32
+	h := &capturingHandler{}
+	fb := &fakeBackend{fn: func(ctx context.Context, key string, want int, spec Spec, mode GrantMode) (int, time.Duration, error) {
+		if calls.Add(1) == 1 {
+			entered <- struct{}{}
+			<-gate // leader 批发在途，等 followers 全部挂上共享结果
+		}
+		return unavailableFn(ctx, key, want, spec, mode)
+	}}
+	clock := newFakeClock()
+	l := New(fb, WithClock(clock), WithLogger(slog.New(h)),
+		WithRate(100, time.Second), WithBurst(1000), WithFailPolicy(FailOpen))
+	defer l.Close()
+
+	type res struct {
+		ok  bool
+		err error
+	}
+	dones := make(chan res, 3)
+	for i := 0; i < 3; i++ {
+		go func() {
+			ok, err := l.Allow(context.Background(), "k", 1)
+			dones <- res{ok, err}
+		}()
+		if i == 0 {
+			<-entered // 确保 leader 已登记 pending 并在批发中
+		}
+	}
+	time.Sleep(20 * time.Millisecond) // 让两个 follower 挂上共享等待
+	release()                         // leader 随后拿到不可用错误并广播
+
+	for i := 0; i < 3; i++ {
+		r := <-dones
+		if !r.ok || !errors.Is(r.err, ErrFailOpen) {
+			t.Fatalf("三请求均应 FailOpen 兜底放行且错误可判，got ok=%v err=%v", r.ok, r.err)
+		}
+	}
+	// 合并批次的裁决由 leader 批发产生：日志恰 1 条（followers 不重复）。
+	if n := h.count(); n != 1 {
+		t.Fatalf("同一批发结果的 FailOpen 日志应恰 1 条，got %d", n)
+	}
+}
+
+func TestFailOpenLogsOncePerStrictWholesale(t *testing.T) {
+	h := &capturingHandler{}
+	fb := &fakeBackend{fn: unavailableFn}
+	l := New(fb, WithLogger(slog.New(h)), WithoutLocalLease(),
+		WithRate(10, time.Second), WithBurst(10), WithFailPolicy(FailOpen))
+	defer l.Close()
+
+	for i := 0; i < 3; i++ {
+		ok, err := l.Allow(context.Background(), "k", 1)
+		if !ok || !errors.Is(err, ErrFailOpen) {
+			t.Fatalf("strict FailOpen 应放行可判: %v %v", ok, err)
+		}
+	}
+	// 精确模式每次请求 = 一次独立批发：每次各记一条（共 3 条）。
+	if n := h.count(); n != 3 {
+		t.Fatalf("strict 模式每次独立批发应各记 1 条日志，got %d", n)
+	}
+	// FailClosed 不记兜底日志（无兜底放行事件）。
+	h2 := &capturingHandler{}
+	fb2 := &fakeBackend{fn: unavailableFn}
+	l2 := New(fb2, WithLogger(slog.New(h2)), WithRate(10, time.Second), WithBurst(10), WithFailPolicy(FailClosed))
+	defer l2.Close()
+	if _, err := l2.Allow(context.Background(), "k", 1); errors.Is(err, ErrFailOpen) {
+		t.Fatal("FailClosed 不得放行")
+	}
+	if n := h2.count(); n != 0 {
+		t.Fatalf("FailClosed 无兜底放行事件，不应有日志，got %d", n)
 	}
 }
 

@@ -104,7 +104,7 @@ type Backend interface {
 2. 其余错误（命令级、Lua 运行错误）→ 原样返回，核心透传不兜底；
 3. ctx 取消/超时 → 原样返回 `ctx.Err()`，**不得**包装为不可用。
 
-可选实现 `io.Closer`——仅用于释放连接等资源，与令牌归还无关（不做 giveback）。
+可选实现 `io.Closer`——仅用于释放连接等资源，与令牌归还无关（不做 giveback）。注意：`Limiter.Close` 会转调它，插件后端将因此**关闭注入的 go-redis client**；client 被多组件共享时，其生命周期应由组合根统一负责，不要依赖 `Limiter.Close` 释放连接（需要时给每个 Limiter 配独立 client）。
 
 ## 错误契约（分诊表）
 

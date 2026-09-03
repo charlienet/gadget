@@ -25,9 +25,12 @@ const (
 //     截断，每次部分授予蒸发 ≤1 令牌；改造版保证"扣减量 == 返回量"；
 //  3. 新增 AllOrNothing 分支（mode=1 且 remaining<cost）：直接拒绝返回
 //     {0, remaining, emission_interval×cost - diff, reset_after}，不推进 TAT、
-//     不执行 SET（修 H3 配额蒸发）。拒绝时旧 key 的 EX=reset_after 恰在桶
-//     回满时刻过期；过期后 GET nil→'0'→tat=now→满桶重建，语义等价无跳变；
-//     首次请求 tat=now→remaining≥Burst≥cost，无冷启动死角。
+//     不执行 SET（修 H3 配额蒸发）。该分支**前置于 remaining<1 拒绝分支**
+//     （N-E）：cost >= 1 时 remaining<cost 已覆盖 remaining<1 的情形，
+//     retry_after 统一用"凑够 cost 个"的精确公式，避免 cost>1 时按
+//     "凑够 1 个"低估导致 Wait 提前唤醒空转。拒绝时旧 key 的 EX=reset_after
+//     恰在桶回满时刻过期；过期后 GET nil→'0'→tat=now→满桶重建，语义等价
+//     无跳变；首次请求 tat=now→remaining≥Burst≥cost，无冷启动死角。
 //
 // 其余（redis.call('TIME') 取时 + jan_1_2017 基准偏移 + replicate_commands +
 // SET EX ceil(reset_after) 的闲置自动过期）逐字保留原脚本。
@@ -61,19 +64,21 @@ tat = math.max(tat, now)
 local diff = now - (tat - burst_offset)
 local remaining = diff / emission_interval
 
+if mode == 1 and remaining < cost then
+	-- AllOrNothing：不足额拒绝，不推进 TAT、不 SET（防配额蒸发）。
+	-- N-E：本分支前置于 remaining < 1——cost >= 1 时 remaining < cost 已覆盖
+	-- remaining < 1，retry_after 统一为"凑够 cost 个"的精确公式
+	-- （cost=1 特例即 emission_interval - diff），避免 cost > 1 时按
+	-- "凑够 1 个"低估唤醒时机。
+	local reset_after = tat - now
+	local retry_after = emission_interval * cost - diff
+	return {0, remaining, tostring(retry_after), tostring(reset_after)}
+end
+
 if remaining < 1 then
 	local reset_after = tat - now
 	local retry_after = emission_interval - diff
 	return {0, 0, tostring(retry_after), tostring(reset_after)}
-end
-
-if mode == 1 and remaining < cost then
-	-- AllOrNothing：不足额拒绝，不推进 TAT、不 SET（防配额蒸发）。
-	-- retry_after 为补足 cost 个令牌的最早时刻（cost=1 特例即原脚本的
-	-- emission_interval - diff）。
-	local reset_after = tat - now
-	local retry_after = emission_interval * cost - diff
-	return {0, remaining, tostring(retry_after), tostring(reset_after)}
 end
 
 if remaining < cost then

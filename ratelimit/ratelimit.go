@@ -193,6 +193,9 @@ func (l *Limiter) Allow(ctx context.Context, key string, n int) (bool, error) {
 func (l *Limiter) strictAllow(ctx context.Context, key string, n int) (bool, error) {
 	granted, retryAfter, err := l.backend.Wholesale(ctx, key, n, l.spec, GrantAllOrNothing)
 	if err != nil {
+		// 精确模式每次请求即一次独立批发：兜底事件日志在此记一条
+		// （本路径无共享、无锁，N-F 与租约模式规则一致）。
+		l.logFailOpenFallback(ctx, err, key, n)
 		return l.triageBackendErr(ctx, err, key, n)
 	}
 	if granted >= n {
