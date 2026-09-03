@@ -4,7 +4,7 @@ go 1.26
 
 require (
 	github.com/charlienet/gadget/broker v0.1.7
-	github.com/charlienet/gadget/redis v0.4.0
+	github.com/charlienet/gadget/redis v0.4.1
 	github.com/redis/go-redis/v9 v9.22.0
 )
 
@@ -12,6 +12,7 @@ require (
 	github.com/alicebob/gopher-json v0.0.0-20230218143504-906a9b012302 // indirect
 	github.com/alicebob/miniredis v2.5.0+incompatible // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
+	github.com/charlienet/gadget/breaker v0.1.0 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/gomodule/redigo v1.9.3 // indirect
 	github.com/google/uuid v1.6.0 // indirect

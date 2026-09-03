@@ -14,10 +14,12 @@ github.com/bytedance/sonic/loader v0.5.1 h1:Ygpfa9zwRCCKSlrp5bBP/b/Xzc3VxsAW+5NI
 github.com/bytedance/sonic/loader v0.5.1/go.mod h1:AR4NYCk5DdzZizZ5djGqQ92eEhCCcdf5x77udYiSJRo=
 github.com/cespare/xxhash/v2 v2.3.0 h1:UL815xU9SqsFlibzuggzjXhog7bL6oX9BbNZnL2UFvs=
 github.com/cespare/xxhash/v2 v2.3.0/go.mod h1:VGX0DQ3Q6kWi7AoAeZDth3/j3BFtOZR5XLFGgcrjCOs=
+github.com/charlienet/gadget/breaker v0.1.0 h1:/2zFJpwbY7+zNugexawBj30zTZppniEprTxAvex5+tc=
+github.com/charlienet/gadget/breaker v0.1.0/go.mod h1:6DKOASfM8BAunRwXK3H/Z7dNAYQQMafFT6jbpE3CBNU=
 github.com/charlienet/gadget/cache v0.5.0 h1:qcVL3LLcvJ2Qzxw1kFGzOBimKprcF8v26wU9LffEimE=
 github.com/charlienet/gadget/cache v0.5.0/go.mod h1:LWGCwtKgKzIM7NBaSUAvzcnoMn5mCx3fL/gir/uzcHw=
-github.com/charlienet/gadget/redis v0.4.0 h1:MBFfZnQOMXkoh7L3tWXzKkkRoW38kK2D0CO08YJ0AYw=
-github.com/charlienet/gadget/redis v0.4.0/go.mod h1:58FBEWxdPkqrIQXxQOfvzmHiyQWAqu9LTOAqy6CYsW8=
+github.com/charlienet/gadget/redis v0.4.1 h1:5T4ulBSB2hKGIKfYHNyWsItqXQWREjkhcSBuel6gDkM=
+github.com/charlienet/gadget/redis v0.4.1/go.mod h1:rShqHv/5n5e7k5hUZhxFkn4zvyA7Xq7TVBrUIsMIuY4=
 github.com/charlienet/gadget/retry v0.1.0 h1:G89ADCZ/3kyjiDbJ5/pizNbxjM7KuJ4O2JTIJZP/dWw=
 github.com/charlienet/gadget/retry v0.1.0/go.mod h1:waIa0yYJ5tJkdfPEBUiNsBQe8QxKRe7th7A1n5E+Dd4=
 github.com/cloudwego/base64x v0.1.6 h1:t11wG9AECkCDk5fMSoxmufanudBtJ+/HemLstXDLI2M=

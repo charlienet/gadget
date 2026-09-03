@@ -5,7 +5,7 @@ go 1.26
 require (
 	github.com/alicebob/miniredis v2.5.0+incompatible
 	github.com/charlienet/gadget/cache v0.5.0
-	github.com/charlienet/gadget/redis v0.4.0
+	github.com/charlienet/gadget/redis v0.4.1
 	github.com/charlienet/gadget/retry v0.1.0
 	github.com/redis/go-redis/v9 v9.22.0
 	github.com/stretchr/testify v1.11.1
@@ -17,6 +17,7 @@ require (
 	github.com/bytedance/sonic v1.15.2 // indirect
 	github.com/bytedance/sonic/loader v0.5.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
+	github.com/charlienet/gadget/breaker v0.1.0 // indirect
 	github.com/cloudwego/base64x v0.1.6 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/gomodule/redigo v1.9.3 // indirect
