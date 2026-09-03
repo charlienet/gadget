@@ -173,10 +173,16 @@ func WithBackendTimeout(d time.Duration) Option {
 	}
 }
 
-// WithIdleRetention 设置本地账本 key 空闲回收阈值（默认 60s）：账本条目
-// 超过该时长无任何访问即被 sweeper 删除（未用完的租约存量一并丢弃，靠
-// 后端桶自然回补）。同时随 Spec.IdleRetention 下发给需要它的后端
-// （Memory 使用，GCRA 类后端忽略）。d <= 0 时忽略。
+// WithIdleRetention 设置闲置回收阈值（默认 60s）——"闲置多久后条目被回收"：
+//   - 本地账本条目：超过该时长无任何访问即被 sweeper 删除（未用完的租约
+//     存量一并丢弃，靠后端桶自然回补）；
+//   - Memory 后端的桶条目（memoryBackend.buckets）：key 超过该时长未被
+//     Wholesale 访问，即被访问路径惰性 delete 或被同一 sweeper tick 的
+//     reapIdle 批量 delete，下次访问重建为满桶——保证无界 key 空间下
+//     map 条目数随闲置下降，内存不无界增长。
+//
+// 同时随 Spec.IdleRetention 下发给需要它的后端（Memory 使用，GCRA 类
+// 后端忽略）。d <= 0 时忽略。
 func WithIdleRetention(d time.Duration) Option {
 	return func(o *options) {
 		if d <= 0 {

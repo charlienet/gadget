@@ -155,9 +155,12 @@ func New(b Backend, opts ...Option) *Limiter {
 		ledger:         newLedger(),
 		stopped:        make(chan struct{}),
 	}
-	// 闲置回收协程仅租约模式需要（精确模式无本地账本）；受控退出对齐
-	// cache 先例：Once + stopChan + WaitGroup，不加 recover。
-	if l.localLease {
+	// 闲置回收循环：租约模式需清本地账本；后端为 memoryBackend 时需清
+	// buckets 条目（无界 key 空间的内存防线，否则 map 只增不删）。两者
+	// 复用同一 tick。受控退出对齐 cache 先例：Once + stopChan +
+	// WaitGroup（Close 即停，防 goroutine 泄漏），不加 recover。
+	_, memBackend := l.backend.(*memoryBackend)
+	if l.localLease || (memBackend && l.spec.IdleRetention > 0) {
 		l.wg.Add(1)
 		go l.sweepLoop()
 	}

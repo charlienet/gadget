@@ -59,8 +59,12 @@ type Backend interface {
 //
 // 授予语义：BestEffort 下 granted = min(want, floor(存量))；
 // AllOrNothing 下存量不足 granted = 0 且不扣减（防配额蒸发）。
-// 闲置回收：桶在 Wholesale 时惰性判断 idle 并重建满桶（超过
-// Spec.IdleRetention 未访问即重置），不建后台协程。
+// 闲置回收：桶超过 Spec.IdleRetention 未访问即视为过期，重建为满桶
+// （等价窗口耗尽后重新积累）。回收分两层——Wholesale 访问路径上惰性
+// 判定并 delete 过期条目；条目本身（无界 key 空间）由 Limiter 后台
+// sweepLoop 周期调用 reapIdle 批量 delete 真正释放，故 map 条目数随
+// key 闲置而下降，内存不再无界增长。本后端自身不建协程，复用宿主
+// Limiter 的回收循环（Close 即停，防 goroutine 泄漏）。
 func Memory() Backend { return newMemoryBackend(systemClock{}) }
 
 // newMemoryBackend 允许内部测试注入可控时钟。
@@ -88,9 +92,11 @@ func (m *memoryBackend) Wholesale(ctx context.Context, key string, want int, spe
 	defer m.mu.Unlock()
 
 	b, ok := m.buckets[key]
-	// 惰性闲置回收：超过 IdleRetention 未访问的桶直接重置为满桶重建
-	// （等价于窗口耗尽后重新积累，无常驻回收需求）。
+	// 惰性条目回收：超过 IdleRetention 未访问的桶先 delete 旧条目，
+	// 再按全新满桶重建（等价于窗口耗尽后重新积累）。条目本身的批量
+	// 释放由后台 reapIdle 承担（覆盖"之后再未被访问"的冷 key）。
 	if ok && spec.IdleRetention > 0 && now.Sub(b.idleAt) > spec.IdleRetention {
+		delete(m.buckets, key)
 		ok = false
 	}
 	if !ok {
@@ -100,4 +106,27 @@ func (m *memoryBackend) Wholesale(ctx context.Context, key string, want int, spe
 	b.idleAt = now
 	granted, retryAfter := b.take(now, want, spec, mode)
 	return granted, retryAfter, nil
+}
+
+// reapIdle 批量删除闲置超过 retention 的桶条目（后台清扫入口，亦供包内
+// 测试直调免 sleep）。
+//
+// 并发安全：判定与 delete 均在 m.mu 内完成（锁内判定 + 锁内删除），与
+// Wholesale 共用同一把 m.mu，杜绝 TOCTOU——getOrCreate 语义（Wholesale
+// 的查建）不会与清扫交错。Go 允许 range 中 delete 当前 key。
+//
+// 语义保持：被删条目下次访问走 newTokenBucket 重建为满桶，等价全新桶；
+// 租约存量存于 core 的 ledger、与本后端无关，故删除不丢租约语义。
+// retention <= 0 表示禁用回收（防御，与 Spec 语义一致）。
+func (m *memoryBackend) reapIdle(now time.Time, retention time.Duration) {
+	if retention <= 0 {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for key, b := range m.buckets {
+		if now.Sub(b.idleAt) > retention {
+			delete(m.buckets, key)
+		}
+	}
 }
