@@ -222,6 +222,14 @@ func (m *Manager) Run(ctx context.Context) error {
 			case <-ctx.Done():
 				m.logf("run context done (%v), starting shutdown", ctx.Err())
 				m.start()
+			case <-m.done:
+				// 关闭由其它路径（通常是 [Manager.Shutdown]）触发：start() 已对
+				// sigCh 执行 signal.Stop，此后 <-sigCh 不会再收到任何信号；若调用方
+				// 传入的是 context.Background()（最常见写法），ctx.Done 也永不就绪。
+				// 必须以 done 唤醒本 goroutine，否则它将永久阻塞、造成 goroutine 泄漏。
+				// 只读不触发：done 已关闭说明关闭流程必然已启动，无需也不能再调 start()。
+				// done 的 close 由 start() 内的 sync.Once 唯一保护，本分支只接收不关闭，
+				// 三条退出路径（Shutdown / Run 自然结束 / ctx 取消）都不会重复 close。
 			}
 		}()
 	}

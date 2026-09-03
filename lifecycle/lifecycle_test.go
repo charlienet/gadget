@@ -450,3 +450,58 @@ func TestCompatibilityAdapters(t *testing.T) {
 		t.Fatal("Close() error 式组件未被调用")
 	}
 }
+
+// listenerRunning 判断 Run 内部的信号监听 goroutine 是否存活：全量 dump
+// goroutine 栈并查找监听闭包帧（lifecycle.(*Manager).Run.func1）。
+//
+// 不用 runtime.NumGoroutine 差值法：负向验证（临时移除 case <-m.done 分支）
+// 实测证明差值法对缺陷版本假绿——运行期 goroutine 数量受无关内部组件增删
+// 影响，计数差无法归因到目标 goroutine。栈探针直接定位目标闭包帧本身，噪声免疫。
+func listenerRunning() bool {
+	buf := make([]byte, 1<<20)
+	n := runtime.Stack(buf, true)
+	return strings.Contains(string(buf[:n]), "lifecycle.(*Manager).Run.func1")
+}
+
+// waitListener 有界等待监听 goroutine 出现/消失，超时按 want 报错。
+func waitListener(t *testing.T, want bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if listenerRunning() == want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("5s 内监听 goroutine 状态未变为 %v（当前存活=%v）", want, listenerRunning())
+		}
+		time.Sleep(10 * time.Millisecond) // settle，避免调度延迟导致 flaky
+	}
+}
+
+// 测试10：Shutdown 作为触发源时，Run 内部的信号监听 goroutine 必须退出
+// （回归 goroutine 永久泄漏）。
+//
+// 泄漏场景：Run 传入 context.Background()（最常见写法），关闭由 Shutdown 触发。
+// start() 对 sigCh 执行 signal.Stop 后，监听 goroutine 的 <-sigCh 分支永不再收到
+// 信号、<-ctx.Done 也永不就绪——修复前该 goroutine 永久阻塞。修复后以 <-m.done
+// 分支唤醒退出（done 的 close 由 start() 内 sync.Once 唯一保护，本分支只读不关，
+// Shutdown / Run 自然结束 / ctx 取消三条路径都不会重复 close）。
+func TestRunListenerGoroutineExitsAfterShutdown(t *testing.T) {
+	m := New(WithSignals(syscall.SIGWINCH))
+	m.Register("c", Func(func(context.Context) error { return nil }))
+
+	runDone := make(chan error, 1)
+	go func() { runDone <- m.Run(context.Background()) }()
+	_ = waitSigCh(t, m)   // 句柄已注册
+	waitListener(t, true) // 监听 goroutine 确已进入 select（确定性同步，非 sleep 竞速）
+
+	if err := m.Shutdown(context.Background()); err != nil {
+		t.Fatalf("Shutdown 失败: %v", err)
+	}
+	if err := <-runDone; err != nil {
+		t.Fatalf("Run 返回错误: %v", err)
+	}
+	// signal.Stop 后 sigCh 永不再投递、Background ctx 永不取消：
+	// 监听 goroutine 只能靠 m.done 分支退出；修复前此处必超时失败。
+	waitListener(t, false)
+}
