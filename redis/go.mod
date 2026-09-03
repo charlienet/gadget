@@ -3,6 +3,7 @@ module github.com/charlienet/gadget/redis
 go 1.26
 
 require (
+	github.com/charlienet/gadget/breaker v0.1.0
 	github.com/hashicorp/go-version v1.9.0
 	github.com/redis/go-redis/v9 v9.22.0
 	github.com/stretchr/testify v1.11.1

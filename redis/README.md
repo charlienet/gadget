@@ -255,6 +255,9 @@ Redis 宕机恢复后 client 自动重连，无需额外配置——这是 go-re
 
 Redis 服务失效后避免每次请求都等待连接超时：连续失败达阈值进入 Open
 状态**快速失败**（不实际连接），冷却后半开放行探测请求，成功自动恢复。
+状态机实现由 [gadget/breaker](https://pkg.go.dev/github.com/charlienet/gadget/breaker)
+提供（本模块的 `CircuitBreaker` 为其转发 wrapper，仅 Classifier 注入
+`IsUnavailable` 并保留 go-redis hook 适配）。
 
 - 三态：Closed（正常）→ Open（连续失败 ≥ 阈值，快速失败）→ HalfOpen
   （冷却后放行单个探测，单飞：并发下同时只放行一个）→ 成功回 Closed。

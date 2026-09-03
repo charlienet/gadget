@@ -2,162 +2,48 @@ package redis
 
 import (
 	"context"
-	"sync"
 	"time"
 
+	"github.com/charlienet/gadget/breaker"
 	goredis "github.com/redis/go-redis/v9"
 )
 
-// breakerState 熔断器状态。
-type breakerState uint8
-
-const (
-	breakerClosed  breakerState = iota // 闭合：正常请求放行
-	breakerOpen                        // 打开：快速失败（不实际连接）
-	breakerHalfOpen                    // 半开：放行探测请求验证服务是否恢复
-)
-
-// 熔断器默认参数。
-const (
-	defaultBreakerThreshold = 3
-	defaultBreakerCooldown  = time.Second
-)
-
-// CircuitBreaker 是自研熔断器状态机（三态）：
+// CircuitBreaker 是熔断器：状态机实现委托 gadget/breaker
+// （三态 Closed/Open/HalfOpen：连续失败达阈值 → Open 快速失败，
+// 冷却后半开单飞探测，成功自动恢复）。本类型仅为显式转发 wrapper，
+// 导出面与 v0.4.0 完全一致（公共 API 冻结）。
 //
-//   - Closed（闭合）：正常请求放行；连续失败达到阈值 → Open。
-//   - Open（打开）：**快速失败**——直接返回最近一次错误，不实际连接
-//     （避免每次请求都等待连接超时）；经过 cooldown 冷却期后 → HalfOpen。
-//   - HalfOpen（半开）：放行一个探测请求（单飞，并发下同时只放行一个）；
-//     探测成功 → Closed（自动恢复）；失败 → 回 Open（重置冷却）。
+// 错误分类注入 IsUnavailable：仅连接/服务类故障计入熔断；命令级错误
+// 为中性（不计入、不干扰连续失败计数；半开探测期间视为服务可达 → 闭合）。
 //
-// 并发安全：状态与失败计数统一由互斥锁保护（状态切换与计数强相关，
-// 用锁保持一致，不依赖原子操作）；HalfOpen 单飞通过锁内标记实现。
-//
-// 冷却计时采用惰性判断（Allow 时检查"上次失败时间 + cooldown <= now"），
-// 无需定时器 goroutine，避免资源泄漏。
+// 并发安全与冷却惰性判断等实现细节见 gadget/breaker 包文档。
 type CircuitBreaker struct {
-	mu sync.Mutex
-
-	state    breakerState
-	failures int // 连续失败计数（仅连接类错误计数）
-
-	threshold int           // 连续失败阈值（默认 3）
-	cooldown  time.Duration // 冷却期（默认 1s，用户要求短：快速重连探测）
-
-	lastErr      error     // 最近一次失败错误（Open 快速失败时返回）
-	lastFailTime time.Time // 最近一次进入 Open 的时间（冷却计时起点）
-	halfOpenTrial bool     // 半开探测标记：true 表示已有探测请求在途（单飞）
+	b *breaker.Breaker
 }
 
-// newCircuitBreaker 创建熔断器（threshold/cooldown 非正时用默认值）。
+// newCircuitBreaker 创建熔断器（threshold/cooldown 非正时由 breaker.New
+// 忽略并保持默认：阈值 3、冷却 1s，与 v0.4.0 语义等价）。
 func newCircuitBreaker(threshold int, cooldown time.Duration) *CircuitBreaker {
-	if threshold <= 0 {
-		threshold = defaultBreakerThreshold
-	}
-	if cooldown <= 0 {
-		cooldown = defaultBreakerCooldown
-	}
-	return &CircuitBreaker{
-		state:     breakerClosed,
-		threshold: threshold,
-		cooldown:  cooldown,
-	}
+	return &CircuitBreaker{b: breaker.New(
+		breaker.WithThreshold(threshold),
+		breaker.WithCooldown(cooldown),
+		breaker.WithClassifier(IsUnavailable),
+	)}
 }
 
-// Allow 判断请求是否允许执行：
-//   - Closed → 允许（nil）
-//   - Open → 冷却结束则转 HalfOpen 并放行首个探测请求；否则**快速失败**
-//     （返回 lastErr，不实际连接）
-//   - HalfOpen → 单飞：已有探测在途则拒绝（快速失败），否则放行探测
-func (b *CircuitBreaker) Allow() error {
-	b.mu.Lock()
-	defer b.mu.Unlock()
+// Allow 判断请求是否允许执行：nil=放行；拒绝时原样返回最近一次失败错误
+// （快速失败，不实际连接）。
+func (c *CircuitBreaker) Allow() error { return c.b.Allow() }
 
-	switch b.state {
-	case breakerClosed:
-		return nil
+// Success 记录成功：重置连续失败计数；半开探测成功 → 闭合恢复。
+func (c *CircuitBreaker) Success() { c.b.Success() }
 
-	case breakerOpen:
-		if time.Since(b.lastFailTime) >= b.cooldown {
-			// 冷却结束：转半开并放行首个探测请求（标记单飞）
-			b.state = breakerHalfOpen
-			b.halfOpenTrial = true
-			return nil
-		}
-		return b.lastErr // 快速失败
+// Fail 记录连接类失败：连续失败达阈值 → Open；半开探测失败 → 回 Open 重置冷却。
+func (c *CircuitBreaker) Fail(err error) { c.b.Fail(err) }
 
-	case breakerHalfOpen:
-		if b.halfOpenTrial {
-			return b.lastErr // 已有探测在途：拒绝（单飞）
-		}
-		b.halfOpenTrial = true
-		return nil
-	}
-	return nil
-}
-
-// Success 记录成功：重置连续失败计数；半开探测成功 → 闭合（自动恢复）。
-func (b *CircuitBreaker) Success() {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-
-	b.failures = 0
-	b.halfOpenTrial = false
-	if b.state == breakerHalfOpen {
-		b.state = breakerClosed
-		b.lastErr = nil
-	}
-}
-
-// Fail 记录连接类失败：连续失败达阈值 → Open（记录 lastErr 并启动冷却）；
-// 半开探测失败 → 回 Open（重置冷却计时）。
-func (b *CircuitBreaker) Fail(err error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-
-	if b.state == breakerHalfOpen {
-		// 探测失败：回 Open，重置冷却
-		b.state = breakerOpen
-		b.lastFailTime = time.Now()
-		b.lastErr = err
-		b.halfOpenTrial = false
-		return
-	}
-
-	b.failures++
-	if b.failures >= b.threshold {
-		b.state = breakerOpen
-		b.lastFailTime = time.Now()
-		b.lastErr = err
-	}
-}
-
-// onResult 处理一次命令结果（hook 调用）：
-//   - 成功 → Success（半开探测成功自动闭合）
-//   - 连接类错误（IsUnavailable）→ Fail（计入熔断）
-//   - 其他错误（命令级，如 WRONGTYPE）→ 不计入熔断；若处于半开探测
-//     说明服务可达（连接正常），闭合恢复
-func (b *CircuitBreaker) onResult(err error) {
-	if err == nil {
-		b.Success()
-		return
-	}
-	if IsUnavailable(err) {
-		b.Fail(err)
-		return
-	}
-
-	// 非连接类错误：不计入熔断；半开探测时服务可达 → 闭合
-	b.mu.Lock()
-	if b.state == breakerHalfOpen {
-		b.state = breakerClosed
-		b.lastErr = nil
-		b.halfOpenTrial = false
-		b.failures = 0
-	}
-	b.mu.Unlock()
-}
+// onResult 处理一次命令结果（hook 调用）：委托 breaker.Breaker.Report
+// 按 Classifier 三分类（成功 → Success；连接类错误 → Fail；其余中性）。
+func (c *CircuitBreaker) onResult(err error) { c.b.Report(err) }
 
 // breakerHook 是接入 go-redis hook 链的熔断 hook。
 // 注册顺序关键：go-redis 的 hook 链"后注册的最外层"（withProcessHook 从
