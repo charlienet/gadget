@@ -489,9 +489,9 @@ func TestInvalidateThenGet(t *testing.T) {
 	_ = c.Put(ctx, "updatekey", "old", 60)
 
 	updateCalled := false
-	err := c.Invalidate(ctx, "updatekey", func(ctx context.Context, key string) error {
+	err := c.Invalidate(ctx, func(ctx context.Context) ([]string, error) {
 		updateCalled = true
-		return nil
+		return []string{"updatekey"}, nil
 	})
 	assert.Nil(t, err)
 	assert.True(t, updateCalled)
@@ -507,8 +507,8 @@ func TestInvalidateError(t *testing.T) {
 	ctx := context.Background()
 
 	_ = c.Put(ctx, "errorkey", "value", 60)
-	err := c.Invalidate(ctx, "errorkey", func(ctx context.Context, key string) error {
-		return errors.New("update failed")
+	err := c.Invalidate(ctx, func(ctx context.Context) ([]string, error) {
+		return nil, errors.New("update failed")
 	})
 	assert.ErrorContains(t, err, "update failed")
 

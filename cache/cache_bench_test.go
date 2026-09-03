@@ -68,12 +68,11 @@ func BenchmarkSerialPutEviction(b *testing.B) {
 	s.maxItems = 1000
 	ctx := context.Background()
 
-	for i := 0; i < 1000; i++ {
+	for i := range 1000 {
 		_ = s.Put(ctx, fmt.Sprintf("warm%d", i), []byte("v"), 0)
 	}
 
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for i := 0; b.Loop(); i++ {
 		_ = s.Put(ctx, fmt.Sprintf("k%d", i), []byte("v"), 0)
 	}
 	b.StopTimer()

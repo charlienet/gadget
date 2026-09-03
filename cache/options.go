@@ -33,6 +33,11 @@ type Options struct {
 	hotKeyThreshold     int
 	verifyEvery         int
 	versionSyncInterval time.Duration
+	// delayedSecondDelete 是「延时二次删除」的延迟时长：Invalidate 完成首次双删后，
+	// 再经该延迟对该 key 无条件补删一次，兜底清除延时窗口内落入缓存的旧值回填（含
+	// "首删前读库、首删后才写入"的跨实例竞态脏值）。0（默认）关闭。须大于业务最坏「回源
+	// 读库 + 回填缓存」耗时。见 WithDelayedSecondDelete。
+	delayedSecondDelete time.Duration
 	// storeSet 是否显式设置过任一 store（WithStore/WithMemStore），
 	// 用于区分"零参 New 默认注入 mem_store"与"显式只配远程（只远程模式）"。
 	storeSet bool
@@ -237,5 +242,27 @@ func WithCipher(c Cipher) Option {
 func WithVersionSyncInterval(d time.Duration) Option {
 	return func(o *Options) {
 		o.versionSyncInterval = d
+	}
+}
+
+// WithDelayedSecondDelete 开启「延时二次删除」（delayed second delete）：Invalidate
+// 完成首次双删后，再延迟 delay 对该 key 执行一次后台无条件补删，兜底清除「失效与并发
+// 回源读库竞态」下、删除之后才回填进缓存的旧值（含首删前读库、首删后才写入的跨实例脏值）。
+//
+// 语义与代价：
+//   - 采用经典无条件二次删：不判版本，直接对 L1/L2 各补删一次。因竞态回填脏值的写入版本
+//     （毫秒时间戳）可能晚于失效时刻，按版本判定无法可靠识别，故无条件删除。
+//   - 代价：窗口内的合法新写入也会被一并清除，由下次读取回源自愈（fail-safe）。
+//   - delay 必须大于业务最坏「回源读库 + 回填缓存」耗时，否则回填可能晚于二次删发生而漏清。
+//   - best-effort、非强一致：降级期跳过远程补删（由 TTL 与既有补偿重试兜底），且不写入
+//     pendingDeletes，避免恢复后无条件误删新值。
+//   - 量级提示：开启后每次 Invalidate 对每个受影响 key 正常产生 2 次 Publish
+//     （首删 + 无条件二次删恒广播），高频写场景注意 listener 流量约 ×2。
+//   - 0（默认）关闭此特性，零常态开销。
+func WithDelayedSecondDelete(d time.Duration) Option {
+	return func(o *Options) {
+		if d > 0 {
+			o.delayedSecondDelete = d
+		}
 	}
 }

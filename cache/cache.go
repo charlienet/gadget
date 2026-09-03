@@ -13,9 +13,16 @@
 //
 // 推荐使用路径：
 //   - 读路径用 Getfn：未命中时经 LoadFn 回源并自动回填（singleflight 防击穿）。
-//   - 涉及源数据的更新或删除，一律经 Invalidate 包装：回调内写/删数据源，
-//     成功后由库自动失效缓存（双删、补偿重试、集群广播），避免业务侧遗漏
-//     清理造成缓存不一致；切勿在回调外手工"写源 + Delete"。
+//   - 涉及源数据的更新或删除，一律经 Invalidate 包装：回调内写/删数据源并返回本次
+//     变更影响的**全部缓存 key**，成功后由库逐 key 统一失效（双删、补偿重试、集群
+//     广播、可选延时二次删除），避免业务侧遗漏清理造成缓存不一致；切勿在回调外手工
+//     "写源 + Delete"。一次变更波及多 key（如状态迁移同时影响新旧两个列表 key）时，
+//     全部由 mutateFn 返回声明即可，无需多次调用。可选通过 WithDelayedSecondDelete
+//     开启「延时二次删除」：每个 key 首删后再无条件补删一次，兜底清除延时窗口内落入
+//     缓存的旧值回填（含"首删前读库、首删后才写入"的跨实例竞态脏值）；代价是窗口内
+//     合法新写入也会被一并清除，由下次读取回源自愈（fail-safe）。降级期跳过远程补删，
+//     依赖 TTL 与既有补偿重试兜底；属 best-effort、非强一致保证，delay 须大于业务最坏
+//     「回源读库 + 回填缓存」耗时。
 //   - Put/Delete 仅用于不涉及源数据的纯缓存操作（如临时计算结果）。
 package cache
 
@@ -43,6 +50,10 @@ const (
 	maxPendingWrites = 1024
 	// flushTimeout 是单次 flush 中逐条网络操作的总超时。
 	flushTimeout = 3 * time.Second
+	// listenerCloseTimeout 是关闭 Listener 的等待上限，须 ≥ 自家 pubsub 最坏退出窗
+	// （~6s）/ stream（~2s）。防止违约第三方实现的无界 Close 永久挂死 cache.Close
+	// （watcherWG.Wait 押在 startWatcher 活性上）：超时后 Warn 并放弃等待，不 panic、不重试。
+	listenerCloseTimeout = 8 * time.Second
 	// flushRetryInterval 是常规（非降级恢复转换点）flush 重试的最小间隔，防止失败后网络风暴。
 	flushRetryInterval = 5 * time.Second
 	// defaultTTLJitter 是默认的 L1 内存层 TTL 随机抖动范围（0~30s），默认开启防缓存雪崩；
@@ -107,6 +118,12 @@ type cache struct {
 	flushing       map[string]struct{} // flush 锁外 IO 期间的 key 占位，防 hasPending 误判驱逐
 	lastFlush      time.Time           // 上次 flush 尝试时间戳（受 pendingMu 保护）
 
+	// Delayed second delete（延时二次删除）：Invalidate 首次双删后按开关调度的一次
+	// 延迟无条件补删，兜底清除竞态回填进缓存的旧值。delayedTimers 仅在开关打开时分配，
+	// 关闭时为 nil，避免常态开销。key → *delayedDelete（同 key 覆盖，仅保留最新）。
+	delayedMu     sync.Mutex
+	delayedTimers map[string]*delayedDelete
+
 	// Probabilistic verification
 	verifyEvery  int
 	verifyCounts sync.Map // string → *atomic.Int64: access count per key
@@ -129,6 +146,14 @@ type pendingWrite struct {
 	expireSeconds int
 }
 
+// delayedDelete 记录一次待执行的延时二次删除：定时器句柄与调度时刻。
+// timer 供同 key 重调度或 Close 时 Stop；scheduledAt 仅为 timer bookkeeping——延迟回调
+// 据此判断自身是否为 map 中最新条目（防误摘同 key 重建后的新 timer），不再参与版本判定。
+type delayedDelete struct {
+	timer       *time.Timer
+	scheduledAt int64
+}
+
 // PreLoadFn 是 PreLoad 的加载函数：一次返回全部待预热数据（key → value）。
 // 使用方在启动时从数据源加载热点数据调用 PreLoad 写入缓存。
 type PreLoadFn func(ctx context.Context) (map[string]any, error)
@@ -149,9 +174,12 @@ type LoadFn func(ctx context.Context, key string, v any) (bool, error)
 // 也可按此签名自行实现取数函数。
 type BatchLoadFn func(ctx context.Context, keys ...string) (map[string]any, error)
 
-// MutateFn 是 Invalidate 的源变更函数：对数据源执行更新或删除等写操作。
-// 返回错误表示源未变更，缓存保持不动。
-type MutateFn func(ctx context.Context, key string) error
+// MutateFn 对数据源执行更新/删除等写操作，并返回本次变更影响的全部缓存 key。
+//   - 返回 error：源未变更，缓存保持不动（keys 一并丢弃）。
+//   - 返回 (nil, nil)：合法，表示本次变更不影响任何缓存 key。
+//   - 受影响集合可静态给出，也可在读旧值/执行变更后动态推导（如状态迁移
+//     同时影响新旧状态两个列表 key）；库对返回 keys 去重并过滤空串。
+type MutateFn func(ctx context.Context) ([]string, error)
 
 func New(opts ...Option) *cache {
 	c := acquireDefaultCache()
@@ -245,6 +273,11 @@ func New(opts ...Option) *cache {
 		c.versionSyncBatch = defaultVersionSyncBatch
 		c.versionStop = make(chan struct{})
 		go c.versionSyncLoop()
+	}
+
+	// 延时二次删除：仅开关打开时分配 timer map，关闭时保持 nil（零常态开销）。
+	if opt.delayedSecondDelete > 0 {
+		c.delayedTimers = make(map[string]*delayedDelete)
 	}
 
 	c.opt = opt
@@ -350,7 +383,7 @@ func (c *cache) SetMulti(ctx context.Context, items map[string]any, expireSecond
 		}
 		// 降级 + remote 时禁用 bulk：bulk.SetMulti 会绕过 putInStore 的降级
 		// pending 缓冲直接写远程，与单键 Put 语义不一致——回退逐 key 路径。
-		if bulk, ok := s.(BulkStore); ok && !(c.isDegraded() && s.IsRemote()) {
+		if bulk, ok := s.(BulkStore); ok && (!c.isDegraded() || !s.IsRemote()) {
 			dataMap := make(map[string][]byte, len(items))
 			for key, val := range items {
 				data, err := c.serializer.Marshal(val)
@@ -546,32 +579,164 @@ func (c *cache) Put(ctx context.Context, key string, v any, expireSecond int) er
 	return nil
 }
 
-// Invalidate 使 key 对应的源数据变更后缓存收敛：mutateFn 内对数据源
-// （DB 等）执行更新或删除，成功后自动失效缓存——本地与远程双删、降级期间
-// 删除失败进 pending 补偿队列重试、并经 listener 向集群广播，其他实例同步
-// 失效本地副本。
+// Invalidate 使 mutateFn 影响的源数据变更后缓存收敛：mutateFn 内写数据源并
+// 返回受影响的全部 key，成功后库逐 key 失效——每个 key 独立经 per-key singleflight
+// 串行 + in-flight 共享时确定性补删，消除本实例脏回填窗口、本地与远程双删、降级期删除进
+// pending 补偿队列、经 listener 向集群广播，并各自调度延时无条件补删（若开启，
+// 每 key 独立记录调度时刻，互不共享）。
 //
-// 与 Getfn 的回源共享 singleflight 互斥（同一 key 的变更与回填不并发），
-// 消除"源已变更、旧值回填"的脏窗口；mutateFn 返回错误时缓存保持不动
-// （源未变更）。推荐写路径：凡涉及源数据的写/删一律经本方法包装，
-// 由库承包失效与集群收敛，避免业务侧遗漏清理造成缓存不一致。
-func (c *cache) Invalidate(ctx context.Context, key string, mutateFn MutateFn) error {
-	// 与 Getfn 回源共用同一 singleflight key，使 delete 与 load 互斥。
-	fnKey := fmt.Sprintf("key:%s", key)
-	defer c.sg.Forget(fnKey)
+// 边界与并发：
+//   - 逐 key 失效非原子，中间态为循环耗时（毫秒级），由 TTL 与二次删兜底。
+//   - mutateFn 在锁外执行：与 Getfn 的 singleflight 互斥只覆盖"删除 + 二次删调度"，
+//     不覆盖源写本身；故 mutateFn 恒被执行，不会被并发 Getfn 的 singleflight 共享吞掉。
+//     但删除闭包本身仍可能被并发 in-flight（Getfn 回填或先行 Invalidate）的共享吞掉：
+//     此时 Do 以 shared=true 返回、闭包不执行，循环体据此在 in-flight 完成后确定性补删
+//     一次，杜绝"源已变更、旧值滞留缓存直至 TTL、二次删也未调度"的静默不一致。
+//   - 单次返回 key 数 > 100 记 Warn：海量失效意味着广播 / timer / pendingDeletes（1024
+//     上限）压力，应重新审视 key 设计或改用 DeletePattern 类运维工具。
+//   - 逐 key 顺序 Do 不嵌套、不同时持多把锁，并发交叉 key 集（A:[k1,k2] vs B:[k2,k1]）
+//     不会交叉持锁，无死锁。
+func (c *cache) Invalidate(ctx context.Context, mutateFn MutateFn) error {
+	keys, err := mutateFn(ctx)
+	if err != nil {
+		return err // 源未变更，缓存保持不动（keys 一并丢弃）
+	}
 
-	_, err, _ := c.sg.Do(fnKey, func() (interface{}, error) {
-		err := mutateFn(ctx, key)
-		if err != nil {
-			return storeItem{}, err
+	if len(keys) > 100 {
+		c.logger.WarnContext(ctx, "invalidate affects many keys, consider key design", "count", len(keys))
+	}
+
+	for _, key := range dedupeKeys(keys) {
+		// 每 key 独立 singleflight（key:%s，与 Getfn 回源串行）。逐 key 顺序 Do：不嵌套、
+		// 不同时持多锁，每 key 处理完立即 Forget，故并发交叉 key 集不会交叉持锁 → 无死锁。
+		fnKey := fmt.Sprintf("key:%s", key)
+		_, _, shared := c.sg.Do(fnKey, func() (interface{}, error) {
+			c.Delete(ctx, key)
+			c.scheduleDelayedSecondDelete(key)
+			return storeItem{}, nil
+		})
+		if shared {
+			// 删除闭包被并发 in-flight 调用（Getfn 回填或先行 Invalidate）的 singleflight
+			// 共享吞掉，未随 Do 执行。Do 以 shared=true 返回时该 in-flight 已完成，故此处
+			// 补删确定性晚于其回填，可清除脏值；补删后若再回源发生在 mutate 之后，读到新值，
+			// 无新脏窗口。Invalidate 间共享时补删幂等（重复 Delete 对空 key 无害、多一次广播、
+			// timer Stop-重建语义正确）。不补则源已变更而缓存停留旧值直到 TTL，且无二次删兜底。
+			c.Delete(ctx, key)
+			c.scheduleDelayedSecondDelete(key)
 		}
+		c.sg.Forget(fnKey) // 循环内每 key Do 后立即 Forget，不可 defer 到函数末尾
+	}
 
-		c.Delete(ctx, key)
+	return nil
+}
 
-		return storeItem{}, nil
+// dedupeKeys 去除重复 key 与空串，保持首次出现顺序（供 Invalidate 逐 key 失效，
+// 避免同一 key 在一次调用中被重复删除/重复调度二次删）。
+func dedupeKeys(keys []string) []string {
+	if len(keys) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(keys))
+	out := make([]string, 0, len(keys))
+	for _, k := range keys {
+		if k == "" {
+			continue
+		}
+		if _, ok := seen[k]; ok {
+			continue
+		}
+		seen[k] = struct{}{}
+		out = append(out, k)
+	}
+	return out
+}
+
+// scheduleDelayedSecondDelete 为 key 调度一次延时二次删除；开关关闭或已 Close 时直接返回。
+// 同 key 在延迟窗口内重复失效时：Stop 旧 timer，以新的调度标识重建（无条件补删，重复
+// 执行幂等）。time.AfterFunc 不阻塞调用方，也不在 singleflight 临界区内 sleep。
+func (c *cache) scheduleDelayedSecondDelete(key string) {
+	// Close 后防御：closed 置位即早返回，避免与 Close 竞争重建已被置 nil 的 delayedTimers。
+	if c.closed.Load() || c.opt.delayedSecondDelete <= 0 {
+		return
+	}
+
+	// scheduledAt 仅作 timer bookkeeping：延迟回调据此判断自身是否为 map 中最新条目
+	// （防误摘同 key 重建后的新 timer），不再参与版本判定。
+	scheduledAt := time.Now().UnixMilli()
+	delay := c.opt.delayedSecondDelete
+
+	c.delayedMu.Lock()
+	defer c.delayedMu.Unlock()
+
+	// 锁内复检：入口检查通过后、加锁前若并发 Close 已清空 map，则放弃重建，杜绝泄漏。
+	if c.closed.Load() {
+		return
+	}
+
+	if c.delayedTimers == nil {
+		c.delayedTimers = make(map[string]*delayedDelete)
+	}
+	// 同 key 已有未触发的 timer：先停止，只保留最新一次调度。
+	if dd, ok := c.delayedTimers[key]; ok {
+		dd.timer.Stop()
+	}
+	timer := time.AfterFunc(delay, func() {
+		c.delayedInvalidateSecondDelete(key, scheduledAt)
 	})
+	c.delayedTimers[key] = &delayedDelete{timer: timer, scheduledAt: scheduledAt}
+}
 
-	return err
+// delayedInvalidateSecondDelete 在定时器协程内执行延时二次删除（best-effort）。
+// 采用经典无条件二次删：不判版本，对 L1/L2 各补删一次。原因——version 为写入时刻毫秒
+// 时间戳，竞态回填的脏值 version 可能 ≥ 失效时刻（回填发生在首删之后），按版本判定对
+// 目标场景结构性失效，故无条件删。代价：窗口内合法新写入也会被清除，由下次读取回源自愈
+// （fail-safe）。任一实际删除发生后广播集群并复位校验计数；降级期跳过 L2，TTL 与既有补偿兜底。
+func (c *cache) delayedInvalidateSecondDelete(key string, scheduledAt int64) {
+	if c.closed.Load() {
+		return
+	}
+
+	// 从延迟 map 摘除自身条目：持锁并比对 scheduledAt（bookkeeping），避免误摘同 key 重建
+	// 后的新 timer。同毫秒重复失效可能令旧回调未被摘除而多跑一次幂等补删，无害。
+	c.delayedMu.Lock()
+	if dd, ok := c.delayedTimers[key]; ok && dd.scheduledAt == scheduledAt {
+		delete(c.delayedTimers, key)
+	}
+	c.delayedMu.Unlock()
+
+	// 后台协程：自建带超时的 context（对齐 flushTimeout 超时纪律），日志用非 Context 变体。
+	ctx, cancel := context.WithTimeout(context.Background(), flushTimeout)
+	defer cancel()
+
+	removed := false
+
+	// L1：无条件删除。内存层删除动作恒发生，即便 store 报错也计为已删以触发集群广播
+	// （其他实例需各自清 L1）。
+	if c.localStore != nil {
+		if err := c.localStore.Delete(ctx, key); err != nil {
+			c.logger.Warn("delayed second delete local remove failed", "key", key, "err", err)
+		}
+		removed = true
+	}
+
+	// L2：降级期跳过（不塞 pendingDeletes，避免恢复后无条件误删新值），本次由 TTL 兜底；
+	// 非降级直接调 remoteStore.Delete，绕过 removeFromStorage 的 pendingDeletes 分支，封死
+	// "判定后降级翻转致误入队列"；删除错误仅 Warn，不调 recordRemoteError（不污染降级状态机）。
+	if c.remoteStore != nil {
+		if c.isDegraded() {
+			c.logger.Warn("delayed second delete skipped remote: degraded", "key", key)
+		} else if err := c.remoteStore.Delete(ctx, key); err != nil {
+			c.logger.Warn("delayed second delete remote remove failed", "key", key, "err", err)
+		} else {
+			removed = true
+		}
+	}
+
+	// 任一实际删除发生（L1 恒发生，或 L2 删除成功）→ 复位校验计数并广播。
+	if removed {
+		c.resetVerifyCount(key)
+		c.noticeRemoved(ctx, key)
+	}
 }
 
 func (c *cache) Delete(ctx context.Context, keys ...string) {
@@ -613,6 +778,15 @@ func (c *cache) Close() {
 		c.closed.Store(true)
 		close(c.stopChan)
 		c.watcherWG.Wait()
+
+		// 停止全部 pending 延时二次删除 timer 并清空：closed 已置位，即使个别回调
+		// 已进入执行也会在入口 closed.Load() 处直接返回（双保险）。
+		c.delayedMu.Lock()
+		for _, dd := range c.delayedTimers {
+			dd.timer.Stop()
+		}
+		c.delayedTimers = nil
+		c.delayedMu.Unlock()
 
 		if c.degradeStopRecov != nil {
 			close(c.degradeStopRecov)
@@ -700,7 +874,10 @@ func (c *cache) syncBatch() {
 	}
 	c.versionCursor = batch[len(batch)-1]
 
-	ctx := context.Background()
+	// 与 healthLoop/flushPending/延时二次删 一致的超时纪律：给远程采样一个上限，
+	// 防止无超时的 Store 拖住单轮、令版本同步（pull-based coherence）停摆。
+	ctx, cancel := context.WithTimeout(context.Background(), flushTimeout)
+	defer cancel()
 	for _, key := range batch {
 		remoteData, remoteExist, err := c.remoteStore.Get(ctx, key)
 		if err != nil {
@@ -1174,15 +1351,26 @@ func (c *cache) startWatcher() {
 			select {
 			case key, ok := <-ch:
 				if !ok {
-					_ = c.listener.Close(context.Background())
+					c.closeListener()
 					return
 				}
 				c.removeFromStorage(context.Background(), c.localStore, key)
 			case <-c.stopChan:
-				_ = c.listener.Close(context.Background())
+				c.closeListener()
 				return
 			}
 		}
+	}
+}
+
+// closeListener 带超时地关闭 Listener：传入 listenerCloseTimeout 的 ctx，即便违约/慢的
+// 第三方实现无界阻塞，尊重 ctx 者也会在超时后返回；返回 error（含 context.DeadlineExceeded）
+// 仅 Warn 并放弃等待，不 panic、不重试。startWatcher 属后台协程，日志用非 Context 变体。
+func (c *cache) closeListener() {
+	ctx, cancel := context.WithTimeout(context.Background(), listenerCloseTimeout)
+	defer cancel()
+	if err := c.listener.Close(ctx); err != nil {
+		c.logger.Warn("listener close failed or timed out", "err", err)
 	}
 }
 

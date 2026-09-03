@@ -1701,6 +1701,11 @@ func TestVerifySkipsEvictionForPendingKey(t *testing.T) {
 
 // --- P1-3: Invalidate 与 Getfn 的 singleflight 互斥 ---
 
+// 批2 新语义：mutateFn 移至 singleflight 之外执行，不再与 Getfn 回源互斥——
+// singleflight(key:%s) 现仅串行化"逐 key 删除 + 二次删调度"与 Getfn 回填。
+// 本用例据新不变量验证：(a) mutateFn 恒被执行（锁外，不受并发 Getfn 的 singleflight
+// 共享吞掉）；(b) 同 key 上 Invalidate 与 Getfn 高频交叉不 panic、无死锁、无数据竞争
+// （-race 下运行）；(c) 并发退去后 Invalidate 稳定删除生效。
 func TestInvalidateConcurrentGetfnSharesSingleflight(t *testing.T) {
 	c := &cache{
 		localStore: newMemStore(),
@@ -1713,48 +1718,48 @@ func TestInvalidateConcurrentGetfnSharesSingleflight(t *testing.T) {
 	}
 	ctx := context.Background()
 
-	updateStarted := make(chan struct{})
-	releaseUpdate := make(chan struct{})
-	updateErr := make(chan error, 1)
+	var mu sync.Mutex
+	mutateRuns := 0
 
-	go func() {
-		close(updateStarted)
-		updateErr <- c.Invalidate(ctx, "k", func(ctx context.Context, key string) error {
-			<-releaseUpdate // 阻塞，保证 Invalidate 持有 singleflight
-			return nil
-		})
-	}()
-	<-updateStarted
-	time.Sleep(20 * time.Millisecond)
+	var wg sync.WaitGroup
+	for i := 0; i < 50; i++ {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			_ = c.Getfn(ctx, "k", new(string), func(_ context.Context, _ string, v any) (bool, error) {
+				if pv, ok := v.(*string); ok {
+					*pv = "x"
+				}
+				return true, nil
+			}, 60)
+		}()
+		go func() {
+			defer wg.Done()
+			_ = c.Invalidate(ctx, func(_ context.Context) ([]string, error) {
+				mu.Lock()
+				mutateRuns++
+				mu.Unlock()
+				return []string{"k"}, nil
+			})
+		}()
+	}
 
-	// 并发 Getfn：应共享 Invalidate 的 singleflight（key:%s 一致），不执行 loadFn
-	loadCount := 0
-	getfnErr := make(chan error, 1)
-	go func() {
-		var s string
-		getfnErr <- c.Getfn(ctx, "k", &s, func(ctx context.Context, key string, v any) (bool, error) {
-			loadCount++
-			return true, nil
-		}, 60)
-	}()
-	// 等待 Getfn 完成 getFromCache（本地 miss，微秒级）并进入 Getfn 回源的
-	// singleflight 阻塞；Invalidate 仍在持锁，Getfn 只能共享其结果。
-	time.Sleep(100 * time.Millisecond)
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("deadlock or hang: Invalidate/Getfn per-key singleflight failed to converge")
+	}
 
-	close(releaseUpdate) // 放行 Invalidate
-	assert.Nil(t, <-updateErr)
-	assert.ErrorIs(t, <-getfnErr, ErrEntityNotExist, "Getfn should share Invalidate result (deleted) instead of loading")
-	assert.Equal(t, 0, loadCount, "loadFn must not run while Invalidate holds the singleflight")
+	assert.Equal(t, 50, mutateRuns, "mutateFn 必须每次都执行（锁外，不被 singleflight 共享吞掉）")
 
-	// Invalidate 完成后 Getfn 正常回源
-	var s2 string
-	assert.Nil(t, c.Getfn(ctx, "k", &s2, func(ctx context.Context, key string, v any) (bool, error) {
-		if sv, ok := v.(*string); ok {
-			*sv = "fresh"
-		}
-		return true, nil
-	}, 60))
-	assert.Equal(t, "fresh", s2)
+	// 收敛：并发退去后再来一次 Invalidate，删除应稳定生效。
+	assert.NoError(t, c.Invalidate(ctx, func(_ context.Context) ([]string, error) {
+		return []string{"k"}, nil
+	}))
+	var s string
+	assert.ErrorIs(t, c.Get(ctx, "k", &s), ErrEntityNotExist, "无并发干扰时 Invalidate 应稳定删除 key")
 }
 
 // --- P2: mem_store.Close 幂等 ---

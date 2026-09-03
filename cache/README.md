@@ -54,7 +54,7 @@ c = cache.New(
 | `Put(ctx, key, val, expire)` | 写入缓存（local + remote） |
 | `Delete(ctx, keys...)` | 删除缓存并通知其他实例 |
 | `PreLoad(ctx, loadFn, expire)` | 预加载批量数据 |
-| `Invalidate(ctx, key, mutateFn)` | mutateFn 内写/删数据源，成功后自动失效缓存（本地+远程双删，并经 listener 向集群广播收敛） |
+| `Invalidate(ctx, mutateFn)` | mutateFn 内写/删数据源并**返回受影响的全部缓存 key**（`func(ctx) ([]string, error)`），成功后库逐 key 失效：per-key singleflight 与回源串行（共享吞删时确定性补删）、本地+远程双删、listener 集群广播收敛；可选延时无条件补删兜底跨实例竞态（`WithDelayedSecondDelete`）。一次变更影响多 key 无需多次调用 |
 | `DeletePattern(ctx, pattern)` | 按 glob 模式批量删除匹配键（不发送集群通知） |
 | `Stats()` | 返回命中/未命中/回源等统计只读快照 |
 | `GetMulti(ctx, keys...)` | 批量获取 |
@@ -152,6 +152,7 @@ c.Delete(ctx, "key")
 | `WithLogger(l)` | 日志记录器 |
 | `WithTTLJitter(d)` | TTL 随机抖动范围（默认开启 0~30s；`WithTTLJitter(0)` 关闭） |
 | `WithHotKeyThreshold(n)` | L1 容量驱逐热 key 豁免：清理周期内命中 ≥ n 的条目优先跳过，单轮上限约 25%，热度窗口=清理周期，默认关闭（详见"内存存储驱逐策略"） |
+| `WithDelayedSecondDelete(d)` | 延时无条件补删（默认 0 关闭）：`Invalidate` 首删后异步延迟 d 再做一次无条件删除并广播，兜底跨实例竞态回填的旧值；d 须大于业务最坏「回源读库+回填」耗时。代价：窗口内合法新写入一并被清除，下次回源自愈（fail-safe）；开启后每 key 每次失效正常产生 2 次广播，高频写场景 listener 流量约 ×2 |
 
 ### 缓存雪崩防护
 

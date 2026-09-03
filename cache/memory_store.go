@@ -362,7 +362,10 @@ func (*mem_store) IsRemote() bool { return false }
 func (*mem_store) Name() string { return "memory" }
 
 // Close 停止后台清理 goroutine。幂等：两个 cache 实例共享同一 store 时
-// 二次 Close 不 panic。
+// 二次 Close 不 panic。注意：多 cache 实例共享同一 store 时，首个 Close 会永久
+// 停止 janitor（后台主动过期清理），其余仍在运行的实例退化为仅依赖惰性过期
+// （Get/驱逐时顺带清理），不再享受后台主动回收——共享 store 的生命周期以最先
+// 到来的 Close 为准，如需各自独立回收请为每个实例分配独立 mem_store。
 func (s *mem_store) Close() {
 	s.closeOnce.Do(func() {
 		close(s.stopClean)
