@@ -5,6 +5,7 @@ use (
 	./cache
 	./config
 	./id_generator
+	./leader
 	./lifecycle
 	./lock
 	./logger
