@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/redis/go-redis/v9"
 )
@@ -57,6 +58,15 @@ type redisClient struct {
 	state    *closeState
 	ownsPool bool            // 是否拥有底层连接池：NewWithClient 包装外部 uc 时为 false
 	breaker  *CircuitBreaker // 熔断器（默认启用；nil 表示禁用）
+	// luaSupport 记录服务器对 EVAL/Lua 脚本的支持情况（服务器级共享，所有
+	// 扩展的所有过滤器实例共用一份记忆）：0=未知 1=支持 -1=不支持。
+	// 用指针而非规格字面的值类型 atomic.Int32，两个硬约束所致：
+	//   1) redisClient 的方法均为值接收者（复制结构体），atomic.Int32 内嵌
+	//      noCopy，值字段直接触发 vet copylocks（已取证：passes lock by value）；
+	//   2) 值字段在副本间状态分裂，违背"服务器级共享"语义。
+	// 与 closeState 同理由指针保证共享（见其注释）。nil（零值构造的
+	// redisClient，仅测试场景）按"未知"处理，见 luaState 等访问方法。
+	luaSupport *atomic.Int32
 }
 
 // closeState 保存 client 连接池的生命周期状态，通过指针共享：
@@ -238,6 +248,7 @@ func NewWithClient(uc redis.UniversalClient, opts ...Option) (Client, error) {
 		prefix:          prefix,
 		conf:            &opt.UniversalOptions,
 		ownsPool:        false, // 不拥有外部传入的连接池
+		luaSupport:      new(atomic.Int32),
 		state: &closeState{
 			children: make(map[*redisClient]struct{}),
 		},
@@ -413,6 +424,7 @@ func newWithOpts(opt *RedisOptions, prefix redisPrefix) *redisClient {
 		prefix:          prefix,
 		conf:            &opt.UniversalOptions,
 		ownsPool:        true, // 内部创建连接池，拥有所有权
+		luaSupport:      new(atomic.Int32),
 		state: &closeState{
 			children: make(map[*redisClient]struct{}),
 		},
@@ -434,4 +446,74 @@ func (c *redisClient) initBreaker(rdb redis.UniversalClient, opt *RedisOptions) 
 	}
 	c.breaker = newCircuitBreaker(opt.breakerThreshold, opt.breakerCooldown)
 	rdb.AddHook(&breakerHook{breaker: c.breaker})
+}
+
+// --- Lua 能力记忆（C3a）---
+//
+// bitmap 类扩展（bloom 等）优先用 Lua 脚本单往返原子完成位操作；在不支持
+// EVAL 的服务器（代理层屏蔽、ACL 禁用、精简编译）上每次请求都会先撞一次
+// 脚本错误再降级，白付一次往返。luaSupport 把这一探测结果记忆为服务器级
+// 三态（0=未知 1=支持 -1=不支持），入口分派见 bloom.go 的 runBitmapScript。
+
+// luaVerdict 是 EVAL 失败后的分诊结论（见 classifyLuaError）。
+type luaVerdict uint8
+
+const (
+	// luaVerdictUnavailable 瞬态错误（连接/服务不可用类）：不动记忆，调用方
+	// 按 FailPolicy 兜底（fallbackBool）——服务器可能只是抖动，误置 -1 会把
+	// 恢复后的好服务器永久打入慢路径。
+	luaVerdictUnavailable luaVerdict = iota
+	// luaVerdictUnsupported 命令不存在/被禁类：置记忆 -1，调用方降级走
+	// 非原子回退路径，此后入口跳过 EVAL。
+	luaVerdictUnsupported
+	// luaVerdictDataError 数据类错误（WRONGTYPE/NOPERM/位偏移非法等）：
+	// 原样透传且**不置记忆**——与 Lua 支持与否无关，误置位同样会把好服务器
+	// 永久打入慢路径。
+	luaVerdictDataError
+)
+
+// classifyLuaError 对 EVAL 失败原因分诊，决定 luaSupport 的状态迁移与调用方
+// 处置。纯函数、可独立测试；判定顺序：先瞬态错误（IsUnavailable），再命令
+// 禁用类（Redis 错误文本特征："unknown command" / "ERR unknown" /
+// "not allowed"，分别覆盖代理屏蔽、标准 Redis 未知命令、ACL/脚本内禁用），
+// 其余一律视为数据类错误。
+func classifyLuaError(err error) luaVerdict {
+	if IsUnavailable(err) {
+		return luaVerdictUnavailable
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "unknown command") ||
+		strings.Contains(msg, "ERR unknown") ||
+		strings.Contains(msg, "not allowed") {
+		return luaVerdictUnsupported
+	}
+	return luaVerdictDataError
+}
+
+// luaState 返回当前 Lua 能力记忆（0=未知 1=支持 -1=不支持）；
+// luaSupport 为 nil（零值构造 client）按未知处理。
+func (rdb *redisClient) luaState() int32 {
+	if rdb.luaSupport == nil {
+		return 0
+	}
+	return rdb.luaSupport.Load()
+}
+
+// luaTryEval 报告入口是否应尝试 EVAL：未知/支持时尝试，不支持时跳过
+// 直接走非原子回退路径。
+func (rdb *redisClient) luaTryEval() bool { return rdb.luaState() != -1 }
+
+// luaMarkSupported 记住服务器支持 Lua（仅未知态→支持一次迁移：CAS 原子
+// 完成 Load-then-Store，已支持/已判不支持时免写且不覆盖 -1）。
+func (rdb *redisClient) luaMarkSupported() {
+	if rdb.luaSupport != nil {
+		rdb.luaSupport.CompareAndSwap(0, 1)
+	}
+}
+
+// luaMarkUnsupported 记住服务器不支持 Lua（此后永久走慢路径）。
+func (rdb *redisClient) luaMarkUnsupported() {
+	if rdb.luaSupport != nil {
+		rdb.luaSupport.Store(-1)
+	}
 }

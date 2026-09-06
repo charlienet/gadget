@@ -285,9 +285,9 @@ func TestParseUrl(t *testing.T) {
 			wantPass:  "pass",
 		},
 		{
-			name:     "非法 URL",
-			url:      "://bad",
-			wantErr:  true,
+			name:    "非法 URL",
+			url:     "://bad",
+			wantErr: true,
 		},
 		{
 			name:    "空串",
@@ -615,5 +615,194 @@ func TestNewBloomFilterViaInterface(t *testing.T) {
 		added, err = bf.Add(ctx, "item1")
 		assert.NoError(t, err)
 		assert.False(t, added)
+	})
+}
+
+// TestBloomBitmapMultiViaInterface 验证 bitmap 路径 AddMulti/ExistsMulti 的
+// 返回值顺序与入参严格对应（对齐 BF.MADD 语义），以及空入参早返回。
+func TestBloomBitmapMultiViaInterface(t *testing.T) {
+	test.RunOnMiniRedis(t, func(rdb redis.Client) {
+		ctx := context.Background()
+		bf := rdb.NewBloomFilterWithEstimate("bfmulti", 10000, 0.01)
+
+		// 空入参：返回空结果、无错误。
+		// （BF.* 与 bitmap 两路径均已统一早返回 nil——assert.Empty 对
+		// nil 与 []bool{} 都成立，此处只断言 Empty）
+		got, err := bf.AddMulti(ctx)
+		assert.NoError(t, err)
+		assert.Empty(t, got)
+		got, err = bf.ExistsMulti(ctx)
+		assert.NoError(t, err)
+		assert.Empty(t, got)
+
+		// 首轮全新增
+		added, err := bf.AddMulti(ctx, "b", "a", "d", "c")
+		require.NoError(t, err)
+		assert.Equal(t, []bool{true, true, true, true}, added)
+
+		// 乱序重复：位置与入参对应（b/d 已存在→false，e/f 新增→true）
+		added, err = bf.AddMulti(ctx, "d", "e", "b", "f")
+		require.NoError(t, err)
+		assert.Equal(t, []bool{false, true, false, true}, added)
+
+		// ExistsMulti 顺序对应
+		exists, err := bf.ExistsMulti(ctx, "a", "zz", "f", "yy")
+		require.NoError(t, err)
+		assert.Equal(t, []bool{true, false, true, false}, exists)
+	})
+}
+
+// TestBloomBitmapInfo 验证 bitmap 路径 Info（C4）：NumItems 由 BITCOUNT
+// 置位数反推，应落在真实插入数的合理区间；Capacity/Size 正常填充；
+// NumFilters/Expansion 仅 BF.* 路径有意义，bitmap 路径保持零值。
+func TestBloomBitmapInfo(t *testing.T) {
+	test.RunOnMiniRedis(t, func(rdb redis.Client) {
+		ctx := context.Background()
+		const inserted = 1000
+
+		bf := rdb.NewBloomFilterWithEstimate("bfinfo", 10000, 0.01)
+		items := make([]string, 0, inserted)
+		for i := 0; i < inserted; i++ {
+			items = append(items, fmt.Sprintf("info-%d", i))
+		}
+		_, err := bf.AddMulti(ctx, items...)
+		require.NoError(t, err)
+
+		info, err := bf.Info(ctx)
+		require.NoError(t, err)
+		assert.Equal(t, int64(10000), info.Capacity)
+		assert.Greater(t, info.Size, int64(0), "STRLEN 应为正")
+		assert.Equal(t, int64(0), info.NumFilters, "bitmap 路径不填 NumFilters（BF.* only）")
+		assert.Equal(t, int64(0), info.Expansion, "bitmap 路径不填 Expansion（BF.* only）")
+		assert.InDelta(t, float64(inserted), float64(info.NumItems), float64(inserted)*0.15,
+			"NumItems 估计值应落在插入数 ±15% 内")
+	})
+}
+
+// TestBloomNativeBFViaRealRedis 在真实 Redis（加载 bf 模块）上验证 bfCmdImpl
+// 原生 BF.* 路径：工厂自动分派、Add/Exists/AddMulti/ExistsMulti/Info 全链路，
+// Info 的 NumFilters/Expansion 由 BF.INFO 填充（以 NumFilters>0 佐证走的是
+// 原生路径而非 bitmap 回退）。
+//
+// 共享实例纪律：key 带 bloomtest:<随机> 唯一前缀，收尾 Del 清理；
+// 严禁 FLUSHDB/FLUSHALL。REDIS_URL 未设置时跳过。
+func TestBloomNativeBFViaRealRedis(t *testing.T) {
+	test.RunOnRedis(t, func(rdb redis.Client) {
+		if !rdb.Capability().HasBloom() {
+			t.Skip("服务器未加载 bf 模块，跳过 BF.* 原生路径测试")
+		}
+
+		ctx := context.Background()
+		key := fmt.Sprintf("bloomtest:%s:native", randomHex(12))
+		defer func() { _ = rdb.Del(ctx, key).Err() }()
+
+		bf := rdb.NewBloomFilterWithEstimate(key, 10000, 0.01)
+
+		added, err := bf.Add(ctx, "n1")
+		require.NoError(t, err)
+		assert.True(t, added)
+
+		added, err = bf.Add(ctx, "n1")
+		require.NoError(t, err)
+		assert.False(t, added, "重复 Add 应返回 false")
+
+		ok, err := bf.Exists(ctx, "n1")
+		require.NoError(t, err)
+		assert.True(t, ok)
+
+		ok, err = bf.Exists(ctx, "n-missing")
+		require.NoError(t, err)
+		assert.False(t, ok)
+
+		// AddMulti 返回顺序与入参严格对应（BF.MADD 语义）
+		multiAdded, err := bf.AddMulti(ctx, "m2", "m1", "m3")
+		require.NoError(t, err)
+		assert.Equal(t, []bool{true, true, true}, multiAdded)
+		multiAdded, err = bf.AddMulti(ctx, "m3", "m4", "m1")
+		require.NoError(t, err)
+		assert.Equal(t, []bool{false, true, false}, multiAdded)
+
+		exists, err := bf.ExistsMulti(ctx, "m1", "nope", "m4")
+		require.NoError(t, err)
+		assert.Equal(t, []bool{true, false, true}, exists)
+
+		info, err := bf.Info(ctx)
+		require.NoError(t, err)
+		assert.Greater(t, info.NumFilters, int64(0), "NumFilters>0 佐证走 BF.INFO 原生路径")
+		assert.GreaterOrEqual(t, info.NumItems, int64(4), "已灌入 m1..m4 加 n1 共 5 个")
+		assert.Greater(t, info.Size, int64(0))
+	})
+}
+
+// TestBloomClusterSingleKey 在真实 Redis Cluster 上验证布隆过滤器单 key 操作
+// 的集群路由：bitmap 路径的全部命令（GETBIT/SETBIT 的 Lua 脚本与多命令兜底）
+// 均作用于同一 key，cluster 下同 slot 合法，须能正常完成 Add/Exists/
+// AddMulti/ExistsMulti/Info 全链路。
+//
+// 共享实例纪律：key 带 bloomtest:<随机> 唯一前缀，收尾 Del 清理；
+// 严禁 FLUSHDB/FLUSHALL。REDIS_CLUSTER_ADDRS 未设置时跳过。
+func TestBloomClusterSingleKey(t *testing.T) {
+	test.RunOnRedisCluster(t, func(rdb redis.Client) {
+		ctx := context.Background()
+		key := fmt.Sprintf("bloomtest:%s:cluster", randomHex(12))
+		defer func() { _ = rdb.Del(ctx, key).Err() }()
+
+		bf := rdb.NewBloomFilterWithEstimate(key, 10000, 0.01)
+		t.Logf("HasBloom=%v：true 走 BF.* 原生路径，false 走 bitmap+Lua 回退路径",
+			rdb.Capability().HasBloom())
+
+		added, err := bf.Add(ctx, "c1")
+		require.NoError(t, err, "cluster 单 key Add 应成功（同 slot 路由）")
+		assert.True(t, added)
+
+		ok, err := bf.Exists(ctx, "c1")
+		require.NoError(t, err)
+		assert.True(t, ok)
+
+		multiAdded, err := bf.AddMulti(ctx, "c2", "c1", "c3")
+		require.NoError(t, err)
+		assert.Equal(t, []bool{true, false, true}, multiAdded)
+
+		exists, err := bf.ExistsMulti(ctx, "c3", "nope", "c2")
+		require.NoError(t, err)
+		assert.Equal(t, []bool{true, false, true}, exists)
+
+		_, err = bf.Info(ctx)
+		require.NoError(t, err, "cluster 单 key Info（STRLEN/BITCOUNT 或 BF.INFO）应成功")
+	})
+}
+
+// BenchmarkBitmapAdd 在 miniredis 上测 bitmap 路径单条 Add（Lua 原子脚本）
+// 的吞吐基线；命名对齐现有 BenchmarkBF。
+func BenchmarkBitmapAdd(b *testing.B) {
+	test.RunOnMiniRedis(b, func(rdb redis.Client) {
+		bf := rdb.NewBloomFilterWithEstimate("bench:bitmap:add", 1000000, 0.01)
+		ctx := context.Background()
+
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			_, _ = bf.Add(ctx, fmt.Sprintf("item-%d", i))
+		}
+	})
+}
+
+// BenchmarkBitmapMulti 测 AddMulti 的吞吐。当前实现为单次批量 Lua 脚本
+// （原规格 C3b 已落地：1 往返处理 n×k 个位，返回顺序与入参严格对应），
+// 本基线供后续改动对比。
+func BenchmarkBitmapMulti(b *testing.B) {
+	const batchSize = 64
+
+	test.RunOnMiniRedis(b, func(rdb redis.Client) {
+		bf := rdb.NewBloomFilterWithEstimate("bench:bitmap:multi", 1000000, 0.01)
+		ctx := context.Background()
+
+		batch := make([]string, batchSize)
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			for j := range batch {
+				batch[j] = fmt.Sprintf("item-%d-%d", i, j)
+			}
+			_, _ = bf.AddMulti(ctx, batch...)
+		}
 	})
 }

@@ -191,6 +191,63 @@ if !res.Allowed {
 // 差异：令牌桶允许突发、按平均速率补令牌；漏桶输出速率严格恒定、拒绝突发。
 ```
 
+布隆过滤器（双路径，无需 RedisBloom 模块）：
+
+```go
+bf := rdb.NewBloomFilter("bf:1", redis.WithCapacity(1000000), redis.WithFalsePositive(0.01))
+added, err := bf.Add(ctx, "item1")            // 返回是否新增（已存在返回 false）
+ok, err := bf.Exists(ctx, "item1")            // false=必不存在；true=可能存在
+flags, err := bf.AddMulti(ctx, "a", "b", "c") // 批量，返回顺序与入参严格对应（对齐 BF.MADD）
+info, err := bf.Info(ctx)                     // 元数据（bitmap 路径 NumItems 由 BITCOUNT 估算）
+// 快捷等价：rdb.NewBloomFilterWithEstimate("bf:1", 1000000, 0.01)
+```
+
+分派逻辑：服务器加载了 RedisBloom 的 bf 模块 → 原生 BF.* 命令（自动扩容子
+过滤器）；未加载 → 自动回退到 bitmap（GETBIT/SETBIT + Lua 原子脚本）实现
+（普通 Redis 即可运行，无模块依赖）。回退版单次 EVAL 完成 k 位检查+置位
+（并发 Add 同一 item 原子，恰一个返回"新增"）；AddMulti/ExistsMulti 走
+**单次批量 Lua 脚本**（1 往返处理 n×k 个位，返回顺序与入参严格对应，对齐
+BF.MADD 语义；不分块，超大 n 时单次脚本的 O(n·k) 服务端执行代价由调用方
+控制批量大小）。可用 rdb.Capability().HasBloom() 预检模块是否加载。
+
+Lua 能力记忆与降级兜底：EVAL 失败按错误类别三态记忆（连接级共享，
+未知/支持/不支持）——仅"命令不存在/被禁"类（代理屏蔽、ACL 禁用等）
+永久记住不支持、此后跳过 EVAL；服务瞬态错误（抖动/断连）不改写记忆、
+按 FailPolicy 兜底；WRONGTYPE 等数据类错误原样透传。不支持 Lua 的服务器
+自动降级为 **pipeline 非原子兜底**（k 个 GETBIT / SETBIT 各合并为 1 次
+往返，Add 最坏 2k 次往返降为 2 次）；**该兜底路径不保证并发原子性**
+（先查后写存在窗口，并发添加同一 item 可能都返回"新增"），属 Lua 不可用
+时的尽力而为降级。
+
+容量规划速查：最优位图 `m=ceil(-n·ln p/ln2²)`、哈希个数 `k=ceil(ln2·m/n)`、
+每元素位数 ≈ `-log2(p)`（1% ≈ 9.6 bit、0.1% ≈ 10 bit）：
+
+| 容量 n | 误判率 p | 位图 m | 内存（m/8） | k |
+|---|---|---|---|---|
+| 1 万 | 1% | 95,851 bit | ≈ 12 KB | 7 |
+| 100 万 | 1% | 9,585,059 bit | ≈ 1.14 MB | 7 |
+| 1000 万 | 0.1% | 143,775,876 bit | ≈ 17.1 MB | 10 |
+| ≈4.5 亿 | 1% | 2^32-1 bit | 512 MB（位图上限） | 7 |
+
+容量契约声明：bitmap 路径容量**创建时固定、位图不扩容**；插入超过预估容量
+后误判率按 `(1-e^(-k·n'/m))^k` 单调恶化且**不可恢复**（位图无删除语义），
+属应用端容量规划责任。解法：预估充足容量 / 周期性重建（换新 key 灌入）/
+部署 RedisBloom 模块（BF.* 路径自动扩容）。非法参数静默回落默认值：
+`WithCapacity(n<=0)` 保留 1000000、`WithFalsePositive` 仅接受 (0,1) 开区间。
+
+上限与成本：位图上限 2^32-1 bit（Redis 字符串 512MB 限制），p=0.01 时
+capacity 超约 4.5 亿将在创建时 fail-fast panic（提示降低 capacity 或部署
+RedisBloom）；`Info` 的 NumItems 由 BITCOUNT 置位数反推
+（`numItems≈-(m/k)·ln(1-bitsSet/m)`），BITCOUNT 为 O(bytes) 全量扫描，
+仅适合低频运维查询。
+
+**BREAKING（v0.5.0）**：位图路径换 xxh3-128 双哈希，并奇化位图大小（m|1）
+与哈希步长（h2|1）——修复旧实现步长与模数共享公因子 2 导致的探测轨道减半
+（实测 p=0.001 时 FPR 超标 34.95 倍）。旧位图 key 对新代码会产生**假阴性**，
+升级时必须删除旧 key 或换 key 重建；BF.*（RedisBloom）路径不受影响，
+并修正 bitmap 路径 Add 新增判定（对齐 BF.ADD：调用前不可能存在即返回 true）。
+
+
 布谷鸟过滤器（双实现，无需 RedisBloom 模块）：
 
 ```go
