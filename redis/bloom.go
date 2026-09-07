@@ -19,16 +19,18 @@ import (
 // 规划责任；对策为预留充足容量、周期性重建，或部署 RedisBloom 模块
 // （BF.* 路径支持自动扩容）。
 //
-// 集群分片（Redis Cluster）：NewBloomFilter/NewBloomFilterWithEstimate 在
-// Mode()==ModeCluster 时自动把过滤器打散为多个 <base>#<idx> 物理键
-// （见 bloom_shard.go）；standalone/sentinel/ring 不分片、键名与行为完全
-// 不变。WithCapacity 的容量在集群下是全局量，均摊到每分片。分片后实测
-// 误判率略高于设定值（各分片负载天然不均），对 FPR 敏感的场景请预留
-// 余量。
+// 集群分片（Redis Cluster）：默认关闭。经 NewBloomFilter 显式组合
+// WithShardCount(n>1)、且 Mode()==ModeCluster 时，把过滤器打散为多个
+// <base>#<idx> 物理键（见 bloom_shard.go、WithShardCount）；standalone/
+// sentinel/ring、或集群未显式开启（默认 n=1，含不带该 Option 的
+// NewBloomFilterWithEstimate）时不分片、键名与行为完全不变。WithCapacity
+// 的容量在分片下是全局量，均摊到每分片。分片后实测误判率略高于设定值
+// （各分片负载天然不均），对 FPR 敏感的场景请预留余量。
 //
-// standalone ↔ cluster 切换后物理键名不同，旧键空间不会被读到，切换
-// 部署形态等同于重建过滤器。集群各节点须配置同构：模块/Lua 能力探测
-// 只命中单节点，配置不一致时可能分派错路径。
+// 开启分片与未分片（含 standalone、集群默认）之间物理键名不同（前者带
+// #idx 后缀），切换部署形态或分片配置时旧键空间不会被读到，等同于重建
+// 过滤器。集群各节点须配置同构：模块/Lua 能力探测只命中单节点，配置不
+// 一致时可能分派错路径。
 type BloomFilter interface {
 	// Add adds an item to the filter. 返回 true 表示调用前该 item 不可能
 	// 存在（对齐 RedisBloom BF.ADD 语义），false 表示它可能已存在。
@@ -76,7 +78,7 @@ type bloomConfig struct {
 	failPolicyConfig
 	capacity      int64
 	falsePositive float64
-	shardCount    int       // 集群分片数（仅 ModeCluster 生效；<=0 非法值被忽略）
+	shardCount    int       // 集群分片数（默认 1=关闭；仅 ModeCluster 且 n>1 生效；<=0 非法值被忽略）
 	impl          BloomImpl // 强制实现路径（零值 BloomImplAuto=按探测自动选）
 }
 
@@ -115,10 +117,13 @@ func WithFalsePositive(rate float64) BloomOption {
 	}
 }
 
-// WithShardCount 设置集群模式下的分片键数（默认 8）。仅当
-// Mode()==ModeCluster 时生效：物理键 = <base>#<idx>，idx ∈
-// [0, effectiveN)；effectiveN 受每分片容量下限收缩，实际分片数可能小于 n
-// （见 bloom_shard.go）。非法值（n <= 0）静默忽略、保留默认 8。
+// WithShardCount 设置集群模式下的分片键数，默认 1 即不分片（v0.5.0 起分片
+// 为显式 opt-in）；仅当 Mode()==ModeCluster 且 n>1 时启用：物理键 =
+// <base>#<idx>，idx ∈ [0, effectiveN)；effectiveN 受每分片容量下限收缩，
+// 实际分片数可能小于 n（见 bloom_shard.go）。非法值（n <= 0）静默忽略、
+// 保留默认 1。选型建议：分片用于突破单键 512MB 容量上限与跨节点摊负载；
+// 批量操作密集场景建议 n 取小（每多一组批量命令多一条命令，压测 8 分片
+// 批量约 -45%，见 README 性能章节）。
 // 若 base 键自带 {hashtag}，所有分片键路由到同一 slot——分片退化为
 // 纯命名拆分，行为仍正确，但失去跨节点打散的意义。
 func WithShardCount(n int) BloomOption {
@@ -161,8 +166,9 @@ func WithBloomImpl(impl BloomImpl) BloomOption {
 // 探测强制选定 BF.* 或 bitmap 路径。
 // 失效兜底策略默认 FailOpen（服务不可用时放行业务）；可用 WithFailPolicy
 // 显式改为 FailClosed。
-// 集群分片：Mode()==ModeCluster 时自动打散为多个 <base>#<idx> 物理键
-// （见 WithShardCount、bloom_shard.go）；其余模式键名与行为完全不变。
+// 集群分片默认关闭；Mode()==ModeCluster 且显式 WithShardCount(n>1) 时打散
+// 为多个 <base>#<idx> 物理键（见 WithShardCount、bloom_shard.go）；其余
+// 情况键名与行为完全不变。
 func (rdb *redisClient) NewBloomFilter(key string, opts ...BloomOption) BloomFilter {
 	cfg := defaultBloomConfig()
 	cfg.policy = FailOpen // 过滤器默认 FailOpen：宁可放行不阻塞业务

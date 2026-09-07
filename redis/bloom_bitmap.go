@@ -19,9 +19,10 @@ type bitmapImpl struct {
 	policy        FailPolicy // 失效兜底策略（默认 FailOpen）
 }
 
-// newBitmapImpl 构造 bitmap 路径实现。集群模式下自动分片：位图参数 m/k
-// 按**每分片容量** ceil(总容量/effectiveN) 计算（路由/分组/键名共享层见
-// bloom_shard.go），standalone/sentinel/ring 不分片、每分片容量即总容量，
+// newBitmapImpl 构造 bitmap 路径实现。集群模式显式开启分片
+// （WithShardCount(n>1)）时：位图参数 m/k 按**每分片容量**
+// ceil(总容量/effectiveN) 计算（路由/分组/键名共享层见 bloom_shard.go）；
+// 关闭分片（默认、非集群或未显式请求）时不分片、每分片容量即总容量，
 // 行为与键名同分片化之前完全一致。
 func newBitmapImpl(client *redisClient, key string, cfg bloomConfig) *bitmapImpl {
 	// client 为 nil 是内部纯计算模拟（仅调 hashs/m/k 等不触网方法，见

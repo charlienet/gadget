@@ -970,7 +970,7 @@ func TestBloomShardCapacitySplit(t *testing.T) {
 		wantN   int
 		wantPer int64
 	}{
-		{"默认 8 片整容量", 8, 1_000_000, 8, 125_000},
+		{"请求 8 片整容量", 8, 1_000_000, 8, 125_000},
 		{"容量只够 5 片（capacity<N 收缩）", 8, 5_000, 5, 1_000},
 		{"容量只够 4 片（进位）", 8, 4_500, 4, 1_125},
 		{"恰好 2 片下限", 8, 2_000, 2, 1_000},
@@ -1024,23 +1024,47 @@ func TestBloomShardCapacitySplit(t *testing.T) {
 	})
 }
 
-// TestResolveBloomShardingModes 验证触发条件（规格 1）：仅 cluster 启用
-// 分片；standalone/sentinel/ring 关闭且 perShard==总容量（键名行为零回归）。
+// TestResolveBloomShardingModes 表驱动验证分片触发边界（v0.5.0 起 opt-in
+// 语义）：非集群、或集群但未显式请求（req<=1）关闭且键名无后缀（零回归）；
+// 集群 req>1 才开启——含容量收缩退化态（effectiveN 缩到 1 时 enabled 仍
+// 为 true、键名带 #0，保持集群开启态命名连续）。
 func TestResolveBloomShardingModes(t *testing.T) {
-	for _, mode := range []Mode{ModeStandalone, ModeSentinel, ModeRing} {
-		enabled, n, per := resolveBloomSharding(mode, 8, 100_000)
-		if enabled || n != 1 || per != 100_000 {
-			t.Fatalf("%s 模式不应分片：enabled=%v n=%d per=%d", mode, enabled, n, per)
-		}
+	cases := []struct {
+		name     string
+		mode     Mode
+		req      int
+		total    int64
+		wantEn   bool
+		wantN    int
+		wantPer  int64
+		wantKey0 string // 首分片物理键（关闭态为无后缀 base）
+	}{
+		// 非集群：即使显式 WithShardCount(8) 也关闭，键名与 standalone 一致
+		{"standalone+8 关闭", ModeStandalone, 8, 100_000, false, 1, 100_000, "base"},
+		{"sentinel+8 关闭", ModeSentinel, 8, 100_000, false, 1, 100_000, "base"},
+		{"ring+8 关闭", ModeRing, 8, 100_000, false, 1, 100_000, "base"},
+		// 集群但未显式请求（默认值 1）：关闭，键名无后缀
+		{"cluster+默认(1) 关闭", ModeCluster, defaultBloomShardCount, 100_000, false, 1, 100_000, "base"},
+		// 集群显式请求 >1：开启、按容量分摊
+		{"cluster+8 开启", ModeCluster, 8, 100_000, true, 8, 12_500, "base#0"},
+		// 集群请求 2、容量收缩到 effectiveN=1：仍开启、键带 #0（退化态连续性）
+		{"cluster+2 容量1500 退化仍开启", ModeCluster, 2, 1_500, true, 1, 1_500, "base#0"},
+		// 集群请求 8、容量收缩到 effectiveN=1：仍开启、键带 #0
+		{"cluster+8 容量1500 退化仍开启", ModeCluster, 8, 1_500, true, 1, 1_500, "base#0"},
 	}
-	enabled, n, per := resolveBloomSharding(ModeCluster, 8, 100_000)
-	if !enabled || n != 8 || per != 12_500 {
-		t.Fatalf("cluster 模式应 8 分片、每片 12500：enabled=%v n=%d per=%d", enabled, n, per)
-	}
-	// 集群退化态：effectiveN 收缩为 1 时 enabled 仍为 true（键名带 #0）
-	enabled, n, _ = resolveBloomSharding(ModeCluster, 8, 1_500)
-	if !enabled || n != 1 {
-		t.Fatalf("cluster 退化态应 enabled=true n=1，got enabled=%v n=%d", enabled, n)
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			enabled, n, per := resolveBloomSharding(c.mode, c.req, c.total)
+			if enabled != c.wantEn || n != c.wantN || per != c.wantPer {
+				t.Fatalf("resolveBloomSharding(%v,%d,%d) got (en=%v n=%d per=%d)，want (en=%v n=%d per=%d)",
+					c.mode, c.req, c.total, enabled, n, per, c.wantEn, c.wantN, c.wantPer)
+			}
+			// 键名口径：关闭态恒无后缀 base；开启态（含退化 n=1）首片带 #0
+			s := newBloomSharder("base", enabled, n)
+			if got := s.shardKey(0); got != c.wantKey0 {
+				t.Fatalf("首分片键名 got %q want %q（enabled=%v n=%d）", got, c.wantKey0, enabled, n)
+			}
+		})
 	}
 }
 
@@ -1140,7 +1164,7 @@ func TestBloomSharderKeysAndGroup(t *testing.T) {
 }
 
 // TestWithShardCountOption 验证 WithShardCount 选项语义（规格 9）：
-// 默认 8；n<=0 静默忽略保留默认；任意正整数合法（含 1）。
+// 默认 1（即关闭分片）；n<=0 静默忽略保留默认；任意正整数合法（含 1）。
 func TestWithShardCountOption(t *testing.T) {
 	cfg := defaultBloomConfig()
 	if cfg.shardCount != defaultBloomShardCount {

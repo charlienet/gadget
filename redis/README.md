@@ -241,23 +241,25 @@ RedisBloom）；`Info` 的 NumItems 由 BITCOUNT 置位数反推
 （`numItems≈-(m/k)·ln(1-bitsSet/m)`），BITCOUNT 为 O(bytes) 全量扫描，
 仅适合低频运维查询。
 
-**Redis Cluster 分片**：`Mode()==ModeCluster` 时工厂自动把过滤器打散为
-`effectiveN` 个物理键 `<base>#<idx>`（idx = xxh3-128 高 64 位 %
+**Redis Cluster 分片（显式 opt-in）**：分片默认关闭——v0.5.0 起须显式
+`WithShardCount(n>1)` 才启用。`Mode()==ModeCluster` 且 `n>1` 时工厂把过滤器
+打散为 `effectiveN` 个物理键 `<base>#<idx>`（idx = xxh3-128 高 64 位 %
 effectiveN，分片键不带 hash tag、由 go-redis 按整键自动路由），突破单键
-单节点的容量与并发瓶颈；standalone/sentinel/ring 不分片，键名与行为完全
-不变。`WithCapacity` 在分片下是**全局总容量**，均摊每分片
-（`ceil(总/N)`）且下限 1000——容量不足时分片数自动收缩
+单节点的容量与并发瓶颈；standalone/sentinel/ring、或集群未显式开启（默认
+n=1）时不分片，键名与行为完全不变。`WithCapacity` 在分片下是**全局总容量**，
+均摊每分片（`ceil(总/N)`）且下限 1000——容量不足时分片数自动收缩
 （`effectiveN = min(请求 N, 总/1000)`，总容量 <2000 退化为单片）；
-`WithShardCount(n)` 设置请求分片数（默认 8，n<=0 静默忽略保留默认）。
-集群下即使退化为单片也统一带 `#0` 后缀（键名连续）。语义注意：
+`WithShardCount(n)` 设置请求分片数（**默认 1 即关闭**，n<=0 静默忽略保留
+默认 1，仅 ModeCluster 生效）。集群下开启后即使退化为单片也统一带 `#0`
+后缀（键名连续）。语义注意：
 
 - 分片后实测 FPR ≈p 且**略偏高**（哈希到各分片的负载天然不均，每分片
   容量越小越明显），对误判率敏感的场景预留余量或增大总容量。
 - base 键自带 `{hashtag}` 时所有分片键路由同一 slot，分片退化为纯命名
   拆分（行为仍正确，但失去跨节点打散的意义）。
-- standalone ↔ cluster **键空间不互通**：后者键名带 `#idx` 后缀，切换
-  部署形态读不到旧键，等同重建过滤器（布隆无删除语义，只能重新灌入），
-  请纳入迁移预案。
+- 开启分片（`WithShardCount(n>1)`）与未分片（默认/standalone）**键空间
+  不互通**：前者键名带 `#idx` 后缀，切换部署形态或分片配置会读不到旧键，
+  等同重建过滤器（布隆无删除语义，只能重新灌入），请纳入迁移预案。
 - 集群下 `HasBloom()`（路径分派依据）与 Lua 能力记忆只探测 go-redis
   路由到的**随机单节点**，要求各节点模块/配置同构，否则分派错路径会
   表现为部分分片键 "unknown command" 类错误。
@@ -271,7 +273,25 @@ effectiveN，分片键不带 hash tag、由 go-redis 按整键自动路由），
   EVALSHA**：Pipeline 内无法表达 NOSCRIPT 重试——EVALSHA 的错误要 `Exec`
   后才可见，同一 Pipeline 不能补发 EVAL（go-redis `Script.Run` 的 NOSCRIPT
   回退只覆盖非 pipeline 单命令）。脚本体仅数百字节，内联的额外带宽开销可
-  忽略，是"单 Pipeline"约束下的最优实现；单键路径仍走 EVALSHA+三态记忆。
+     忽略，是"单 Pipeline"约束下的最优实现；单键路径仍走 EVALSHA+三态记忆。
+
+**性能特征（2026-09 压测，50 并发×10s、容量 200k、单机 3 主 3 从，强制双路径 bf/bitmap A/B）**：
+
+- 单条 Add/Exists：分片无实质代价——各分片数结果均落在 ±10% 噪声带内；
+  服务端 `bf.add`≈3µs、`bf.exists`≈2µs，ClusterClient 相比 standalone 的固有
+  路由开销约 5%。
+- 批量 AddMulti/ExistsMulti：一批散到 ≤N 组即 ≤N 条命令，掉幅随分片数单调
+  上升——8 分片 bf addmulti −44.7% / bitmap existsmulti −47.5%，4 分片
+  −25~−40%，2 分片 −12~−18%（区间不含 bitmap addmulti 的 −28.5%——该测点
+  与 1 分片同代码路径，系漂移嫌疑值已排除），1 分片 ≈standalone（P99 长尾系单机 7 实例抢
+  CPU，多机部署预期好转；命令数 ×N 的税与机器数无关）。
+- 选型建议：读多写少、以单条预筛为主可随意分片；高频批量场景不开分片或 n
+  取小；有 RedisBloom 优先 BF.\* 路径（约 2× QPS、自动扩容、无容量悬崖）；
+  批量的甜蜜区是单命令 `BF.MEXISTS`/`BF.ADD` 形态（把分组散列交回服务端）。
+- 路由实现：分片路由 `idx = xxh3.Hash128(item).Hi % n` 约 3.9ns/item，相对
+  网络往返可忽略、非成本项；曾评估"取首字节做模"的进一步优化被否决——业务
+  键常共享前缀，首字节取模会把同前缀键全打到单一分片、打穿负载分布，纯负
+  收益。
 
 **强制实现路径 `WithBloomImpl`**：默认 `BloomImplAuto` 按 `HasBloom()`
 探测选 BF.*/bitmap；`BloomImplBF` / `BloomImplBitmap` 跳过能力探测直接

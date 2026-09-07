@@ -155,7 +155,7 @@ func TestClusterIntegration(t *testing.T) {
 			//      （各分片键独立路由，由 go-redis 按整键分发）；
 			//   2. 分片键 <base>#<idx> 经 CLUSTER KEYSLOT + ClusterShards 验证
 			//      散布到多 slot、多节点。
-			// 总容量 100000（≥ 8×1000，effectiveN=8）、默认 WithShardCount。
+			// 总容量 100000（≥ 8×1000，effectiveN=8）、显式 WithShardCount(8)。
 			base := fmt.Sprintf("bloomctest:%s", randomHex(6))
 			keys := make([]string, 0, 8)
 			for i := 0; i < 8; i++ {
@@ -169,7 +169,9 @@ func TestClusterIntegration(t *testing.T) {
 				}
 			}()
 
-			bf := rdb.NewBloomFilterWithEstimate(base, 100_000, 0.01)
+			bf := rdb.NewBloomFilter(base,
+				redis.WithCapacity(100_000), redis.WithFalsePositive(0.01),
+				redis.WithShardCount(8))
 
 			items := make([]string, 300)
 			for i := range items {
@@ -276,7 +278,7 @@ func TestClusterIntegration(t *testing.T) {
 
 			bf := rdb.NewBloomFilter(base,
 				redis.WithCapacity(100_000), redis.WithFalsePositive(0.01),
-				redis.WithBloomImpl(redis.BloomImplBF))
+				redis.WithBloomImpl(redis.BloomImplBF), redis.WithShardCount(8))
 
 			// 零写入：8 个分片键全部未初始化，逐分片 "not found" 归一
 			info, err := bf.Info(ctx)
@@ -301,8 +303,9 @@ func TestClusterIntegration(t *testing.T) {
 		})
 
 		t.Run("布隆 WithImpl 强制路径对照", func(t *testing.T) {
-			// 评审整改⑤b：同一集群、同参数（capacity=100000、默认
-			// effectiveN=8）用 WithBloomImpl 分别强制 BF.* 与 bitmap 两条
+			// 评审整改⑤b：同一集群、同参数（capacity=100000、显式
+			// WithShardCount(8) → effectiveN=8）用 WithBloomImpl 分别强制
+			// BF.* 与 bitmap 两条
 			// 路径——两路径各 300 元素 AddMulti/ExistsMulti 自洽 + Info
 			// 合理性；TYPE 探测证明分片键存储结构双路径互不相同；同 base
 			// 的分片键 CLUSTER KEYSLOT slot 集合一致（分片路由与实现路径
@@ -326,10 +329,10 @@ func TestClusterIntegration(t *testing.T) {
 
 			bf := rdb.NewBloomFilter(baseBF,
 				redis.WithCapacity(100_000), redis.WithFalsePositive(0.01),
-				redis.WithBloomImpl(redis.BloomImplBF))
+				redis.WithBloomImpl(redis.BloomImplBF), redis.WithShardCount(8))
 			bmp := rdb.NewBloomFilter(baseBMP,
 				redis.WithCapacity(100_000), redis.WithFalsePositive(0.01),
-				redis.WithBloomImpl(redis.BloomImplBitmap))
+				redis.WithBloomImpl(redis.BloomImplBitmap), redis.WithShardCount(8))
 
 			items := make([]string, 300)
 			for i := range items {

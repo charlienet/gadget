@@ -12,10 +12,11 @@ import (
 // 错误语义）"完全一致"由同一份代码保证，而非两份复制实现。
 //
 // 设计要点（对应规格 1-3、5、6）：
-//   - 仅 Mode()==ModeCluster 时启用分片；standalone/sentinel/ring 键名与
-//     行为与分片化之前完全一致（enabled=false，shardKey 恒返回 base）。
-//   - 物理键 = <base>#<idx>，idx ∈ [0, effectiveN)。集群下即使
-//     effectiveN==1（退化态）也统一带 #0 后缀，保持键名连续。
+//   - 仅 ModeCluster 且 WithShardCount(n>1) 显式开启时启用；默认不分片，
+//     standalone/哨兵/ring 或未开启的集群键名与行为与分片化之前完全一致
+//     （enabled=false，shardKey 恒返回 base）。
+//   - 物理键 = <base>#<idx>，idx ∈ [0, effectiveN)。开启后即使因容量
+//     收缩到 effectiveN==1（退化态）也统一带 #0 后缀，保持键名连续。
 //   - 路由 idx = xxh3.Hash128(item).Hi % effectiveN（与 bitmap 位哈希
 //     同源 xxh3-128；不引入 CRC16 新实现、不给分片键加 hash tag——
 //     客户端不算 slot，go-redis cluster 按整键自动路由）。
@@ -24,8 +25,10 @@ import (
 //     bloomEffectiveShardCount）。
 
 const (
-	// defaultBloomShardCount 是集群模式下请求的分片键数（WithShardCount 可调）。
-	defaultBloomShardCount = 8
+	// defaultBloomShardCount 是集群模式默认分片请求数=1（即关闭）。分片为
+	// 显式 opt-in：仅 WithShardCount(n>1) 时启用（见 resolveBloomSharding）。
+	// 压测依据：8 分片批量 AddMulti/ExistsMulti 掉幅约 -45%，单条操作无税。
+	defaultBloomShardCount = 1
 
 	// minShardCapacity 是每个分片容量的硬下限。低于该值分片数收缩：
 	// 过小分片会让 bitmap 路径 k=ln2·m/n 暴涨、负载不均导致的误判率恶化
@@ -89,11 +92,12 @@ func bloomPerShardCapacity(total int64, n int) int64 {
 }
 
 // resolveBloomSharding 按运行模式与配置计算分片全部参数（纯函数，便于
-// 表驱动单测）。非集群模式分片关闭；集群模式即使 effectiveN==1 也返回
-// enabled=true——物理键统一带 #0 后缀，保证集群键名格式连续（迁移/排查
-// 时不必区分"集群单分片"与"未分片"两种命名）。
+// 表驱动单测）。分片为显式 opt-in：非集群模式，或集群但未显式请求分片
+// （requestedShards<=1，即默认值）时关闭，键名与 standalone 完全一致；
+// 开启态（含收缩退化态 n=1）物理键统一带 #idx 后缀，保持键名格式连续
+// （迁移/排查时不必区分"集群单分片"与"未分片"两种命名）。
 func resolveBloomSharding(mode Mode, requestedShards int, totalCapacity int64) (enabled bool, n int, perShard int64) {
-	if mode != ModeCluster {
+	if mode != ModeCluster || requestedShards <= 1 {
 		return false, 1, totalCapacity
 	}
 	n = bloomEffectiveShardCount(requestedShards, totalCapacity)

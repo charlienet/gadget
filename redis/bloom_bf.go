@@ -41,7 +41,8 @@ type bfCmdImpl struct {
 	cfg    bloomConfig
 	policy FailPolicy // 失效兜底策略（默认 FailOpen）
 	// sharder 分片路由共享层（与 bitmapImpl 同一套代码，保证两路径行为一致）。
-	// enabled=false（非集群）时 shardKey 恒返回 base，行为与分片化之前完全一致。
+	// enabled=false（非集群或未显式开启分片）时 shardKey 恒返回 base，
+	// 行为与分片化之前完全一致。
 	sharder  bloomSharder
 	perShard int64 // BF.RESERVE 每分片容量（ceil(总/effectiveN)）
 	// reserves 每个分片键一把惰性 BF.RESERVE 闸门（仅 enabled 时分配）；

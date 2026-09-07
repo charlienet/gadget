@@ -770,6 +770,16 @@ func TestBloomClusterSingleKey(t *testing.T) {
 
 		_, err = bf.Info(ctx)
 		require.NoError(t, err, "cluster 单 key Info（STRLEN/BITCOUNT 或 BF.INFO）应成功")
+
+		// 默认不分片回归守卫（opt-in 语义唯一行为变更点）：集群默认
+		// （未显式 WithShardCount）写入必须落在裸 base 键上，不得出现
+		// 旧"自动分片"设计的 #0 后缀分片键。
+		naked, err := rdb.Exists(ctx, key).Result()
+		require.NoError(t, err)
+		assert.Equal(t, int64(1), naked, "集群默认不分片：键名应为裸 base")
+		suffixed, err := rdb.Exists(ctx, key+"#0").Result()
+		require.NoError(t, err)
+		assert.Zero(t, suffixed, "集群默认不分片：不应存在 #0 后缀分片键")
 	})
 }
 
