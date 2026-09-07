@@ -48,7 +48,7 @@ func TestWithPublishTimeout(t *testing.T) {
 // watch 核心路径测试
 //
 // 说明：本模块依赖的 miniredis v2.5.0 不支持 stream 相关命令
-// （XADD/XREADGROUP/XGROUP*/XACK 均未实现），因此无法用 RunOnMiniRedis
+// （XADD/XREADGROUP/XGROUP*/XACK 均未实现），因此无法用 mini.Run
 // 做本地端到端验证。这里用最小 mock（仅覆盖 watch 用到的 4 个命令，
 // 其余方法内嵌 nil 接口，不会被调用）驱动 watch 的核心逻辑：
 // NOGROUP 按需创建、消息投递 + ACK、失败退避重试。

@@ -9,6 +9,7 @@ import (
 	"github.com/charlienet/gadget/plugins/cache/redis"
 	r "github.com/charlienet/gadget/redis"
 	"github.com/charlienet/gadget/redis/test"
+	mini "github.com/charlienet/gadget/redis/test/mini"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -70,7 +71,7 @@ func TestCache(t *testing.T) {
 func TestMultiLevelCacheGetNotExist(t *testing.T) {
 	ctx := context.TODO()
 
-	test.RunOnMiniRedis(t, func(rdb r.Client) {
+	mini.Run(t, func(rdb r.Client) {
 		key := "multi-level-key"
 
 		// 创建两个双层缓存实例，共享同一个 Redis
@@ -103,7 +104,7 @@ func TestMultiLevelCacheGetNotExist(t *testing.T) {
 func TestPutExpireZeroNoTTL(t *testing.T) {
 	ctx := context.TODO()
 
-	test.RunOnMiniRedis(t, func(rdb r.Client) {
+	mini.Run(t, func(rdb r.Client) {
 		// ttlFactor 非零：若 expireSeconds=0 仍叠加随机秒数即为缺陷
 		c := cache.New(redis.New(rdb, redis.WithTTLFactor(30)))
 
@@ -135,7 +136,7 @@ func TestPutExpireZeroNoTTL(t *testing.T) {
 func TestTTLFactorDefaultExact(t *testing.T) {
 	ctx := context.TODO()
 
-	test.RunOnMiniRedis(t, func(rdb r.Client) {
+	mini.Run(t, func(rdb r.Client) {
 		t.Run("默认开启叠加随机", func(t *testing.T) {
 			c := cache.New(redis.New(rdb))
 			key := "redistestkey-exact"
@@ -167,7 +168,7 @@ func TestTTLFactorDefaultExact(t *testing.T) {
 func TestDeletePattern(t *testing.T) {
 	ctx := context.TODO()
 
-	test.RunOnMiniRedis(t, func(rdb r.Client) {
+	mini.Run(t, func(rdb r.Client) {
 		c := cache.New(redis.New(rdb))
 
 		assert.NoError(t, c.Put(ctx, "user:1", "a", 60))
@@ -190,7 +191,7 @@ func TestDeletePattern(t *testing.T) {
 func TestBulkSetMultiGetMulti(t *testing.T) {
 	ctx := context.TODO()
 
-	test.RunOnMiniRedis(t, func(rdb r.Client) {
+	mini.Run(t, func(rdb r.Client) {
 		c := cache.New(redis.New(rdb))
 
 		// expire=0：MSet 原子批量写入（永不过期）

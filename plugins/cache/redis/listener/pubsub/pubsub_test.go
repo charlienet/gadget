@@ -55,7 +55,7 @@ func waitReady(t *testing.T, lis cache.Listener) {
 // TestSS 验证发布到订阅 channel 的消息全部送达（广播），
 // 其他 channel 的消息不串扰。
 func TestSS(t *testing.T) {
-	test.RunOnRedisStack(t, func(rdb redis.Client) {
+	test.RunOnRedis(t, func(rdb redis.Client) {
 		c := "abc"
 		c2 := "abc:dddd"
 		r := NewListener(rdb, c)

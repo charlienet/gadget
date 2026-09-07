@@ -7,7 +7,7 @@ import (
 
 	"github.com/charlienet/gadget/cache"
 	r "github.com/charlienet/gadget/redis"
-	"github.com/charlienet/gadget/redis/test"
+	mini "github.com/charlienet/gadget/redis/test/mini"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -17,7 +17,7 @@ import (
 func TestStoreBulkOperations(t *testing.T) {
 	ctx := context.TODO()
 
-	test.RunOnMiniRedis(t, func(rdb r.Client) {
+	mini.Run(t, func(rdb r.Client) {
 		s := new(rdb)
 		bulk, ok := s.(cache.BulkStore)
 		assert.True(t, ok, "redis_store 应实现 BulkStore")
@@ -61,7 +61,7 @@ func TestStoreBulkOperations(t *testing.T) {
 func TestStoreDeletePattern(t *testing.T) {
 	ctx := context.TODO()
 
-	test.RunOnMiniRedis(t, func(rdb r.Client) {
+	mini.Run(t, func(rdb r.Client) {
 		s := new(rdb, WithTTLFactor(0))
 		ps, ok := s.(cache.PatternStore)
 		assert.True(t, ok, "redis_store 应实现 PatternStore")
