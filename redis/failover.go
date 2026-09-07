@@ -53,8 +53,7 @@ func IsUnavailable(err error) bool {
 	}
 
 	// 网络层错误：dial 失败、连接重置等
-	var opErr *net.OpError
-	if errors.As(err, &opErr) {
+	if _, ok := errors.AsType[*net.OpError](err); ok {
 		return true
 	}
 

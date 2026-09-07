@@ -497,7 +497,7 @@ func TestBf(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		for i := 0; i < 10000; i++ {
+		for i := range 10000 {
 			rdb.BFAdd(context.Background(), "ffff", i)
 		}
 	})
@@ -526,7 +526,7 @@ func TestRateLimiter(t *testing.T) {
 
 		// 通过 Client 接口调用 NewRateLimiter（空名称：不隔离，行为与旧版一致）
 		limiter := rdb.NewRateLimiter("")
-		for i := 0; i < 3; i++ {
+		for range 3 {
 			res, err := limiter.Allow(context.Background(), "project:123", 10)
 			if err != nil {
 				panic(err)
@@ -550,7 +550,7 @@ func TestRateLimiterNameIsolation(t *testing.T) {
 		lb := rdb.NewRateLimiter("b")
 
 		// a 限制 2 次/秒：第 1、2 次放行，第 3 次应被拒
-		for i := 0; i < 2; i++ {
+		for i := range 2 {
 			res, err := la.Allow(ctx, "key", 2)
 			require.NoError(t, err)
 			assert.True(t, res.Allowed, "a 第 %d 次应放行", i+1)
@@ -663,7 +663,7 @@ func TestBloomBitmapInfo(t *testing.T) {
 
 		bf := rdb.NewBloomFilterWithEstimate("bfinfo", 10000, 0.01)
 		items := make([]string, 0, inserted)
-		for i := 0; i < inserted; i++ {
+		for i := range inserted {
 			items = append(items, fmt.Sprintf("info-%d", i))
 		}
 		_, err := bf.AddMulti(ctx, items...)

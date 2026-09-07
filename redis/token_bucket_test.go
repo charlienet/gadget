@@ -24,7 +24,7 @@ func TestTokenBucketGCRA(t *testing.T) {
 			const k = "tb-10"
 
 			// burst = rate = 10：GCRA 浮点精度下前 10 次必放行
-			for i := 0; i < 10; i++ {
+			for i := range 10 {
 				res, err := rl.Allow(ctx, k, 10)
 				require.NoError(t, err)
 				assert.True(t, res.Allowed, "前 10 次应放行（第 %d 次）", i+1)
@@ -41,7 +41,7 @@ func TestTokenBucketGCRA(t *testing.T) {
 			rl := rdb.NewRateLimiter("")
 			const k = "tb-allown"
 
-			for i := 0; i < 5; i++ {
+			for i := range 5 {
 				res, err := rl.AllowN(ctx, k, 5, time.Second)
 				require.NoError(t, err)
 				assert.True(t, res.Allowed, "前 5 次应放行（第 %d 次）", i+1)

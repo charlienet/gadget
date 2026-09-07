@@ -105,9 +105,9 @@ func TestClusterIntegration(t *testing.T) {
 			gc := goredis.NewClusterClient(&goredis.ClusterOptions{Addrs: addrs, Password: copt.Password})
 			defer func() { _ = gc.Close() }()
 
-			var masterCount int32
+			var masterCount atomic.Int32
 			err := gc.ForEachMaster(ctx, func(mctx context.Context, c *goredis.Client) error {
-				atomic.AddInt32(&masterCount, 1)
+				masterCount.Add(1)
 				libs, err := c.FunctionList(mctx, goredis.FunctionListQuery{LibraryNamePattern: libName}).Result()
 				if err != nil {
 					return fmt.Errorf("主节点 FUNCTION LIST 失败: %w", err)
@@ -119,7 +119,7 @@ func TestClusterIntegration(t *testing.T) {
 				return nil
 			})
 			require.NoError(t, err, "所有主节点都应加载函数库 %s", libName)
-			assert.GreaterOrEqual(t, atomic.LoadInt32(&masterCount), int32(1), "应至少遍历到一个主节点")
+			assert.GreaterOrEqual(t, masterCount.Load(), int32(1), "应至少遍历到一个主节点")
 		})
 
 		t.Run("Capability 探测", func(t *testing.T) {
@@ -158,7 +158,7 @@ func TestClusterIntegration(t *testing.T) {
 			// 总容量 100000（≥ 8×1000，effectiveN=8）、显式 WithShardCount(8)。
 			base := fmt.Sprintf("bloomctest:%s", randomHex(6))
 			keys := make([]string, 0, 8)
-			for i := 0; i < 8; i++ {
+			for i := range 8 {
 				keys = append(keys, fmt.Sprintf("%s#%d", base, i))
 			}
 			defer func() {
@@ -267,7 +267,7 @@ func TestClusterIntegration(t *testing.T) {
 			}
 			base := fmt.Sprintf("bloomctest:%s", randomHex(6))
 			keys := make([]string, 0, 8)
-			for i := 0; i < 8; i++ {
+			for i := range 8 {
 				keys = append(keys, fmt.Sprintf("%s#%d", base, i))
 			}
 			defer func() {
@@ -317,7 +317,7 @@ func TestClusterIntegration(t *testing.T) {
 			baseBMP := fmt.Sprintf("bloomctest:%s", randomHex(6))
 			allKeys := make([]string, 0, 16)
 			for _, base := range []string{baseBF, baseBMP} {
-				for i := 0; i < 8; i++ {
+				for i := range 8 {
 					allKeys = append(allKeys, fmt.Sprintf("%s#%d", base, i))
 				}
 			}
@@ -375,7 +375,7 @@ func TestClusterIntegration(t *testing.T) {
 			// 且两侧类型集合互不相交（证明两路径确实落在不同存储结构上）。
 			typesOf := func(base string) map[string]bool {
 				got := map[string]bool{}
-				for i := 0; i < 8; i++ {
+				for i := range 8 {
 					k := fmt.Sprintf("%s#%d", base, i)
 					n, err := rdb.Exists(ctx, k).Result()
 					require.NoError(t, err, "EXISTS %s", k)
@@ -402,7 +402,7 @@ func TestClusterIntegration(t *testing.T) {
 			// 客户端不引入 CRC16 实现）
 			slotsOf := func(base string) []int64 {
 				out := make([]int64, 0, 8)
-				for i := 0; i < 8; i++ {
+				for i := range 8 {
 					slot, err := rdb.Do(ctx, "cluster", "keyslot",
 						fmt.Sprintf("%s#%d", base, i)).Int64()
 					require.NoError(t, err, "CLUSTER KEYSLOT %s#%d", base, i)

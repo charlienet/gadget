@@ -93,7 +93,7 @@ func TestBreakerHalfOpenSingleFlight(t *testing.T) {
 
 	b.Fail(netErr)
 	b.Fail(netErr)
-	b.Fail(netErr) // Open
+	b.Fail(netErr)                    // Open
 	time.Sleep(30 * time.Millisecond) // 冷却结束 → HalfOpen
 
 	const concurrency = 20
@@ -101,16 +101,14 @@ func TestBreakerHalfOpenSingleFlight(t *testing.T) {
 	allowed := 0
 	var mu sync.Mutex
 
-	for i := 0; i < concurrency; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range concurrency {
+		wg.Go(func() {
 			if err := b.Allow(); err == nil {
 				mu.Lock()
 				allowed++
 				mu.Unlock()
 			}
-		}()
+		})
 	}
 	wg.Wait()
 

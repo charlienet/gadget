@@ -304,10 +304,7 @@ func newHashImpl(client *redisClient, key string, cfg cuckooConfig) *hashImpl {
 		maxIter = defaultCuckooMaxIter
 	}
 
-	numBuckets := capacity / bucketSize
-	if numBuckets < 1 {
-		numBuckets = 1
-	}
+	numBuckets := max(capacity/bucketSize, 1)
 
 	return &hashImpl{
 		client:        client,

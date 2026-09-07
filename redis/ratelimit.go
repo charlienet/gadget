@@ -234,7 +234,7 @@ func (rl *RateLimiter) allowRaw(ctx context.Context, key string, rate int, perio
 		return nil, err
 	}
 
-	values, ok := v.([]interface{})
+	values, ok := v.([]any)
 	if !ok || len(values) < 4 {
 		return nil, fmt.Errorf("redis: 令牌桶脚本返回异常结果 %v", v)
 	}
@@ -314,7 +314,7 @@ func (rl *RateLimiter) allowAtMostRaw(ctx context.Context, key string, rate int,
 		return nil, err
 	}
 
-	values, ok := v.([]interface{})
+	values, ok := v.([]any)
 	if !ok || len(values) < 4 {
 		return nil, fmt.Errorf("redis: 令牌桶脚本返回异常结果 %v", v)
 	}

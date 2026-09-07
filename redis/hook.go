@@ -50,7 +50,7 @@ func (r renameHook) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.Pr
 	return func(ctx context.Context, cmds []redis.Cmder) error {
 
 		// 对多个KEY进行更名操作
-		for i := 0; i < len(cmds); i++ {
+		for i := range cmds {
 			r.renameKey(cmds[i])
 		}
 
@@ -236,7 +236,7 @@ func (r renameHook) renameKey(cmd redis.Cmder) {
 			if key, ok := args[3].(string); !ok || key != "" {
 				r.rename(args, 3)
 			}
-			
+
 			// 处理 [KEYS key...] 参数
 			for i := 4; i < len(args); i++ {
 				if str, ok := args[i].(string); ok && strings.ToUpper(str) == "KEYS" && i+1 < len(args) {

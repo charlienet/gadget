@@ -94,7 +94,7 @@ func TestCuckooHashImpl(t *testing.T) {
 			total := 150
 			addedItems := make([]string, 0, total)
 			rejected := 0
-			for i := 0; i < total; i++ {
+			for i := range total {
 				item := fmt.Sprintf("evict-%d", i)
 				added, err := small.Add(ctx, item)
 				require.NoError(t, err)
@@ -138,12 +138,12 @@ func TestCuckooHashImpl(t *testing.T) {
 			fresh := rdb.NewCuckooFilter("cfh:3", redis.WithCuckooCapacity(200))
 			require.NoError(t, rdb.Del(ctx, "cfh:3").Err())
 
-			for i := 0; i < 50; i++ {
+			for i := range 50 {
 				added, err := fresh.Add(ctx, fmt.Sprintf("keep-%d", i))
 				require.NoError(t, err)
 				require.True(t, added, "低负载下插入应成功")
 			}
-			for i := 0; i < 50; i++ {
+			for i := range 50 {
 				exists, err := fresh.Exists(ctx, fmt.Sprintf("keep-%d", i))
 				require.NoError(t, err)
 				assert.True(t, exists, "低负载下插入的元素应全部可命中")

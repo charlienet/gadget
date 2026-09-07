@@ -57,7 +57,7 @@ func (c *Capability) probeLocked(ctx context.Context) error {
 	}
 	c.version = ""
 	c.versionSem = nil
-	for _, line := range strings.Split(info, "\r\n") {
+	for line := range strings.SplitSeq(info, "\r\n") {
 		if after, found := strings.CutPrefix(line, "redis_version:"); found {
 			c.version = after
 			if v, err := version.NewVersion(after); err == nil {
@@ -73,7 +73,7 @@ func (c *Capability) probeLocked(ctx context.Context) error {
 		return err
 	}
 	c.modules = c.modules[:0]
-	for _, line := range strings.Split(modInfo, "\r\n") {
+	for line := range strings.SplitSeq(modInfo, "\r\n") {
 		if after, found := strings.CutPrefix(line, "module:"); found {
 			m := parseModuleLine(after)
 			if m.Name != "" {
@@ -92,7 +92,7 @@ func (c *Capability) probeLocked(ctx context.Context) error {
 //	module:name=ReJSON,ver=20000,api=1,filters=0,usedby=[],...
 func parseModuleLine(line string) moduleInfo {
 	var m moduleInfo
-	for _, part := range strings.Split(line, ",") {
+	for part := range strings.SplitSeq(line, ",") {
 		k, v, ok := strings.Cut(part, "=")
 		if !ok {
 			continue
@@ -157,14 +157,14 @@ func (c *Capability) HasModule(name string) bool {
 }
 
 // Convenience module checks.
-func (c *Capability) HasJSON() bool        { return c.HasModule("ReJSON") }
-func (c *Capability) HasSearch() bool      { return c.HasModule("search") }
-func (c *Capability) HasBloom() bool       { return c.HasModule("bf") }
-func (c *Capability) HasCuckoo() bool      { return c.HasModule("cf") }
-func (c *Capability) HasCMS() bool         { return c.HasModule("cms") }
-func (c *Capability) HasTimeSeries() bool  { return c.HasModule("timeseries") }
-func (c *Capability) HasTopK() bool        { return c.HasModule("topk") }
-func (c *Capability) HasTDigest() bool     { return c.HasModule("tdigest") }
-func (c *Capability) HasGraph() bool       { return c.HasModule("graph") }
-func (c *Capability) HasGears() bool       { return c.HasModule("gears") }
-func (c *Capability) HasVectorSet() bool   { return c.HasModule("vectorset") }
+func (c *Capability) HasJSON() bool       { return c.HasModule("ReJSON") }
+func (c *Capability) HasSearch() bool     { return c.HasModule("search") }
+func (c *Capability) HasBloom() bool      { return c.HasModule("bf") }
+func (c *Capability) HasCuckoo() bool     { return c.HasModule("cf") }
+func (c *Capability) HasCMS() bool        { return c.HasModule("cms") }
+func (c *Capability) HasTimeSeries() bool { return c.HasModule("timeseries") }
+func (c *Capability) HasTopK() bool       { return c.HasModule("topk") }
+func (c *Capability) HasTDigest() bool    { return c.HasModule("tdigest") }
+func (c *Capability) HasGraph() bool      { return c.HasModule("graph") }
+func (c *Capability) HasGears() bool      { return c.HasModule("gears") }
+func (c *Capability) HasVectorSet() bool  { return c.HasModule("vectorset") }

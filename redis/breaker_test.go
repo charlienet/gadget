@@ -44,7 +44,7 @@ func TestBreakerTriggerAndFailFast(t *testing.T) {
 
 	var firstDuration time.Duration
 	openReached := false
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		start := time.Now()
 		err := rdb.Ping(ctx).Err()
 		elapsed := time.Since(start)
@@ -124,7 +124,7 @@ func TestBreakerCommandError(t *testing.T) {
 	require.NoError(t, rdb.Set(ctx, "strk", "v", 0).Err())
 
 	// 反复命令级错误（WRONGTYPE）
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		_, err := rdb.LPush(ctx, "strk", "x").Result()
 		require.Error(t, err)
 		assert.False(t, errors.Is(err, redis.ErrRedisUnavailable))

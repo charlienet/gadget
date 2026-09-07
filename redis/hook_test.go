@@ -9,11 +9,11 @@ import (
 )
 
 // createMockCmd 创建用于测试的命令对象
-func createMockCmd(name string, args ...interface{}) *redis.Cmd {
-	allArgs := make([]interface{}, len(args)+1)
+func createMockCmd(name string, args ...any) *redis.Cmd {
+	allArgs := make([]any, len(args)+1)
 	allArgs[0] = name
 	copy(allArgs[1:], args)
-	
+
 	cmd := redis.NewCmd(context.Background(), allArgs...)
 	return cmd
 }
@@ -23,7 +23,7 @@ func TestRenameHook_ModeA_NoKey(t *testing.T) {
 	hook := renameHook{prefix: prefix}
 
 	// 模式A: 无KEY指令 - AUTH, PING, INFO 等
-	testCases := [][]interface{}{
+	testCases := [][]any{
 		{"AUTH", "password"},
 		{"PING"},
 		{"INFO"},
@@ -44,11 +44,11 @@ func TestRenameHook_ModeA_NoKey(t *testing.T) {
 
 	for _, testCase := range testCases {
 		cmd := createMockCmd(testCase[0].(string), testCase[1:]...)
-		originalArgs := make([]interface{}, len(cmd.Args()))
+		originalArgs := make([]any, len(cmd.Args()))
 		copy(originalArgs, cmd.Args())
-		
+
 		hook.renameKey(cmd)
-		
+
 		// 验证参数没有变化
 		assert.Equal(t, originalArgs, cmd.Args(), "Command %s should not have modified arguments", testCase[0])
 	}
@@ -61,15 +61,15 @@ func TestRenameHook_ModeB_ConsecutiveKeys(t *testing.T) {
 	// 模式B: 连续KEY - 从args[1]到末尾全部是key
 	testCases := []struct {
 		name     string
-		input    []interface{}
-		expected []interface{}
+		input    []any
+		expected []any
 	}{
-		{"DEL", []interface{}{"DEL", "key1", "key2", "key3"}, []interface{}{"DEL", "test:key1", "test:key2", "test:key3"}},
-		{"EXISTS", []interface{}{"EXISTS", "key1", "key2"}, []interface{}{"EXISTS", "test:key1", "test:key2"}},
-		{"MGET", []interface{}{"MGET", "key1", "key2", "key3"}, []interface{}{"MGET", "test:key1", "test:key2", "test:key3"}},
-		{"SDIFF", []interface{}{"SDIFF", "set1", "set2", "set3"}, []interface{}{"SDIFF", "test:set1", "test:set2", "test:set3"}},
-		{"SUNIONSTORE", []interface{}{"SUNIONSTORE", "dest", "set1", "set2"}, []interface{}{"SUNIONSTORE", "test:dest", "test:set1", "test:set2"}},
-		{"WATCH", []interface{}{"WATCH", "key1", "key2"}, []interface{}{"WATCH", "test:key1", "test:key2"}},
+		{"DEL", []any{"DEL", "key1", "key2", "key3"}, []any{"DEL", "test:key1", "test:key2", "test:key3"}},
+		{"EXISTS", []any{"EXISTS", "key1", "key2"}, []any{"EXISTS", "test:key1", "test:key2"}},
+		{"MGET", []any{"MGET", "key1", "key2", "key3"}, []any{"MGET", "test:key1", "test:key2", "test:key3"}},
+		{"SDIFF", []any{"SDIFF", "set1", "set2", "set3"}, []any{"SDIFF", "test:set1", "test:set2", "test:set3"}},
+		{"SUNIONSTORE", []any{"SUNIONSTORE", "dest", "set1", "set2"}, []any{"SUNIONSTORE", "test:dest", "test:set1", "test:set2"}},
+		{"WATCH", []any{"WATCH", "key1", "key2"}, []any{"WATCH", "test:key1", "test:key2"}},
 	}
 
 	for _, tc := range testCases {
@@ -86,12 +86,12 @@ func TestRenameHook_ModeC_ExceptLastKey(t *testing.T) {
 	// 模式C: 除最后一个外连续KEY - 末尾参数不是key（如timeout）
 	testCases := []struct {
 		name     string
-		input    []interface{}
-		expected []interface{}
+		input    []any
+		expected []any
 	}{
-		{"BLPOP", []interface{}{"BLPOP", "key1", "key2", "10"}, []interface{}{"BLPOP", "test:key1", "test:key2", "10"}},
-		{"BRPOP", []interface{}{"BRPOP", "key1", "key2", "timeout"}, []interface{}{"BRPOP", "test:key1", "test:key2", "timeout"}},
-		{"JSON.MGET", []interface{}{"JSON.MGET", "key1", "key2", "path"}, []interface{}{"JSON.MGET", "test:key1", "test:key2", "path"}},
+		{"BLPOP", []any{"BLPOP", "key1", "key2", "10"}, []any{"BLPOP", "test:key1", "test:key2", "10"}},
+		{"BRPOP", []any{"BRPOP", "key1", "key2", "timeout"}, []any{"BRPOP", "test:key1", "test:key2", "timeout"}},
+		{"JSON.MGET", []any{"JSON.MGET", "key1", "key2", "path"}, []any{"JSON.MGET", "test:key1", "test:key2", "path"}},
 	}
 
 	for _, tc := range testCases {
@@ -108,11 +108,11 @@ func TestRenameHook_ModeD_AlternatingKeys(t *testing.T) {
 	// 模式D: 间隔KEY - key/value交替，key在奇数位置(1,3,5...)
 	testCases := []struct {
 		name     string
-		input    []interface{}
-		expected []interface{}
+		input    []any
+		expected []any
 	}{
-		{"MSET", []interface{}{"MSET", "key1", "val1", "key2", "val2"}, []interface{}{"MSET", "test:key1", "val1", "test:key2", "val2"}},
-		{"MSETNX", []interface{}{"MSETNX", "key1", "val1", "key2", "val2", "key3", "val3"}, []interface{}{"MSETNX", "test:key1", "val1", "test:key2", "val2", "test:key3", "val3"}},
+		{"MSET", []any{"MSET", "key1", "val1", "key2", "val2"}, []any{"MSET", "test:key1", "val1", "test:key2", "val2"}},
+		{"MSETNX", []any{"MSETNX", "key1", "val1", "key2", "val2", "key3", "val3"}, []any{"MSETNX", "test:key1", "val1", "test:key2", "val2", "test:key3", "val3"}},
 	}
 
 	for _, tc := range testCases {
@@ -129,11 +129,11 @@ func TestRenameHook_ModeD2_IntervalKeys(t *testing.T) {
 	// 模式D2: key/非key/非key 间隔 - key在1,4,7...
 	testCases := []struct {
 		name     string
-		input    []interface{}
-		expected []interface{}
+		input    []any
+		expected []any
 	}{
-		{"JSON.MSET", []interface{}{"JSON.MSET", "key1", "path1", "val1", "key2", "path2", "val2"}, []interface{}{"JSON.MSET", "test:key1", "path1", "val1", "test:key2", "path2", "val2"}},
-		{"TS.MADD", []interface{}{"TS.MADD", "key1", "ts1", "val1", "key2", "ts2", "val2"}, []interface{}{"TS.MADD", "test:key1", "ts1", "val1", "test:key2", "ts2", "val2"}},
+		{"JSON.MSET", []any{"JSON.MSET", "key1", "path1", "val1", "key2", "path2", "val2"}, []any{"JSON.MSET", "test:key1", "path1", "val1", "test:key2", "path2", "val2"}},
+		{"TS.MADD", []any{"TS.MADD", "key1", "ts1", "val1", "key2", "ts2", "val2"}, []any{"TS.MADD", "test:key1", "ts1", "val1", "test:key2", "ts2", "val2"}},
 	}
 
 	for _, tc := range testCases {
@@ -150,12 +150,12 @@ func TestRenameHook_ModeE1_ScriptCommands(t *testing.T) {
 	// 模式E1: 脚本类 - 通过args[2]的count指定key数量
 	testCases := []struct {
 		name     string
-		input    []interface{}
-		expected []interface{}
+		input    []any
+		expected []any
 	}{
-		{"EVAL", []interface{}{"EVAL", "script", 2, "key1", "key2", "arg1", "arg2"}, []interface{}{"EVAL", "script", 2, "test:key1", "test:key2", "arg1", "arg2"}},
-		{"EVALSHA", []interface{}{"EVALSHA", "sha", 1, "key1", "arg1"}, []interface{}{"EVALSHA", "sha", 1, "test:key1", "arg1"}},
-		{"FCALL", []interface{}{"FCALL", "func", 2, "key1", "key2", "arg1"}, []interface{}{"FCALL", "func", 2, "test:key1", "test:key2", "arg1"}},
+		{"EVAL", []any{"EVAL", "script", 2, "key1", "key2", "arg1", "arg2"}, []any{"EVAL", "script", 2, "test:key1", "test:key2", "arg1", "arg2"}},
+		{"EVALSHA", []any{"EVALSHA", "sha", 1, "key1", "arg1"}, []any{"EVALSHA", "sha", 1, "test:key1", "arg1"}},
+		{"FCALL", []any{"FCALL", "func", 2, "key1", "key2", "arg1"}, []any{"FCALL", "func", 2, "test:key1", "test:key2", "arg1"}},
 	}
 
 	for _, tc := range testCases {
@@ -172,12 +172,12 @@ func TestRenameHook_ModeE2_AggregateWriteCommands(t *testing.T) {
 	// 模式E2: 聚合写命令 - args[1]为dest key，args[2]为count，args[3..3+n]为source keys
 	testCases := []struct {
 		name     string
-		input    []interface{}
-		expected []interface{}
+		input    []any
+		expected []any
 	}{
-		{"ZINTERSTORE", []interface{}{"ZINTERSTORE", "dest", 2, "key1", "key2", "WEIGHTS", 1, 2}, []interface{}{"ZINTERSTORE", "test:dest", 2, "test:key1", "test:key2", "WEIGHTS", 1, 2}},
-		{"ZUNIONSTORE", []interface{}{"ZUNIONSTORE", "dest", 3, "key1", "key2", "key3"}, []interface{}{"ZUNIONSTORE", "test:dest", 3, "test:key1", "test:key2", "test:key3"}},
-		{"CMS.MERGE", []interface{}{"CMS.MERGE", "dest", 2, "key1", "key2"}, []interface{}{"CMS.MERGE", "test:dest", 2, "test:key1", "test:key2"}},
+		{"ZINTERSTORE", []any{"ZINTERSTORE", "dest", 2, "key1", "key2", "WEIGHTS", 1, 2}, []any{"ZINTERSTORE", "test:dest", 2, "test:key1", "test:key2", "WEIGHTS", 1, 2}},
+		{"ZUNIONSTORE", []any{"ZUNIONSTORE", "dest", 3, "key1", "key2", "key3"}, []any{"ZUNIONSTORE", "test:dest", 3, "test:key1", "test:key2", "test:key3"}},
+		{"CMS.MERGE", []any{"CMS.MERGE", "dest", 2, "key1", "key2"}, []any{"CMS.MERGE", "test:dest", 2, "test:key1", "test:key2"}},
 	}
 
 	for _, tc := range testCases {
@@ -194,12 +194,12 @@ func TestRenameHook_ModeE3_ReadOnlyAggregate(t *testing.T) {
 	// 模式E3: 只读聚合 - args[1]为count，keys从args[2]开始
 	testCases := []struct {
 		name     string
-		input    []interface{}
-		expected []interface{}
+		input    []any
+		expected []any
 	}{
-		{"ZINTER", []interface{}{"ZINTER", 2, "key1", "key2", "WEIGHTS", 1, 2}, []interface{}{"ZINTER", 2, "test:key1", "test:key2", "WEIGHTS", 1, 2}},
-		{"ZUNION", []interface{}{"ZUNION", 3, "key1", "key2", "key3"}, []interface{}{"ZUNION", 3, "test:key1", "test:key2", "test:key3"}},
-		{"SINTERCARD", []interface{}{"SINTERCARD", 2, "key1", "key2"}, []interface{}{"SINTERCARD", 2, "test:key1", "test:key2"}},
+		{"ZINTER", []any{"ZINTER", 2, "key1", "key2", "WEIGHTS", 1, 2}, []any{"ZINTER", 2, "test:key1", "test:key2", "WEIGHTS", 1, 2}},
+		{"ZUNION", []any{"ZUNION", 3, "key1", "key2", "key3"}, []any{"ZUNION", 3, "test:key1", "test:key2", "test:key3"}},
+		{"SINTERCARD", []any{"SINTERCARD", 2, "key1", "key2"}, []any{"SINTERCARD", 2, "test:key1", "test:key2"}},
 	}
 
 	for _, tc := range testCases {
@@ -216,11 +216,11 @@ func TestRenameHook_ModeF_SubcommandWithKey(t *testing.T) {
 	// 模式F: 子命令后有key - args[2]为key
 	testCases := []struct {
 		name     string
-		input    []interface{}
-		expected []interface{}
+		input    []any
+		expected []any
 	}{
-		{"OBJECT", []interface{}{"OBJECT", "ENCODING", "key"}, []interface{}{"OBJECT", "ENCODING", "test:key"}},
-		{"MEMORY", []interface{}{"MEMORY", "USAGE", "key"}, []interface{}{"MEMORY", "USAGE", "test:key"}},
+		{"OBJECT", []any{"OBJECT", "ENCODING", "key"}, []any{"OBJECT", "ENCODING", "test:key"}},
+		{"MEMORY", []any{"MEMORY", "USAGE", "key"}, []any{"MEMORY", "USAGE", "test:key"}},
 	}
 
 	for _, tc := range testCases {
@@ -237,13 +237,13 @@ func TestRenameHook_ModeG_FixedTwoKeys(t *testing.T) {
 	// 模式G: 固定双 key - args[1]和args[2]都是key
 	testCases := []struct {
 		name     string
-		input    []interface{}
-		expected []interface{}
+		input    []any
+		expected []any
 	}{
-		{"COPY", []interface{}{"COPY", "src", "dest", "DB", "1"}, []interface{}{"COPY", "test:src", "test:dest", "DB", "1"}},
-		{"LMOVE", []interface{}{"LMOVE", "src", "dest", "LEFT", "RIGHT"}, []interface{}{"LMOVE", "test:src", "test:dest", "LEFT", "RIGHT"}},
-		{"BLMOVE", []interface{}{"BLMOVE", "src", "dest", "LEFT", "RIGHT", "10"}, []interface{}{"BLMOVE", "test:src", "test:dest", "LEFT", "RIGHT", "10"}},
-		{"TS.CREATERULE", []interface{}{"TS.CREATERULE", "src", "dest", "AGGREGATION", "avg", 1000}, []interface{}{"TS.CREATERULE", "test:src", "test:dest", "AGGREGATION", "avg", 1000}},
+		{"COPY", []any{"COPY", "src", "dest", "DB", "1"}, []any{"COPY", "test:src", "test:dest", "DB", "1"}},
+		{"LMOVE", []any{"LMOVE", "src", "dest", "LEFT", "RIGHT"}, []any{"LMOVE", "test:src", "test:dest", "LEFT", "RIGHT"}},
+		{"BLMOVE", []any{"BLMOVE", "src", "dest", "LEFT", "RIGHT", "10"}, []any{"BLMOVE", "test:src", "test:dest", "LEFT", "RIGHT", "10"}},
+		{"TS.CREATERULE", []any{"TS.CREATERULE", "src", "dest", "AGGREGATION", "avg", 1000}, []any{"TS.CREATERULE", "test:src", "test:dest", "AGGREGATION", "avg", 1000}},
 	}
 
 	for _, tc := range testCases {
@@ -260,11 +260,11 @@ func TestRenameHook_ModeH_BITOP(t *testing.T) {
 	// 模式H: BITOP - args[2]为dest key，args[3..]为source keys
 	testCases := []struct {
 		name     string
-		input    []interface{}
-		expected []interface{}
+		input    []any
+		expected []any
 	}{
-		{"BITOP", []interface{}{"BITOP", "AND", "destkey", "key1", "key2"}, []interface{}{"BITOP", "AND", "test:destkey", "test:key1", "test:key2"}},
-		{"BITOP", []interface{}{"BITOP", "OR", "dest", "key1", "key2", "key3"}, []interface{}{"BITOP", "OR", "test:dest", "test:key1", "test:key2", "test:key3"}},
+		{"BITOP", []any{"BITOP", "AND", "destkey", "key1", "key2"}, []any{"BITOP", "AND", "test:destkey", "test:key1", "test:key2"}},
+		{"BITOP", []any{"BITOP", "OR", "dest", "key1", "key2", "key3"}, []any{"BITOP", "OR", "test:dest", "test:key1", "test:key2", "test:key3"}},
 	}
 
 	for _, tc := range testCases {
@@ -281,11 +281,11 @@ func TestRenameHook_ModeI_MIGRATE(t *testing.T) {
 	// 模式I: MIGRATE - args[3]为key
 	testCases := []struct {
 		name     string
-		input    []interface{}
-		expected []interface{}
+		input    []any
+		expected []any
 	}{
-		{"MIGRATE", []interface{}{"MIGRATE", "host", "port", "key", "0", "1000"}, []interface{}{"MIGRATE", "host", "port", "test:key", "0", "1000"}},
-		{"MIGRATE", []interface{}{"MIGRATE", "host", "port", "", "0", "1000", "KEYS", "key1", "key2"}, []interface{}{"MIGRATE", "host", "port", "", "0", "1000", "KEYS", "test:key1", "test:key2"}},
+		{"MIGRATE", []any{"MIGRATE", "host", "port", "key", "0", "1000"}, []any{"MIGRATE", "host", "port", "test:key", "0", "1000"}},
+		{"MIGRATE", []any{"MIGRATE", "host", "port", "", "0", "1000", "KEYS", "key1", "key2"}, []any{"MIGRATE", "host", "port", "", "0", "1000", "KEYS", "test:key1", "test:key2"}},
 	}
 
 	for _, tc := range testCases {
@@ -302,15 +302,15 @@ func TestRenameHook_ModeJ_SpecialCommands(t *testing.T) {
 	// 模式J: 特殊命令
 	testCases := []struct {
 		name     string
-		input    []interface{}
-		expected []interface{}
+		input    []any
+		expected []any
 	}{
-		{"XREAD", []interface{}{"XREAD", "STREAMS", "key1", "key2", "id1", "id2"}, []interface{}{"XREAD", "STREAMS", "test:key1", "test:key2", "id1", "id2"}},
-		{"XREADGROUP", []interface{}{"XREADGROUP", "GROUP", "group", "consumer", "STREAMS", "key1", "key2", "id1", "id2"}, []interface{}{"XREADGROUP", "GROUP", "group", "consumer", "STREAMS", "test:key1", "test:key2", "id1", "id2"}},
-		{"SORT", []interface{}{"SORT", "key", "BY", "pattern", "STORE", "dest"}, []interface{}{"SORT", "test:key", "BY", "pattern", "STORE", "test:dest"}},
-		{"GEORADIUS", []interface{}{"GEORADIUS", "key", "lon", "lat", "radius", "unit", "STORE", "dest"}, []interface{}{"GEORADIUS", "test:key", "lon", "lat", "radius", "unit", "STORE", "test:dest"}},
-		{"GEORADIUSBYMEMBER", []interface{}{"GEORADIUSBYMEMBER", "key", "member", "radius", "unit", "STOREDIST", "dest"}, []interface{}{"GEORADIUSBYMEMBER", "test:key", "member", "radius", "unit", "STOREDIST", "test:dest"}},
-		{"DEBUG", []interface{}{"DEBUG", "OBJECT", "key"}, []interface{}{"DEBUG", "OBJECT", "test:key"}},
+		{"XREAD", []any{"XREAD", "STREAMS", "key1", "key2", "id1", "id2"}, []any{"XREAD", "STREAMS", "test:key1", "test:key2", "id1", "id2"}},
+		{"XREADGROUP", []any{"XREADGROUP", "GROUP", "group", "consumer", "STREAMS", "key1", "key2", "id1", "id2"}, []any{"XREADGROUP", "GROUP", "group", "consumer", "STREAMS", "test:key1", "test:key2", "id1", "id2"}},
+		{"SORT", []any{"SORT", "key", "BY", "pattern", "STORE", "dest"}, []any{"SORT", "test:key", "BY", "pattern", "STORE", "test:dest"}},
+		{"GEORADIUS", []any{"GEORADIUS", "key", "lon", "lat", "radius", "unit", "STORE", "dest"}, []any{"GEORADIUS", "test:key", "lon", "lat", "radius", "unit", "STORE", "test:dest"}},
+		{"GEORADIUSBYMEMBER", []any{"GEORADIUSBYMEMBER", "key", "member", "radius", "unit", "STOREDIST", "dest"}, []any{"GEORADIUSBYMEMBER", "test:key", "member", "radius", "unit", "STOREDIST", "test:dest"}},
+		{"DEBUG", []any{"DEBUG", "OBJECT", "key"}, []any{"DEBUG", "OBJECT", "test:key"}},
 	}
 
 	for _, tc := range testCases {
@@ -333,10 +333,10 @@ func TestRenameHook_Pipeline(t *testing.T) {
 	}
 
 	// 验证重命名前的状态
-	assert.Equal(t, []interface{}{"GET", "key1"}, cmds[0].Args())
-	assert.Equal(t, []interface{}{"SET", "key2", "value"}, cmds[1].Args())
-	assert.Equal(t, []interface{}{"DEL", "key3", "key4"}, cmds[2].Args())
-	assert.Equal(t, []interface{}{"MGET", "key5", "key6", "key7"}, cmds[3].Args())
+	assert.Equal(t, []any{"GET", "key1"}, cmds[0].Args())
+	assert.Equal(t, []any{"SET", "key2", "value"}, cmds[1].Args())
+	assert.Equal(t, []any{"DEL", "key3", "key4"}, cmds[2].Args())
+	assert.Equal(t, []any{"MGET", "key5", "key6", "key7"}, cmds[3].Args())
 
 	// 执行管道重命名
 	err := hook.ProcessPipelineHook(func(ctx context.Context, cmds []redis.Cmder) error {
@@ -344,12 +344,12 @@ func TestRenameHook_Pipeline(t *testing.T) {
 	})(context.Background(), cmds)
 
 	assert.NoError(t, err)
-	
+
 	// 验证重命名后的状态
-	assert.Equal(t, []interface{}{"GET", "test:key1"}, cmds[0].Args())
-	assert.Equal(t, []interface{}{"SET", "test:key2", "value"}, cmds[1].Args())
-	assert.Equal(t, []interface{}{"DEL", "test:key3", "test:key4"}, cmds[2].Args())
-	assert.Equal(t, []interface{}{"MGET", "test:key5", "test:key6", "test:key7"}, cmds[3].Args())
+	assert.Equal(t, []any{"GET", "test:key1"}, cmds[0].Args())
+	assert.Equal(t, []any{"SET", "test:key2", "value"}, cmds[1].Args())
+	assert.Equal(t, []any{"DEL", "test:key3", "test:key4"}, cmds[2].Args())
+	assert.Equal(t, []any{"MGET", "test:key5", "test:key6", "test:key7"}, cmds[3].Args())
 }
 
 func TestRenameHook_NoPrefix(t *testing.T) {
@@ -358,11 +358,11 @@ func TestRenameHook_NoPrefix(t *testing.T) {
 	hook := renameHook{prefix: prefix}
 
 	cmd := createMockCmd("GET", "key1")
-	originalArgs := make([]interface{}, len(cmd.Args()))
+	originalArgs := make([]any, len(cmd.Args()))
 	copy(originalArgs, cmd.Args())
-	
+
 	hook.renameKey(cmd)
-	
+
 	// 验证参数没有变化
 	assert.Equal(t, originalArgs, cmd.Args(), "Command should not have modified arguments when no prefix is set")
 }
@@ -393,11 +393,11 @@ func TestRenameHook_DefaultMode(t *testing.T) {
 	// 测试默认模式：第一个参数为键值
 	cmd := createMockCmd("GET", "key1")
 	hook.renameKey(cmd)
-	assert.Equal(t, []interface{}{"GET", "test:key1"}, cmd.Args(), "Default mode should rename first argument")
+	assert.Equal(t, []any{"GET", "test:key1"}, cmd.Args(), "Default mode should rename first argument")
 
 	cmd2 := createMockCmd("SET", "key2", "value")
 	hook.renameKey(cmd2)
-	assert.Equal(t, []interface{}{"SET", "test:key2", "value"}, cmd2.Args(), "Default mode should rename first argument")
+	assert.Equal(t, []any{"SET", "test:key2", "value"}, cmd2.Args(), "Default mode should rename first argument")
 }
 
 func TestRenameHook_PubsubPrefix(t *testing.T) {
@@ -407,17 +407,17 @@ func TestRenameHook_PubsubPrefix(t *testing.T) {
 	// PUBSUB 查询命令与 Subscribe/Publish 对称加前缀
 	testCases := []struct {
 		name     string
-		input    []interface{}
-		expected []interface{}
+		input    []any
+		expected []any
 	}{
 		// CHANNELS 后的 pattern 对应 PSubscribe，加前缀
-		{"PUBSUB", []interface{}{"PUBSUB", "CHANNELS", "cache:*"}, []interface{}{"PUBSUB", "CHANNELS", "test:cache:*"}},
-		{"PUBSUB", []interface{}{"PUBSUB", "CHANNELS"}, []interface{}{"PUBSUB", "CHANNELS"}},
+		{"PUBSUB", []any{"PUBSUB", "CHANNELS", "cache:*"}, []any{"PUBSUB", "CHANNELS", "test:cache:*"}},
+		{"PUBSUB", []any{"PUBSUB", "CHANNELS"}, []any{"PUBSUB", "CHANNELS"}},
 		// NUMSUB 后的 channel 对应 Subscribe，加前缀
-		{"PUBSUB", []interface{}{"PUBSUB", "NUMSUB", "chan1", "chan2"}, []interface{}{"PUBSUB", "NUMSUB", "test:chan1", "test:chan2"}},
-		{"PUBSUB", []interface{}{"PUBSUB", "NUMSUB"}, []interface{}{"PUBSUB", "NUMSUB"}},
+		{"PUBSUB", []any{"PUBSUB", "NUMSUB", "chan1", "chan2"}, []any{"PUBSUB", "NUMSUB", "test:chan1", "test:chan2"}},
+		{"PUBSUB", []any{"PUBSUB", "NUMSUB"}, []any{"PUBSUB", "NUMSUB"}},
 		// NUMPAT 无 channel/pattern，不重命名
-		{"PUBSUB", []interface{}{"PUBSUB", "NUMPAT"}, []interface{}{"PUBSUB", "NUMPAT"}},
+		{"PUBSUB", []any{"PUBSUB", "NUMPAT"}, []any{"PUBSUB", "NUMPAT"}},
 	}
 
 	for _, tc := range testCases {
@@ -429,7 +429,7 @@ func TestRenameHook_PubsubPrefix(t *testing.T) {
 	// PUBLISH 的 channel 与 Subscribe 对称加前缀
 	pubCmd := createMockCmd("PUBLISH", "chan1", "hello")
 	hook.renameKey(pubCmd)
-	assert.Equal(t, []interface{}{"PUBLISH", "test:chan1", "hello"}, pubCmd.Args())
+	assert.Equal(t, []any{"PUBLISH", "test:chan1", "hello"}, pubCmd.Args())
 }
 
 func TestRenameHook_StreamSubcommands(t *testing.T) {
@@ -439,25 +439,25 @@ func TestRenameHook_StreamSubcommands(t *testing.T) {
 	// Stream 子命令：首参数为子命令，key 在 args[2]；stream listener 实际使用的命令
 	testCases := []struct {
 		name     string
-		input    []interface{}
-		expected []interface{}
+		input    []any
+		expected []any
 	}{
 		// XGROUP：子命令后才是 key
-		{"XGROUP", []interface{}{"XGROUP", "CREATE", "stream1", "group1", "0"}, []interface{}{"XGROUP", "CREATE", "test:stream1", "group1", "0"}},
-		{"XGROUP", []interface{}{"XGROUP", "DESTROY", "stream1", "group1"}, []interface{}{"XGROUP", "DESTROY", "test:stream1", "group1"}},
-		{"XGROUP", []interface{}{"XGROUP", "CREATECONSUMER", "stream1", "group1", "c1"}, []interface{}{"XGROUP", "CREATECONSUMER", "test:stream1", "group1", "c1"}},
-		{"XGROUP", []interface{}{"XGROUP", "HELP"}, []interface{}{"XGROUP", "HELP"}},
+		{"XGROUP", []any{"XGROUP", "CREATE", "stream1", "group1", "0"}, []any{"XGROUP", "CREATE", "test:stream1", "group1", "0"}},
+		{"XGROUP", []any{"XGROUP", "DESTROY", "stream1", "group1"}, []any{"XGROUP", "DESTROY", "test:stream1", "group1"}},
+		{"XGROUP", []any{"XGROUP", "CREATECONSUMER", "stream1", "group1", "c1"}, []any{"XGROUP", "CREATECONSUMER", "test:stream1", "group1", "c1"}},
+		{"XGROUP", []any{"XGROUP", "HELP"}, []any{"XGROUP", "HELP"}},
 		// XINFO：子命令后才是 key
-		{"XINFO", []interface{}{"XINFO", "STREAM", "stream1"}, []interface{}{"XINFO", "STREAM", "test:stream1"}},
-		{"XINFO", []interface{}{"XINFO", "GROUPS", "stream1"}, []interface{}{"XINFO", "GROUPS", "test:stream1"}},
-		{"XINFO", []interface{}{"XINFO", "CONSUMERS", "stream1", "group1"}, []interface{}{"XINFO", "CONSUMERS", "test:stream1", "group1"}},
-		{"XINFO", []interface{}{"XINFO", "HELP"}, []interface{}{"XINFO", "HELP"}},
+		{"XINFO", []any{"XINFO", "STREAM", "stream1"}, []any{"XINFO", "STREAM", "test:stream1"}},
+		{"XINFO", []any{"XINFO", "GROUPS", "stream1"}, []any{"XINFO", "GROUPS", "test:stream1"}},
+		{"XINFO", []any{"XINFO", "CONSUMERS", "stream1", "group1"}, []any{"XINFO", "CONSUMERS", "test:stream1", "group1"}},
+		{"XINFO", []any{"XINFO", "HELP"}, []any{"XINFO", "HELP"}},
 		// XPENDING：无子命令，key 在 args[1]
-		{"XPENDING", []interface{}{"XPENDING", "stream1", "group1", "-", "+", "10"}, []interface{}{"XPENDING", "test:stream1", "group1", "-", "+", "10"}},
+		{"XPENDING", []any{"XPENDING", "stream1", "group1", "-", "+", "10"}, []any{"XPENDING", "test:stream1", "group1", "-", "+", "10"}},
 		// stream listener 使用的其他命令
-		{"XADD", []interface{}{"XADD", "stream1", "*", "key", "v"}, []interface{}{"XADD", "test:stream1", "*", "key", "v"}},
-		{"XACK", []interface{}{"XACK", "stream1", "group1", "1-1"}, []interface{}{"XACK", "test:stream1", "group1", "1-1"}},
-		{"XTRIM", []interface{}{"XTRIM", "stream1", "MAXLEN", "100"}, []interface{}{"XTRIM", "test:stream1", "MAXLEN", "100"}},
+		{"XADD", []any{"XADD", "stream1", "*", "key", "v"}, []any{"XADD", "test:stream1", "*", "key", "v"}},
+		{"XACK", []any{"XACK", "stream1", "group1", "1-1"}, []any{"XACK", "test:stream1", "group1", "1-1"}},
+		{"XTRIM", []any{"XTRIM", "stream1", "MAXLEN", "100"}, []any{"XTRIM", "test:stream1", "MAXLEN", "100"}},
 	}
 
 	for _, tc := range testCases {

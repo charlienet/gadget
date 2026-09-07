@@ -26,7 +26,7 @@ func TestLeakyBucket(t *testing.T) {
 			const k = "lb-const"
 
 			// burst 默认 = rate = 10：前 10 次必放行（diff < burst 窗口）
-			for i := 0; i < 10; i++ {
+			for i := range 10 {
 				res, err := lb.Allow(ctx, k, 10)
 				require.NoError(t, err)
 				assert.True(t, res.Allowed, "前 10 次应放行（第 %d 次）", i+1)
@@ -35,7 +35,7 @@ func TestLeakyBucket(t *testing.T) {
 
 			// 超容量后必定出现拒绝（容忍毫秒漂移，10 次内）
 			rejected := false
-			for i := 0; i < 10; i++ {
+			for range 10 {
 				res, err := lb.Allow(ctx, k, 10)
 				require.NoError(t, err)
 				if !res.Allowed {
@@ -58,7 +58,7 @@ func TestLeakyBucket(t *testing.T) {
 			assert.True(t, res.Allowed, "burst=1 时第 1 次应放行")
 
 			rejected := false
-			for i := 0; i < 2; i++ {
+			for range 2 {
 				res, err := lb.Allow(ctx, k, 10)
 				require.NoError(t, err)
 				if !res.Allowed {
@@ -79,7 +79,7 @@ func TestLeakyBucket(t *testing.T) {
 			_, err := la.Allow(ctx, k, 10)
 			require.NoError(t, err)
 			aRejected := false
-			for i := 0; i < 2; i++ {
+			for range 2 {
 				res, err := la.Allow(ctx, k, 10)
 				require.NoError(t, err)
 				if !res.Allowed {
@@ -101,13 +101,13 @@ func TestLeakyBucket(t *testing.T) {
 
 			// per=2s 内允许 2 个（interval=1000ms，窗口 2000ms）：
 			// 前 2 次必放行，随后出现拒绝
-			for i := 0; i < 2; i++ {
+			for i := range 2 {
 				res, err := lb.AllowN(ctx, k, 2, 2*time.Second)
 				require.NoError(t, err)
 				assert.True(t, res.Allowed, "第 %d 次应放行", i+1)
 			}
 			rejected := false
-			for i := 0; i < 5; i++ {
+			for range 5 {
 				res, err := lb.AllowN(ctx, k, 2, 2*time.Second)
 				require.NoError(t, err)
 				if !res.Allowed {
@@ -186,7 +186,7 @@ func TestRateLimiterWait(t *testing.T) {
 			const k = "rlw-wait"
 
 			// 耗尽瞬时配额（burst=5）：连续 5 次放行
-			for i := 0; i < 5; i++ {
+			for i := range 5 {
 				res, err := rl.Allow(ctx, k, 5)
 				require.NoError(t, err)
 				assert.True(t, res.Allowed, "第 %d 次应放行", i+1)

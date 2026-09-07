@@ -172,8 +172,8 @@ var (
 	`)
 )
 
-// positions 将 item 的 k 个哈希位转为脚本参数（[]uint64 → []interface{}）。
-func (b *bitmapImpl) positions(item string) []interface{} {
+// positions 将 item 的 k 个哈希位转为脚本参数（[]uint64 → []any）。
+func (b *bitmapImpl) positions(item string) []any {
 	hashs := b.hashs(item)
 	args := make([]any, len(hashs))
 	for i, p := range hashs {
@@ -213,7 +213,7 @@ const (
 // runBitmapScript 按 redisClient.luaSupport 三态记忆分派执行位图 Lua 脚本
 // （单 KEYS[1]，所有命令同 key——分片态下 key 传入单个分片物理键，同键
 // 同 slot，cluster 合法；客户端不算 slot，go-redis 自动路由）。
-func (b *bitmapImpl) runBitmapScript(ctx context.Context, key string, s *goredis.Script, args []interface{}) (*goredis.Cmd, scriptOutcome) {
+func (b *bitmapImpl) runBitmapScript(ctx context.Context, key string, s *goredis.Script, args []any) (*goredis.Cmd, scriptOutcome) {
 	if !b.client.luaTryEval() {
 		return nil, scriptFallback
 	}

@@ -69,7 +69,7 @@ func TestBitmapHashParity(t *testing.T) {
 			}
 
 			var odd, total, dupItems int
-			for i := 0; i < 5000; i++ {
+			for i := range 5000 {
 				item := fmt.Sprintf("parity-%d", i)
 				sum := xxh3.Hash128([]byte(item))
 				h1, h2 := sum.Hi, sum.Lo|1
@@ -334,10 +334,8 @@ func TestBitmapConcurrentAddRealRedis(t *testing.T) {
 	)
 	start := make(chan struct{})
 
-	for i := 0; i < n; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range n {
+		wg.Go(func() {
 			<-start // 并发闸门：所有 goroutine 尽可能同时发起
 			v, err := b.Add(ctx, "race-item")
 			mu.Lock()
@@ -350,7 +348,7 @@ func TestBitmapConcurrentAddRealRedis(t *testing.T) {
 			default:
 				notAdded++
 			}
-		}()
+		})
 	}
 	close(start)
 	wg.Wait()
@@ -618,7 +616,7 @@ func TestBitmapAddSemanticsHighFill(t *testing.T) {
 	}
 
 	var newTrue int
-	for i := 0; i < n; i++ {
+	for i := range n {
 		if add(fmt.Sprintf("hf-inserted-%d", i)) {
 			newTrue++
 		}
@@ -631,7 +629,7 @@ func TestBitmapAddSemanticsHighFill(t *testing.T) {
 	}
 
 	// 灌完后重复 Add：k 位已全部置 1，必须 0% 返回 true（零容忍，逐个断言）。
-	for i := 0; i < n; i++ {
+	for i := range n {
 		if add(fmt.Sprintf("hf-inserted-%d", i)) {
 			t.Fatalf("重复元素 hf-inserted-%d 返回 true（k 位已全部置位，应恒为 false）", i)
 		}
@@ -918,7 +916,7 @@ func TestShardIndexRouting(t *testing.T) {
 			if first < 0 || first >= n {
 				t.Fatalf("n=%d 值域越界：item=%s idx=%d", n, item, first)
 			}
-			for r := 0; r < 2; r++ {
+			for range 2 {
 				if got := shardIndex(item, n); got != first {
 					t.Fatalf("路由不确定：n=%d item=%s 两次结果 %d != %d", n, item, got, first)
 				}
@@ -946,7 +944,7 @@ func TestShardIndexRouting(t *testing.T) {
 	// 均匀散布：8000 items × 8 桶
 	const n, total = 8, 8000
 	buckets := make([]int, n)
-	for i := 0; i < total; i++ {
+	for i := range total {
 		buckets[shardIndex(fmt.Sprintf("uniform-%d", i), n)]++
 	}
 	exp := total / n
@@ -1113,7 +1111,7 @@ func TestBloomSharderKeysAndGroup(t *testing.T) {
 			t.Fatalf("allKeys got %v want %v", keys, want)
 		}
 		seen := map[string]bool{}
-		for i := 0; i < 500; i++ {
+		for i := range 500 {
 			item := fmt.Sprintf("sk-%d", i)
 			k := s.keyFor(item)
 			seen[k] = true
@@ -1228,7 +1226,7 @@ func TestBitmapShardedMiniredis(t *testing.T) {
 		// 只允许出现 <base>#<idx> 形态的键（不得有裸 base 键），且
 		// 200 个 item 足以覆盖全部 4 个分片
 		allow := map[string]bool{}
-		for i := 0; i < nShards; i++ {
+		for i := range nShards {
 			allow[fmt.Sprintf("shard:keys#%d", i)] = true
 		}
 		present := map[string]bool{}
@@ -1285,7 +1283,7 @@ func TestBitmapShardedMiniredis(t *testing.T) {
 		// 交错"已灌入/未灌入"的混合查询：ExistsMulti 第 i 位必须与单条
 		// Exists（同一 sharder 路由）一致——跨分片分组回填的正确性回归
 		mix := make([]string, 0, 60)
-		for i := 0; i < 40; i++ {
+		for i := range 40 {
 			mix = append(mix, items[i*3], fmt.Sprintf("sd-missing-%d", i))
 		}
 		multi, err := b.ExistsMulti(ctx, mix...)
@@ -1662,7 +1660,7 @@ func TestBloomImplABRealRedis(t *testing.T) {
 		// standalone 路径不预分配（见 NewBloomFilterWithEstimate 注释），
 		// 1000 元素灌进 RedisBloom 默认 capacity=100 的子过滤器扩容链时，
 		// 新增判定的假阳性率达百分位——属两条路径既有容量语义差异，非缺陷。
-		for i := 0; i < n/2; i++ {
+		for i := range n / 2 {
 			if _, err := f.Add(ctx, items[i]); err != nil {
 				t.Fatalf("%s Add(%s)：%v", name, items[i], err)
 			}

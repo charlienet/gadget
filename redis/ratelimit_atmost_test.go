@@ -34,7 +34,7 @@ func TestAllowAtMost(t *testing.T) {
 			const k = "am-partial"
 
 			// burst=5：3 次 Allow 后剩余 2（GCRA remaining=2）
-			for i := 0; i < 3; i++ {
+			for range 3 {
 				res, err := rl.Allow(ctx, k, 5)
 				require.NoError(t, err)
 				assert.True(t, res.Allowed)
@@ -53,7 +53,7 @@ func TestAllowAtMost(t *testing.T) {
 			const k = "am-empty"
 
 			// 耗尽 burst=5
-			for i := 0; i < 5; i++ {
+			for range 5 {
 				_, err := rl.Allow(ctx, k, 5)
 				require.NoError(t, err)
 			}
@@ -86,7 +86,7 @@ func TestAllowAtMost(t *testing.T) {
 			const k = "am-name"
 
 			// a 耗尽
-			for i := 0; i < 5; i++ {
+			for range 5 {
 				_, err := la.Allow(ctx, k, 5)
 				require.NoError(t, err)
 			}
@@ -117,7 +117,7 @@ func TestReset(t *testing.T) {
 	const k = "reset"
 
 	// 耗尽配额
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		res, err := rl.Allow(ctx, k, 5)
 		require.NoError(t, err)
 		assert.True(t, res.Allowed)

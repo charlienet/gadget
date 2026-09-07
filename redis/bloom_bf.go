@@ -121,8 +121,8 @@ func (b *bfCmdImpl) Exists(ctx context.Context, item string) (bool, error) {
 	return exists, nil
 }
 
-func toInterfaceSlice(items []string) []interface{} {
-	args := make([]interface{}, len(items))
+func toInterfaceSlice(items []string) []any {
+	args := make([]any, len(items))
 	for i, v := range items {
 		args[i] = v
 	}

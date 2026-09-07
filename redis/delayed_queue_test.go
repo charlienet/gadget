@@ -59,7 +59,7 @@ func TestDelayedQueue(t *testing.T) {
 		t.Run("批量取与计数", func(t *testing.T) {
 			// 清空队列，避免前面子测试残留的未到期任务干扰计数
 			require.NoError(t, rdb.Del(ctx, "dq:1").Err())
-			for i := 0; i < 5; i++ {
+			for i := range 5 {
 				require.NoError(t, q.Enqueue(ctx, fmt.Sprintf("b%d", i), time.Now().Add(-time.Second)))
 			}
 
