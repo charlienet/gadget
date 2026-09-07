@@ -7,7 +7,7 @@ import (
 
 	"github.com/alicebob/miniredis"
 	"github.com/charlienet/gadget/redis"
-	"github.com/charlienet/gadget/redis/test"
+	mini "github.com/charlienet/gadget/redis/test/mini"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -15,7 +15,7 @@ import (
 // TestTokenBucketGCRA 验证自研 GCRA 令牌桶语义（替换 redis_rate 依赖后）：
 // 突发放行、超限拒绝、Remaining 递减、过期清理、RetryAfter 精度。
 func TestTokenBucketGCRA(t *testing.T) {
-	test.RunOnMiniRedis(t, func(rdb redis.Client) {
+	mini.Run(t, func(rdb redis.Client) {
 		ctx := context.Background()
 		require.NoError(t, rdb.FlushDB(ctx).Err(), "清空限流 key")
 

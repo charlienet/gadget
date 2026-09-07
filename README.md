@@ -67,11 +67,11 @@ Redis 相关测试通过环境变量守卫接入真实实例，未设置时测�
 | 环境变量 | 用途 |
 |---|---|
 | `REDIS_URL` | 单机/哨兵地址（`redis://:pass@host:6379`，支持逗号分隔多地址） |
-| `REDIS_STACK_URL` | Redis Stack（含 RedisBloom/ReJSON 等模块） |
-| `REDIS_CLUSTER_ADDRS` | Cluster 节点地址（逗号分隔） |
-| `REDIS_PASSWORD` | 密码（可选，URL 已含密码时无需设置） |
+| `REDIS_CLUSTER` | Redis Cluster URL（`redis://:pass@host1:7001,host2:7002`，密码在 userinfo） |
 
-`redis/test` 子包提供统一的测试入口（`RunOnRedis` / `RunOnRedisStack` / `RunOnRedisCluster` / `RunOnMiniRedis`），可在自己的测试中直接复用：
+> v0.5.0 环境变量变更：REDIS_STACK_URL → REDIS_URL（统一）；REDIS_CLUSTER_ADDRS + REDIS_PASSWORD → REDIS_CLUSTER（完整 URL 格式，密码内嵌）。
+
+`redis/test` 子包提供统一的真实实例测试入口（`RunOnRedis` / `RunOnRedisCluster`，不引入额外重依赖）；内存 Redis 入口在独立子包 `redis/test/mini`（`mini.Run`，仅显式 import 该子包时才会拉入 miniredis 依赖），可在自己的测试中直接复用：
 
 ```go
 import test "github.com/charlienet/gadget/redis/test"
@@ -81,7 +81,15 @@ func TestSomething(t *testing.T) {
         // 真实 Redis 上执行的断言；REDIS_URL 未设置时自动跳过
     })
 }
+
+func TestSomethingInMemory(t *testing.T) {
+    mini.Run(t, func(rdb redis.Client) {
+        // 内存 miniredis 上执行的断言，离线可跑
+    })
+}
 ```
+
+其中 `mini.Run` 需额外 `import mini "github.com/charlienet/gadget/redis/test/mini"`。
 
 ## 仓库结构与开发
 

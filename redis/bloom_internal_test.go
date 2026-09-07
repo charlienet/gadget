@@ -517,7 +517,8 @@ func TestLuaSupportStateTransition(t *testing.T) {
 //   - Exists 两路径结果完全一致（存在性判定粒度相同）；
 //   - Add 返回值逐个完全相等（硬断言）：判据修正后两路径同为"k 位至少
 //     一位在调用前为 0 即新增"（Lua 脚本 GETBIT 先于 SETBIT；addFallback
-//     先 exists 后补位、返回 !exists）。历史上 Lua 路径误用 all_zero（k 位
+//     单次 SETBIT pipeline、以返回的旧值判定）。历史上 Lua 路径误用
+//     all_zero（k 位
 //     全 0 才算新增），高填充率下系统性漏判，本断言即该缺陷的收敛防线，
 //     任一侧语义回退都会立即失败。
 func TestBitmapFallbackConsistency(t *testing.T) {
@@ -654,13 +655,14 @@ func TestBitmapAddDenseViaLua(t *testing.T) {
 	// 调用前"至少一位为 0"→ BF.ADD 语义下属新增。
 	setDenseSingleZero := func(item string) {
 		t.Helper()
+		// 非分片实例：物理键即 sharder.base（key 字段已删除，等价表达）
 		positions := b.hashs(item)
 		for _, pos := range positions {
-			if err := rc.SetBit(ctx, b.key, int64(pos), 1).Err(); err != nil {
+			if err := rc.SetBit(ctx, b.sharder.base, int64(pos), 1).Err(); err != nil {
 				t.Fatalf("预置 SetBit(%d,1)：%v", pos, err)
 			}
 		}
-		if err := rc.SetBit(ctx, b.key, int64(positions[0]), 0).Err(); err != nil {
+		if err := rc.SetBit(ctx, b.sharder.base, int64(positions[0]), 0).Err(); err != nil {
 			t.Fatalf("预置缺位 SetBit(%d,0)：%v", positions[0], err)
 		}
 	}
@@ -727,28 +729,17 @@ func TestBitmapMultiPositionsArgs(t *testing.T) {
 //     与批量逐条降级对同一 key 的所有命令落同一 slot，须正常执行。
 //
 // 共享实例纪律：key 带 bloomtest:<随机> 唯一前缀、收尾 Del；严禁 FLUSHDB。
-// REDIS_CLUSTER_ADDRS 未设置时跳过（内部测试不能 import test 包——依赖图成环，
+// REDIS_CLUSTER 未设置时跳过（内部测试不能 import test 包——依赖图成环，
 // 此处自建守卫）。
 func TestBitmapClusterFallbackRouting(t *testing.T) {
-	raw := os.Getenv("REDIS_CLUSTER_ADDRS")
+	raw := os.Getenv("REDIS_CLUSTER")
 	if raw == "" {
-		t.Skip("REDIS_CLUSTER_ADDRS not set; skip cluster test")
+		t.Skip("REDIS_CLUSTER not set; skip cluster test")
 	}
-	var addrs []string
-	for _, p := range strings.Split(raw, ",") {
-		if a := strings.TrimSpace(p); a != "" {
-			addrs = append(addrs, a)
-		}
+	rdb, err := NewWithUrl(raw)
+	if err != nil {
+		t.Fatalf("REDIS_CLUSTER URL 解析失败：%v", err)
 	}
-	if len(addrs) == 0 {
-		t.Skip("REDIS_CLUSTER_ADDRS empty; skip cluster test")
-	}
-
-	opts := []Option{WithAddrs(addrs)}
-	if pwd := os.Getenv("REDIS_PASSWORD"); pwd != "" {
-		opts = append(opts, WithPassword(pwd))
-	}
-	rdb := New(opts...)
 	t.Cleanup(func() { _ = rdb.GracefulClose(context.Background()) })
 
 	rc, ok := rdb.(*redisClient)
@@ -906,4 +897,818 @@ func TestBitmapMultiVsLoopConsistency(t *testing.T) {
 	if bm1 != bm2 {
 		t.Fatalf("批量与逐条位图最终状态不一致（len %d vs %d）", len(bm1), len(bm2))
 	}
+}
+
+// --- Redis Cluster 分片适配（bloom_shard.go） ---
+
+// TestShardIndexRouting 验证路由纯函数（规格 10b）：确定性（同 item 多次
+// 调用同结果）、模映射（idx == xxh3.Hash128(item).Hi % n）、值域
+// [0, n)、n<=1 恒 0，以及大样本下的均匀散布（每桶 600~1400 / 期望 1000，
+// 容差 ±40%，xxh3 实测远优于此）。
+func TestShardIndexRouting(t *testing.T) {
+	items := make([]string, 1000)
+	for i := range items {
+		items[i] = fmt.Sprintf("route-item-%d", i)
+	}
+
+	// 确定性 + 模映射 + 值域
+	for n := 1; n <= 8; n++ {
+		for _, item := range items[:200] {
+			first := shardIndex(item, n)
+			if first < 0 || first >= n {
+				t.Fatalf("n=%d 值域越界：item=%s idx=%d", n, item, first)
+			}
+			for r := 0; r < 2; r++ {
+				if got := shardIndex(item, n); got != first {
+					t.Fatalf("路由不确定：n=%d item=%s 两次结果 %d != %d", n, item, got, first)
+				}
+			}
+			var want int
+			if n > 1 {
+				want = int(xxh3.Hash128([]byte(item)).Hi % uint64(n))
+			}
+			if first != want {
+				t.Fatalf("模映射不符：n=%d item=%s got %d want %d", n, item, first, want)
+			}
+		}
+	}
+
+	// n<=1 恒 0（退化路径）
+	for _, item := range items {
+		if got := shardIndex(item, 1); got != 0 {
+			t.Fatalf("n=1 应恒 0，got %d", got)
+		}
+		if got := shardIndex(item, 0); got != 0 {
+			t.Fatalf("n=0 防御性应恒 0，got %d", got)
+		}
+	}
+
+	// 均匀散布：8000 items × 8 桶
+	const n, total = 8, 8000
+	buckets := make([]int, n)
+	for i := 0; i < total; i++ {
+		buckets[shardIndex(fmt.Sprintf("uniform-%d", i), n)]++
+	}
+	exp := total / n
+	for i, c := range buckets {
+		if c < exp*60/100 || c > exp*140/100 {
+			t.Fatalf("均匀性异常：n=%d 桶 %d 计数 %d（期望 %d ±40%%）", n, i, c, exp)
+		}
+	}
+}
+
+// TestBloomShardCapacitySplit 验证容量分摊与收缩硬条件（规格 3）：
+// effectiveN = min(requested, total/1000)，每分片容量 ceil(total/n) ≥ 1000
+// （或 n==1 退化）；capacity<N、<2000、整除/进位边界全覆盖。并断言
+// perShard 驱动的 m/k 不坍缩——堵死"整除为 0 → m=0→1、k=30、30 位全
+// 挤同一位"的静默失真路径。
+func TestBloomShardCapacitySplit(t *testing.T) {
+	cases := []struct {
+		name    string
+		req     int
+		total   int64
+		wantN   int
+		wantPer int64
+	}{
+		{"默认 8 片整容量", 8, 1_000_000, 8, 125_000},
+		{"容量只够 5 片（capacity<N 收缩）", 8, 5_000, 5, 1_000},
+		{"容量只够 4 片（进位）", 8, 4_500, 4, 1_125},
+		{"恰好 2 片下限", 8, 2_000, 2, 1_000},
+		{"总容量 <2000 退化 1 片", 8, 1_999, 1, 1_999},
+		{"单片容量恰好 1000", 8, 1_000, 1, 1_000},
+		{"总容量 < 下限仍可用（n=1）", 8, 999, 1, 999},
+		{"请求 1 片（合法退化）", 1, 1_000_000, 1, 1_000_000},
+		{"请求数超容量商", 1000, 10_000, 10, 1_000},
+		{"进位收缩：5001/1000=5 → ceil(5001/5)", 8, 5_001, 5, 1_001}, // 5001/1000=5 → n=5 → ceil(5001/5)=1001
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			n := bloomEffectiveShardCount(c.req, c.total)
+			if n != c.wantN {
+				t.Fatalf("effectiveN got %d want %d（total=%d req=%d）", n, c.wantN, c.total, c.req)
+			}
+			per := bloomPerShardCapacity(c.total, n)
+			if per != c.wantPer {
+				t.Fatalf("perShard got %d want %d", per, c.wantPer)
+			}
+			// 硬条件：多分片时每分片容量 ≥ 1000
+			if n > 1 && per < minShardCapacity {
+				t.Fatalf("每分片容量 %d 低于下限 %d（n=%d total=%d）", per, minShardCapacity, n, c.total)
+			}
+			// m/k 不坍缩：位图至少覆盖每分片容量量级、k 在 [1,30]
+			m := bloomBitCount(per, 0.01) | 1
+			if m < 2 {
+				t.Fatalf("m 坍缩为 %d（per=%d），失真路径未被堵死", m, per)
+			}
+			if k := bloomHashCount(per, m); k < 1 || k > 30 {
+				t.Fatalf("k=%d 越出 [1,30]（per=%d m=%d）", k, per, m)
+			}
+		})
+	}
+
+	// MaxInt64 溢出回归（评审整改③）：ceil 必须用商余式——
+	// (total+n-1)/n 在 total 逼近 MaxInt64 时加法回绕，产生错误极小值。
+	t.Run("MaxInt64 溢出回归", func(t *testing.T) {
+		// MaxInt64 = 2^63-1 = 8×(2^60-1)+7 → ceil(/8) = 2^60
+		if got := bloomPerShardCapacity(math.MaxInt64, 8); got != 1<<60 {
+			t.Fatalf("ceil(MaxInt64/8) got %d want %d（加法回绕溢出回归）", got, int64(1)<<60)
+		}
+		// MaxInt64 = 3×(2^63/3 取整)+2 → ceil(/3) = MaxInt64/3 + 1
+		if got, want := bloomPerShardCapacity(math.MaxInt64, 3), int64(math.MaxInt64)/3+1; got != want {
+			t.Fatalf("ceil(MaxInt64/3) got %d want %d", got, want)
+		}
+		// 收缩端同样不 panic/不溢出：MaxInt64 总容量 → effectiveN=requested
+		if n := bloomEffectiveShardCount(8, math.MaxInt64); n != 8 {
+			t.Fatalf("MaxInt64 总容量应收缩为请求值 8，got %d", n)
+		}
+	})
+}
+
+// TestResolveBloomShardingModes 验证触发条件（规格 1）：仅 cluster 启用
+// 分片；standalone/sentinel/ring 关闭且 perShard==总容量（键名行为零回归）。
+func TestResolveBloomShardingModes(t *testing.T) {
+	for _, mode := range []Mode{ModeStandalone, ModeSentinel, ModeRing} {
+		enabled, n, per := resolveBloomSharding(mode, 8, 100_000)
+		if enabled || n != 1 || per != 100_000 {
+			t.Fatalf("%s 模式不应分片：enabled=%v n=%d per=%d", mode, enabled, n, per)
+		}
+	}
+	enabled, n, per := resolveBloomSharding(ModeCluster, 8, 100_000)
+	if !enabled || n != 8 || per != 12_500 {
+		t.Fatalf("cluster 模式应 8 分片、每片 12500：enabled=%v n=%d per=%d", enabled, n, per)
+	}
+	// 集群退化态：effectiveN 收缩为 1 时 enabled 仍为 true（键名带 #0）
+	enabled, n, _ = resolveBloomSharding(ModeCluster, 8, 1_500)
+	if !enabled || n != 1 {
+		t.Fatalf("cluster 退化态应 enabled=true n=1，got enabled=%v n=%d", enabled, n)
+	}
+}
+
+// TestBloomSharderKeysAndGroup 验证键名与分组（规格 1/2/5）：分片态键名
+// <base>#<idx>（含退化态恒带 #0）、关闭态恒 base 零回归；group 保留原始
+// 下标、按 idx 升序、每项落对分组。
+func TestBloomSharderKeysAndGroup(t *testing.T) {
+	t.Run("关闭态零回归", func(t *testing.T) {
+		s := newBloomSharder("plain", false, 8)
+		if got := s.shardKey(3); got != "plain" {
+			t.Fatalf("关闭态 shardKey 应恒为 base，got %q", got)
+		}
+		if got := s.keyFor("anything"); got != "plain" {
+			t.Fatalf("关闭态 keyFor 应为 base，got %q", got)
+		}
+		if keys := s.allKeys(); len(keys) != 1 || keys[0] != "plain" {
+			t.Fatalf("关闭态 allKeys got %v", keys)
+		}
+		groups := s.group([]string{"a", "b", "c"})
+		if len(groups) != 1 || groups[0].key != "plain" {
+			t.Fatalf("关闭态 group 应单组 base，got %+v", groups)
+		}
+		for i, idx := range groups[0].srcIdx {
+			if idx != i {
+				t.Fatalf("单组 srcIdx 应为恒等序列，got %v", groups[0].srcIdx)
+			}
+		}
+	})
+
+	t.Run("退化态带 #0 后缀", func(t *testing.T) {
+		s := newBloomSharder("base", true, 1)
+		if got := s.shardKey(0); got != "base#0" {
+			t.Fatalf("集群退化态键名应为 base#0，got %q", got)
+		}
+		groups := s.group([]string{"x", "y"})
+		if len(groups) != 1 || groups[0].key != "base#0" {
+			t.Fatalf("退化态 group 键名应为 base#0，got %+v", groups)
+		}
+	})
+
+	t.Run("多分片键名与散布", func(t *testing.T) {
+		s := newBloomSharder("base", true, 4)
+		want := []string{"base#0", "base#1", "base#2", "base#3"}
+		keys := s.allKeys()
+		if fmt.Sprint(keys) != fmt.Sprint(want) {
+			t.Fatalf("allKeys got %v want %v", keys, want)
+		}
+		seen := map[string]bool{}
+		for i := 0; i < 500; i++ {
+			item := fmt.Sprintf("sk-%d", i)
+			k := s.keyFor(item)
+			seen[k] = true
+			if want := "base#" + fmt.Sprint(shardIndex(item, 4)); k != want {
+				t.Fatalf("keyFor(%s) got %s want %s", item, k, want)
+			}
+		}
+		if len(seen) != 4 {
+			t.Fatalf("500 个样本应散布到 4 个分片，got %d", len(seen))
+		}
+	})
+
+	t.Run("分组保留原始下标", func(t *testing.T) {
+		s := newBloomSharder("g", true, 6)
+		items := make([]string, 300)
+		for i := range items {
+			items[i] = fmt.Sprintf("grp-%d", i)
+		}
+		groups := s.group(items)
+		if len(groups) == 0 || len(groups) > 6 {
+			t.Fatalf("分组数异常：%d", len(groups))
+		}
+		prevIdx := -1
+		covered := map[int]bool{}
+		for _, g := range groups {
+			if g.idx <= prevIdx {
+				t.Fatalf("分组未按 idx 升序：%d 出现在 %d 之后", g.idx, prevIdx)
+			}
+			prevIdx = g.idx
+			if g.key != "g#"+fmt.Sprint(g.idx) {
+				t.Fatalf("分组键名错误：%q", g.key)
+			}
+			for j, item := range g.items {
+				if shardIndex(item, 6) != g.idx {
+					t.Fatalf("item %s 落错分组（idx=%d）", item, g.idx)
+				}
+				orig := g.srcIdx[j]
+				if items[orig] != item {
+					t.Fatalf("srcIdx[%d]=%d 指回错误 item：%q != %q", j, orig, items[orig], item)
+				}
+				covered[orig] = true
+			}
+		}
+		if len(covered) != len(items) {
+			t.Fatalf("分组丢失条目：覆盖 %d，期望 %d", len(covered), len(items))
+		}
+	})
+}
+
+// TestWithShardCountOption 验证 WithShardCount 选项语义（规格 9）：
+// 默认 8；n<=0 静默忽略保留默认；任意正整数合法（含 1）。
+func TestWithShardCountOption(t *testing.T) {
+	cfg := defaultBloomConfig()
+	if cfg.shardCount != defaultBloomShardCount {
+		t.Fatalf("默认分片数应为 %d，got %d", defaultBloomShardCount, cfg.shardCount)
+	}
+	WithShardCount(0)(&cfg)
+	WithShardCount(-3)(&cfg)
+	if cfg.shardCount != defaultBloomShardCount {
+		t.Fatalf("非法值应静默忽略保留默认，got %d", cfg.shardCount)
+	}
+	WithShardCount(1)(&cfg)
+	if cfg.shardCount != 1 {
+		t.Fatalf("n=1 应合法采纳，got %d", cfg.shardCount)
+	}
+	WithShardCount(64)(&cfg)
+	if cfg.shardCount != 64 {
+		t.Fatalf("n=64 应采纳，got %d", cfg.shardCount)
+	}
+}
+
+// newShardedBitmapForTest 在 miniredis（standalone）上构造**注入式分片**
+// bitmapImpl，用于集群分片语义验证（规格 10a）：容量收缩与 m/k 分摊已由
+// 纯函数测试覆盖，此处 cfg.capacity=1000 对应"每分片容量"，注入
+// sharder{n:4} 后语义等价 cluster 下 total=4000 / effectiveN=4 的形态。
+func newShardedBitmapForTest(t *testing.T, key string, policy FailPolicy) (*bitmapImpl, *redisClient, *miniredis.Miniredis) {
+	t.Helper()
+	rc, mr := newMiniRedisClient(t)
+	cfg := defaultBloomConfig()
+	cfg.capacity = 1000 // 即每分片容量（见函数注释）
+	cfg.policy = policy
+	b := newBitmapImpl(rc, key, cfg)
+	b.sharder = newBloomSharder(key, true, 4)
+	b.totalCapacity = cfg.capacity * 4 // 上报口径：全局总容量 4000
+	return b, rc, mr
+}
+
+// TestBitmapShardedMiniredis 端到端验证 bitmap 分片路径（miniredis 注入
+// shardN=4）：键名格式与散布、k 位落对分片、AddMulti/ExistsMulti 跨分片
+// 结果顺序回填（与单条路径逐位一致）。
+func TestBitmapShardedMiniredis(t *testing.T) {
+	ctx := context.Background()
+	const nShards = 4
+
+	items := make([]string, 200)
+	for i := range items {
+		items[i] = fmt.Sprintf("sd-item-%d", i)
+	}
+
+	t.Run("键名格式与散布", func(t *testing.T) {
+		b, _, mr := newShardedBitmapForTest(t, "shard:keys", FailOpen)
+		res, err := b.AddMulti(ctx, items...)
+		if err != nil {
+			t.Fatalf("分片 AddMulti：%v", err)
+		}
+		for i, v := range res {
+			if !v {
+				t.Fatalf("全新 item %s 应判新增，got false", items[i])
+			}
+		}
+
+		// 只允许出现 <base>#<idx> 形态的键（不得有裸 base 键），且
+		// 200 个 item 足以覆盖全部 4 个分片
+		allow := map[string]bool{}
+		for i := 0; i < nShards; i++ {
+			allow[fmt.Sprintf("shard:keys#%d", i)] = true
+		}
+		present := map[string]bool{}
+		for _, k := range mr.Keys() {
+			if !allow[k] {
+				t.Fatalf("出现非法键名 %q（期望仅 %v 形态）", k, allow)
+			}
+			present[k] = true
+		}
+		for k := range allow {
+			if !present[k] {
+				t.Fatalf("分片键 %s 未被散布命中（路由不均或键名错误）", k)
+			}
+		}
+	})
+
+	t.Run("k 位落在正确分片", func(t *testing.T) {
+		b, rc, _ := newShardedBitmapForTest(t, "shard:pos", FailOpen)
+		if _, err := b.AddMulti(ctx, items...); err != nil {
+			t.Fatal(err)
+		}
+		// 抽样：item 的 k 个位置在路由分片键上必须全部为 1
+		for _, item := range items[:25] {
+			key := b.sharder.keyFor(item)
+			for _, pos := range b.hashs(item) {
+				v, err := rc.GetBit(ctx, key, int64(pos)).Result()
+				if err != nil {
+					t.Fatalf("GetBit(%s, %d)：%v", key, pos, err)
+				}
+				if v != 1 {
+					t.Fatalf("item %s 的位 %d 未落在路由分片键 %s（跨片写失败或路由分叉）", item, pos, key)
+				}
+			}
+		}
+	})
+
+	t.Run("批量与单条结果顺序一致", func(t *testing.T) {
+		b, _, _ := newShardedBitmapForTest(t, "shard:order", FailOpen)
+		if _, err := b.AddMulti(ctx, items...); err != nil {
+			t.Fatal(err)
+		}
+		// 重复 AddMulti：已存在条目必须全 false（验证按原始下标回填而非
+		// 分组内顺序直写）
+		again, err := b.AddMulti(ctx, items...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i, v := range again {
+			if v {
+				t.Fatalf("重复 AddMulti[%d]（%s）应 false，回填顺序错位", i, items[i])
+			}
+		}
+
+		// 交错"已灌入/未灌入"的混合查询：ExistsMulti 第 i 位必须与单条
+		// Exists（同一 sharder 路由）一致——跨分片分组回填的正确性回归
+		mix := make([]string, 0, 60)
+		for i := 0; i < 40; i++ {
+			mix = append(mix, items[i*3], fmt.Sprintf("sd-missing-%d", i))
+		}
+		multi, err := b.ExistsMulti(ctx, mix...)
+		if err != nil {
+			t.Fatalf("分片 ExistsMulti：%v", err)
+		}
+		for i, item := range mix {
+			single, err := b.Exists(ctx, item)
+			if err != nil {
+				t.Fatalf("单条 Exists(%s)：%v", item, err)
+			}
+			if multi[i] != single {
+				t.Fatalf("ExistsMulti[%d]（%s）与单条结果不一致：batch=%v single=%v（回填错位）", i, item, multi[i], single)
+			}
+			if i%2 == 0 && !multi[i] {
+				t.Fatalf("已灌入 item %s 出现假阴性（布隆不允许）", item)
+			}
+		}
+	})
+
+	t.Run("Info 聚合含空分片", func(t *testing.T) {
+		b, _, _ := newShardedBitmapForTest(t, "shard:info", FailOpen)
+		sub := items[:30]
+		if _, err := b.AddMulti(ctx, sub...); err != nil {
+			t.Fatal(err)
+		}
+		info, err := b.Info(ctx)
+		if err != nil {
+			t.Fatalf("分片 Info：%v", err)
+		}
+		if info.Capacity != 4000 {
+			t.Fatalf("Info.Capacity 应上报配置总容量 4000，got %d", info.Capacity)
+		}
+		// 30 个全新 item：逐分片独立估计求和应接近 30（宽松区间防估计噪声）
+		if info.NumItems < 20 || info.NumItems > 45 {
+			t.Fatalf("NumItems 聚合估计异常：got %d（灌入 30）", info.NumItems)
+		}
+		if info.Size <= 0 {
+			t.Fatalf("Size 应为各分片 StrLen 之和（>0），got %d", info.Size)
+		}
+
+		// 空分片：仅灌 1 个 item，其余分片 BITCOUNT 天然零值，聚合不报错
+		b1, _, _ := newShardedBitmapForTest(t, "shard:info1", FailOpen)
+		if _, err := b1.Add(ctx, "only-one"); err != nil {
+			t.Fatal(err)
+		}
+		info1, err := b1.Info(ctx)
+		if err != nil {
+			t.Fatalf("含空分片的 Info 不应报错：%v", err)
+		}
+		if info1.NumItems < 1 || info1.NumItems > 2 {
+			t.Fatalf("单 item 聚合估计应 ≈1，got %d", info1.NumItems)
+		}
+	})
+}
+
+// TestBitmapShardedLoopVsBatchConsistency 验证分片降级路径（Lua 禁用后
+// 逐条串行，含 pipeline 位操作兜底）与分片批量路径（Pipeline 内多分片
+// EVAL）的结果序列与每分片位图内容完全一致（规格 10a）。两侧用独立
+// miniredis 实例（luaSupport 为 client 级记忆，共享会互相污染）。
+func TestBitmapShardedLoopVsBatchConsistency(t *testing.T) {
+	ctx := context.Background()
+	items := make([]string, 120)
+	for i := range items {
+		items[i] = fmt.Sprintf("lbc-%d", i)
+	}
+
+	bBatch, _, mrA := newShardedBitmapForTest(t, "shard:cons", FailOpen)
+	bLoop, rcB, mrB := newShardedBitmapForTest(t, "shard:cons", FailOpen)
+	rcB.luaMarkUnsupported() // 入口跳过 EVAL → 逐条降级（不可再套外层 pipeline）
+
+	ra, err := bBatch.AddMulti(ctx, items...)
+	if err != nil {
+		t.Fatalf("批量分片 AddMulti：%v", err)
+	}
+	rb, err := bLoop.AddMulti(ctx, items...)
+	if err != nil {
+		t.Fatalf("降级分片 AddMulti：%v", err)
+	}
+	if fmt.Sprint(ra) != fmt.Sprint(rb) {
+		t.Fatalf("AddMulti 结果序列不一致：batch=%v loop=%v", ra, rb)
+	}
+	for _, v := range ra {
+		if !v {
+			t.Fatal("全新 items 批量路径出现 false（语义异常）")
+		}
+	}
+
+	// 重复批量（已存在条目应全 false 且两侧一致）
+	qa := []string{items[5], "lbc-nope-1", items[60]}
+	aa, err := bBatch.AddMulti(ctx, qa...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ab, err := bLoop.AddMulti(ctx, qa...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(aa) != fmt.Sprint(ab) {
+		t.Fatalf("重复批量结果不一致：batch=%v loop=%v", aa, ab)
+	}
+
+	// ExistsMulti 两路径一致
+	qu := []string{"lbc-nope-1", items[0], items[7], "lbc-nope-2"}
+	ea, err := bBatch.ExistsMulti(ctx, qu...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eb, err := bLoop.ExistsMulti(ctx, qu...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(ea) != fmt.Sprint(eb) {
+		t.Fatalf("ExistsMulti 两路径不一致：batch=%v loop=%v", ea, eb)
+	}
+	if ea[1] != true || ea[2] != true {
+		t.Fatalf("已灌入项 ExistsMulti 必须为 true（假阴性）：%v", ea)
+	}
+
+	// 键集合一致 + 每个分片位图逐字节一致（两侧路由同码，键名必相同）
+	ka := append([]string(nil), mrA.Keys()...)
+	kb := append([]string(nil), mrB.Keys()...)
+	if fmt.Sprint(ka) != fmt.Sprint(kb) {
+		t.Fatalf("两路径分片键集合不一致：batch=%v loop=%v", ka, kb)
+	}
+	if len(ka) == 0 {
+		t.Fatal("未写入任何分片键")
+	}
+	for _, k := range ka {
+		sa, err := mrA.Get(k)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sb, err := mrB.Get(k)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if sa != sb {
+			t.Fatalf("分片键 %s 位图内容不一致（len %d vs %d）", k, len(sa), len(sb))
+		}
+	}
+}
+
+// TestBloomShardedUnavailableWholeFallback 验证分片下 FailOpen/FailClosed
+// 的"整体失败"定义（规格 8）：任一分片组服务不可用 → 全部 items 按
+// policy 兜底 + ErrRedisUnavailable 哨兵错误，禁止部分真实部分兜底。
+func TestBloomShardedUnavailableWholeFallback(t *testing.T) {
+	ctx := context.Background()
+	items := make([]string, 50)
+	for i := range items {
+		items[i] = fmt.Sprintf("uf-%d", i)
+	}
+
+	check := func(policy FailPolicy) {
+		t.Helper()
+		b, _, mr := newShardedBitmapForTest(t, "shard:uf", policy)
+		// 先灌一半建立"真实结果"，再宕掉服务器：残余批量必须整体兜底，
+		// 不得出现"已存在分片返回真实值、失联分片返回兜底值"的混合
+		half := items[:25]
+		if _, err := b.AddMulti(ctx, half...); err != nil {
+			t.Fatal(err)
+		}
+		mr.Close()
+
+		want := policy == FailOpen // FailOpen → 全 true；FailClosed → 全 false
+		got, err := b.AddMulti(ctx, items...)
+		if !errors.Is(err, ErrRedisUnavailable) {
+			t.Fatalf("policy=%v 分片不可用应返回哨兵错误，got %v", policy, err)
+		}
+		if len(got) != len(items) {
+			t.Fatalf("兜底切片长度 got %d want %d", len(got), len(items))
+		}
+		for i, v := range got {
+			if v != want {
+				t.Fatalf("policy=%v 第 %d 项兜底值 got %v want %v（疑似混合结果）", policy, i, v, want)
+			}
+		}
+		got2, err := b.ExistsMulti(ctx, items...)
+		if !errors.Is(err, ErrRedisUnavailable) || len(got2) != len(items) {
+			t.Fatalf("policy=%v ExistsMulti 整体兜底失败：len=%d err=%v", policy, len(got2), err)
+		}
+		for i, v := range got2 {
+			if v != want {
+				t.Fatalf("policy=%v ExistsMulti[%d] got %v want %v", policy, i, v, want)
+			}
+		}
+	}
+
+	check(FailOpen)
+	check(FailClosed)
+}
+
+// TestBloomShardRoutingSharedByBothImpls 验证 BF/bitmap 两 impl 的分片
+// 共享层行为一致（规格 6）：同一 sharder 参数下 keyFor/shardKey/group
+// 逐条目、逐分组完全相同——路由/分组逻辑只有一份实现。
+func TestBloomShardRoutingSharedByBothImpls(t *testing.T) {
+	s := newBloomSharder("shared", true, 6)
+	bf := &bfCmdImpl{sharder: s}
+	bm := &bitmapImpl{sharder: s}
+
+	items := make([]string, 300)
+	for i := range items {
+		items[i] = fmt.Sprintf("shared-%d", i)
+	}
+	for _, item := range items {
+		if bf.sharder.keyFor(item) != bm.sharder.keyFor(item) {
+			t.Fatalf("两路径 keyFor(%s) 分叉：%q vs %q", item,
+				bf.sharder.keyFor(item), bm.sharder.keyFor(item))
+		}
+		if bf.sharder.indexOf(item) != bm.sharder.indexOf(item) {
+			t.Fatalf("两路径 indexOf(%s) 分叉", item)
+		}
+	}
+	ga, gb := bf.sharder.group(items), bm.sharder.group(items)
+	if len(ga) != len(gb) {
+		t.Fatalf("分组数不一致：%d vs %d", len(ga), len(gb))
+	}
+	for i := range ga {
+		if ga[i].key != gb[i].key || ga[i].idx != gb[i].idx ||
+			fmt.Sprint(ga[i].items) != fmt.Sprint(gb[i].items) ||
+			fmt.Sprint(ga[i].srcIdx) != fmt.Sprint(gb[i].srcIdx) {
+			t.Fatalf("第 %d 组分组结果不一致", i)
+		}
+	}
+}
+
+// --- WithBloomImpl 强制实现路径（A/B 对照） ---
+
+// TestBloomImplOptionSelection 验证 WithBloomImpl 在 miniredis（无 bf 模块）
+// 上的分派与语义（规格 5a/5b）：
+//   - 默认零值 BloomImplAuto：按 HasBloom() 探测 → bitmapImpl（既有行为）；
+//   - 强制 bitmap：选定 bitmapImpl 且行为正常（四类方法自洽）；
+//   - 强制 BF.*：选定 bfCmdImpl，服务器无模块时命令直接报错且**不降级**——
+//     错误原样返回、不得命中 ErrRedisUnavailable 哨兵（unknown 类不是
+//     Unavailable，不走 FailOpen 兜底）；
+//   - 两种强制模式都不触发 HasBloom() 探测（capability 缓存保持未就绪）；
+//   - 越界枚举值按 auto 处理（与包内"非法值回落默认"惯例一致）。
+func TestBloomImplOptionSelection(t *testing.T) {
+	ctx := context.Background()
+
+	// 零值契约：默认配置必须是 auto
+	if got := defaultBloomConfig().impl; got != BloomImplAuto {
+		t.Fatalf("BloomImpl 默认应为零值 auto，got %d", got)
+	}
+
+	t.Run("auto 探测分派到 bitmap", func(t *testing.T) {
+		rc, _ := newMiniRedisClient(t)
+		f := rc.NewBloomFilter("sel:auto")
+		if _, ok := f.(*bitmapImpl); !ok {
+			t.Fatalf("miniredis 无 bf 模块，auto 应选 bitmapImpl，got %T", f)
+		}
+	})
+
+	t.Run("强制 bitmap 行为正常且跳过探测", func(t *testing.T) {
+		rc, _ := newMiniRedisClient(t)
+		f := rc.NewBloomFilter("sel:bmp", WithBloomImpl(BloomImplBitmap))
+		bm, ok := f.(*bitmapImpl)
+		if !ok {
+			t.Fatalf("强制 bitmap 应选 bitmapImpl，got %T", f)
+		}
+		if rc.cap.ready {
+			t.Fatal("强制模式不得触发 HasBloom() 探测（capability 已就绪=发过 INFO）")
+		}
+
+		added, err := bm.Add(ctx, "s1")
+		if err != nil || !added {
+			t.Fatalf("强制 bitmap Add：added=%v err=%v", added, err)
+		}
+		res, err := bm.AddMulti(ctx, "s2", "s1", "s3")
+		if err != nil {
+			t.Fatalf("强制 bitmap AddMulti：%v", err)
+		}
+		if fmt.Sprint(res) != "[true false true]" {
+			t.Fatalf("AddMulti 语义/顺序错误：got %v", res)
+		}
+		ex, err := bm.ExistsMulti(ctx, "s3", "s-missing")
+		if err != nil || ex[0] != true {
+			t.Fatalf("ExistsMulti：got %v err=%v", ex, err)
+		}
+		info, err := bm.Info(ctx)
+		if err != nil || info.Capacity != 1_000_000 {
+			t.Fatalf("Info：got %+v err=%v", info, err)
+		}
+	})
+
+	t.Run("强制 BF 无模块报错不降级", func(t *testing.T) {
+		rc, _ := newMiniRedisClient(t)
+		f := rc.NewBloomFilter("sel:bf", WithBloomImpl(BloomImplBF))
+		bf, ok := f.(*bfCmdImpl)
+		if !ok {
+			t.Fatalf("强制 BF 应选 bfCmdImpl，got %T", f)
+		}
+		if rc.cap.ready {
+			t.Fatal("强制模式不得触发 HasBloom() 探测")
+		}
+
+		// Add/Exists/AddMulti/ExistsMulti/Info 全部直接报错（原样返回），
+		// 不降级到 bitmap、不触发 FailOpen 兜底。错误文本不做断言——
+		// miniredis 与真实 Redis 的 unknown 命令措辞不同。
+		addCallers := map[string]func() error{
+			"Add":         func() error { _, err := bf.Add(ctx, "x"); return err },
+			"Exists":      func() error { _, err := bf.Exists(ctx, "x"); return err },
+			"AddMulti":    func() error { _, err := bf.AddMulti(ctx, "x", "y"); return err },
+			"ExistsMulti": func() error { _, err := bf.ExistsMulti(ctx, "x", "y"); return err },
+			"Info":        func() error { _, err := bf.Info(ctx); return err },
+		}
+		for name, call := range addCallers {
+			err := call()
+			if err == nil {
+				t.Fatalf("强制 BF 在无模块服务器上 %s 应报错（不自动降级），got nil", name)
+			}
+			if errors.Is(err, ErrRedisUnavailable) {
+				t.Fatalf("强制 BF %s 的报错是数据类（unknown command 风格），不得走兜底哨兵，got %v", name, err)
+			}
+		}
+	})
+
+	t.Run("越界枚举按 auto 回落", func(t *testing.T) {
+		cfg := defaultBloomConfig()
+		WithBloomImpl(BloomImpl(99))(&cfg)
+		if cfg.impl != BloomImpl(99) {
+			t.Fatalf("option 应原样存储，分派层归一 auto；got %d", cfg.impl)
+		}
+		rc, _ := newMiniRedisClient(t)
+		f := rc.NewBloomFilter("sel:bad", WithBloomImpl(BloomImpl(99)))
+		if _, ok := f.(*bitmapImpl); !ok {
+			t.Fatalf("越界值应按 auto 分派（miniredis → bitmapImpl），got %T", f)
+		}
+	})
+}
+
+// TestBloomImplABRealRedis 在真实 Redis 上用 WithBloomImpl 对 BF.* 与
+// bitmap 两条路径做 A/B 对照（规格 5c）：两条独立 key、同容量同参数，
+// 各跑 Add/AddMulti/Exists/ExistsMulti——每路径 1000 元素自洽（布隆无
+// 假阴性，已灌入项必须全 true）+ Info 合理性断言。**不做跨路径的严格
+// 对比断言**（BF 自动扩容 vs bitmap 固定布局、ItemsInserted 精确值 vs
+// 估计值，逐项相等必 flaky）。
+// 守卫：REDIS_URL 未设置或服务器无 bf 模块（RedisBloom 部署 / Redis 8.x
+// community 内置）时跳过——无模块环境无法构造 BF 路径对照。
+// 共享实例纪律：key 带 bloomtest:<随机> 前缀，收尾 Del，严禁 FLUSHDB。
+func TestBloomImplABRealRedis(t *testing.T) {
+	url := os.Getenv("REDIS_URL")
+	if url == "" {
+		t.Skip("REDIS_URL not set; skip real-Redis A/B test")
+	}
+	rdb, err := NewWithUrl(url)
+	if err != nil {
+		t.Fatalf("NewWithUrl: %v", err)
+	}
+	defer func() { _ = rdb.GracefulClose(context.Background()) }()
+
+	if !rdb.Capability().HasModule("bf") {
+		t.Skip("服务器未加载 bf 模块（RedisBloom / Redis 8.x community），跳过 A/B 对照")
+	}
+
+	ctx := context.Background()
+	keyBF := bloomTestKey("ab-bf")
+	keyBMP := bloomTestKey("ab-bmp")
+	defer func() {
+		_ = rdb.Del(ctx, keyBF, keyBMP).Err()
+	}()
+
+	const n = 1000
+	items := make([]string, n)
+	for i := range items {
+		items[i] = fmt.Sprintf("ab-%s-%d", keyBF, i)
+	}
+
+	runPath := func(name string, f BloomFilter) {
+		t.Helper()
+		// "自洽"判据 = 写入必可读（布隆无假阴性是硬保证）。
+		// **不断言全新元素 Add/AddMulti 必返回 true**：返回 false 只表示
+		// 服务端判"可能已存在"（正常假阳性事件，位仍已写入）。BF
+		// standalone 路径不预分配（见 NewBloomFilterWithEstimate 注释），
+		// 1000 元素灌进 RedisBloom 默认 capacity=100 的子过滤器扩容链时，
+		// 新增判定的假阳性率达百分位——属两条路径既有容量语义差异，非缺陷。
+		for i := 0; i < n/2; i++ {
+			if _, err := f.Add(ctx, items[i]); err != nil {
+				t.Fatalf("%s Add(%s)：%v", name, items[i], err)
+			}
+		}
+		res, err := f.AddMulti(ctx, items[n/2:]...)
+		if err != nil {
+			t.Fatalf("%s AddMulti：%v", name, err)
+		}
+		if len(res) != n/2 {
+			t.Fatalf("%s AddMulti 返回长度 got %d want %d（顺序对应性破坏）", name, len(res), n/2)
+		}
+		// 单条 Exists 抽查（两端 + 中段）
+		for _, idx := range []int{0, n/2 - 1, n / 2, n - 1} {
+			ok, err := f.Exists(ctx, items[idx])
+			if err != nil || !ok {
+				t.Fatalf("%s Exists(%s)：ok=%v err=%v（假阴性不允许）", name, items[idx], ok, err)
+			}
+		}
+		// ExistsMulti 全量自查：无假阴性 + 顺序对应
+		all, err := f.ExistsMulti(ctx, items...)
+		if err != nil {
+			t.Fatalf("%s ExistsMulti：%v", name, err)
+		}
+		if len(all) != n {
+			t.Fatalf("%s ExistsMulti 返回长度 got %d want %d", name, len(all), n)
+		}
+		for i, v := range all {
+			if !v {
+				t.Fatalf("%s ExistsMulti[%d]（%s）假阴性", name, i, items[i])
+			}
+		}
+	}
+
+	bf := rdb.NewBloomFilter(keyBF,
+		WithCapacity(10_000), WithFalsePositive(0.01),
+		WithBloomImpl(BloomImplBF))
+	bmp := rdb.NewBloomFilter(keyBMP,
+		WithCapacity(10_000), WithFalsePositive(0.01),
+		WithBloomImpl(BloomImplBitmap))
+
+	// 分派正确性（真实 Redis 上 auto 反而会选 BF，这里必须按强制选项）
+	if _, ok := bf.(*bfCmdImpl); !ok {
+		t.Fatalf("强制 BF 应得 bfCmdImpl，got %T", bf)
+	}
+	if _, ok := bmp.(*bitmapImpl); !ok {
+		t.Fatalf("强制 bitmap 应得 bitmapImpl，got %T", bmp)
+	}
+
+	runPath("BF.*", bf)
+	runPath("bitmap", bmp)
+
+	// Info 合理性（不做跨路径严格对比）：NumItems 在 1000 ±10% 内、
+	// Size/Capacity 为正。BF 路径 ItemsInserted 为精确计数，bitmap 路径
+	// 是置位数估计——两者都应在宽松区间内；BF standalone 无预分配
+	// （见 NewBloomFilterWithEstimate 注释），Capacity 为扩容后的子过滤器
+	// 容量和，仅断言 >0。
+	checkInfo := func(name string, f BloomFilter) {
+		t.Helper()
+		info, err := f.Info(ctx)
+		if err != nil {
+			t.Fatalf("%s Info：%v", name, err)
+		}
+		if info.NumItems < n*90/100 || info.NumItems > n*110/100 {
+			t.Fatalf("%s Info.NumItems got %d，超出 1000±10%%（灌入 %d）", name, info.NumItems, n)
+		}
+		if info.Capacity <= 0 || info.Size <= 0 {
+			t.Fatalf("%s Info 异常：%+v", name, info)
+		}
+		t.Logf("%s Info：%+v", name, info)
+	}
+	checkInfo("BF.*", bf)
+	checkInfo("bitmap", bmp)
 }

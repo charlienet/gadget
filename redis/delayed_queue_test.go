@@ -7,14 +7,14 @@ import (
 	"time"
 
 	"github.com/charlienet/gadget/redis"
-	"github.com/charlienet/gadget/redis/test"
+	mini "github.com/charlienet/gadget/redis/test/mini"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 // TestDelayedQueue 验证延迟队列（ZSET + Lua 原子取出）。
 func TestDelayedQueue(t *testing.T) {
-	test.RunOnMiniRedis(t, func(rdb redis.Client) {
+	mini.Run(t, func(rdb redis.Client) {
 		ctx := context.Background()
 		q := rdb.NewDelayedQueue("dq:1")
 

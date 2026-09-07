@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/charlienet/gadget/redis"
-	"github.com/charlienet/gadget/redis/test"
+	mini "github.com/charlienet/gadget/redis/test/mini"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -16,7 +16,7 @@ import (
 // 的毫秒漂移会使首次拒绝发生在 burst 次之后不久（而非精确第 burst+1 次），
 // 因此断言采用"前 n 次全放行 + 之后必定出现拒绝"的容差形式。
 func TestLeakyBucket(t *testing.T) {
-	test.RunOnMiniRedis(t, func(rdb redis.Client) {
+	mini.Run(t, func(rdb redis.Client) {
 		ctx := context.Background()
 		require.NoError(t, rdb.FlushDB(ctx).Err(), "清空漏桶状态 key")
 
@@ -131,7 +131,7 @@ func TestLeakyBucket(t *testing.T) {
 // （间隔 - 毫秒漂移）恒小于窗口会放行，因此测试先循环 Allow 直到观察到
 // ≥2 次放行（next 领先 ≥2 间隔），保证后续 Wait 必先被拒。
 func TestLeakyBucketWait(t *testing.T) {
-	test.RunOnMiniRedis(t, func(rdb redis.Client) {
+	mini.Run(t, func(rdb redis.Client) {
 		ctx := context.Background()
 		require.NoError(t, rdb.FlushDB(ctx).Err())
 
@@ -177,7 +177,7 @@ func TestLeakyBucketWait(t *testing.T) {
 
 // TestRateLimiterWait 验证令牌桶的阻塞等待模式。
 func TestRateLimiterWait(t *testing.T) {
-	test.RunOnMiniRedis(t, func(rdb redis.Client) {
+	mini.Run(t, func(rdb redis.Client) {
 		ctx := context.Background()
 		require.NoError(t, rdb.FlushDB(ctx).Err())
 

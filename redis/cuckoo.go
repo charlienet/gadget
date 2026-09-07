@@ -190,7 +190,7 @@ type cfCmdImpl struct {
 }
 
 // ensureReserve 在配置了容量时对过滤器执行一次 CF.RESERVE 预分配。
-// 对已存在的过滤器（CF.RESERVE 报 "item exists"）容错忽略。
+// 对已存在的过滤器（CF.RESERVE 报 "item exists"/"already exists"）容错忽略。
 func (cf *cfCmdImpl) ensureReserve(ctx context.Context) error {
 	if cf.cfg.capacity <= 0 {
 		return nil
@@ -205,7 +205,7 @@ func (cf *cfCmdImpl) ensureReserve(ctx context.Context) error {
 			Expansion:     cf.cfg.expansion,
 		}
 		err = cf.client.CFReserveWithArgs(ctx, cf.key, opt).Err()
-		if err != nil && strings.Contains(err.Error(), "exists") {
+		if err != nil && (strings.Contains(err.Error(), "item exists") || strings.Contains(err.Error(), "already exists")) {
 			err = nil // 过滤器已存在：视为已初始化
 		}
 	})

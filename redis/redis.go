@@ -20,34 +20,25 @@ var _ Client = &redisClient{}
 
 type Client interface {
 	redis.UniversalClient
-	Constraint(...Constraint) error                             // 实例约束
-	MustConstraint(constraints ...Constraint)                   // 强制约束，不符合约束条件时退出应用
-	LoadFunction(f string) error                                // 加载函数脚本
-	Mode() Mode                                                 // 运行模式（standalone/cluster/sentinel/ring）
-	Prefix() string                                             // 统一前缀
-	Separator() string                                          // 分隔符
-	ComposeKey(key ...string) string                            // 组合键：拼接 key 段并应用统一前缀
-	AddPrefix(prefix ...string) Client                          // 添加前缀
-	ServerVersion() string                                      // 服务器版本
-	Capability() *Capability                                    // 能力探测（版本、模块等）
-	NewBloomFilter(key string, opts ...BloomOption) BloomFilter // 创建布隆过滤器（自动选择 BF.* 或 bitmap 实现）
-	// NewBloomFilterWithEstimate 按容量与误判率创建布隆过滤器，等价于
-	// NewBloomFilter(key, WithCapacity(n), WithFalsePositive(p))。
-	NewBloomFilterWithEstimate(key string, capacity int64, falsePositive float64) BloomFilter
-	NewCuckooFilter(key string, opts ...CuckooOption) *CuckooFilter     // 创建布谷鸟过滤器（需 RedisBloom cuckoo 模块）
-	NewDelayedQueue(key string, opts ...QueueOption) *DelayedQueue      // 创建延迟队列（ZSET 实现）
-	NewRateLimiter(name string, opts ...RateLimiterOption) *RateLimiter // 创建限流器（按名称隔离限流 key 空间，空名称不隔离）；已弃用，见 ratelimit 模块，为兼容保留于接口
-	NewLeakyBucket(name string, opts ...LeakyBucketOption) *LeakyBucket // 创建漏桶限流器（恒定输出速率、拒绝突发；name 隔离同限流器）；已弃用，见 ratelimit 模块，为兼容保留于接口
-	// CompareAndSet 原子比较并设置：key 当前值等于 oldValue 时设置为 newValue。
-	// oldValue=nil 表示"仅当 key 不存在时设置"（SETNX 语义）。
-	CompareAndSet(ctx context.Context, key string, oldValue, newValue any) (bool, error)
-	// CompareAndDelete 原子比较并删除：key 当前值等于 oldValue 时删除。
-	// oldValue=nil 表示"key 存在即删除"。
-	CompareAndDelete(ctx context.Context, key string, oldValue any) (bool, error)
-	// GracefulClose 优雅关闭连接池：幂等，级联关闭 AddPrefix 派生的子连接池，
-	// 受 ctx 超时/取消控制。NewWithClient 包装的外部连接池不在此处关闭，
-	// 由调用方负责在自己的生命周期内关闭。
-	GracefulClose(ctx context.Context) error
+	Constraint(...Constraint) error                                                           // 实例约束
+	MustConstraint(constraints ...Constraint)                                                 // 强制约束，不符合约束条件时退出应用
+	LoadFunction(f string) error                                                              // 加载函数脚本
+	Mode() Mode                                                                               // 运行模式（standalone/cluster/sentinel/ring）
+	Prefix() string                                                                           // 统一前缀
+	Separator() string                                                                        // 分隔符
+	ComposeKey(key ...string) string                                                          // 组合键：拼接 key 段并应用统一前缀
+	AddPrefix(prefix ...string) Client                                                        // 添加前缀
+	ServerVersion() string                                                                    // 服务器版本
+	Capability() *Capability                                                                  // 能力探测（版本、模块等）
+	NewBloomFilter(key string, opts ...BloomOption) BloomFilter                               // 创建布隆过滤器（自动选择 BF.* 或 bitmap 实现）
+	NewBloomFilterWithEstimate(key string, capacity int64, falsePositive float64) BloomFilter // 等价于 NewBloomFilter(key, WithCapacity(n), WithFalsePositive(p))。
+	NewCuckooFilter(key string, opts ...CuckooOption) *CuckooFilter                           // 创建布谷鸟过滤器（需 RedisBloom cuckoo 模块）
+	NewDelayedQueue(key string, opts ...QueueOption) *DelayedQueue                            // 创建延迟队列（ZSET 实现）
+	NewRateLimiter(name string, opts ...RateLimiterOption) *RateLimiter                       // 创建限流器（按名称隔离限流 key 空间，空名称不隔离）；已弃用，见 ratelimit 模块，为兼容保留于接口
+	NewLeakyBucket(name string, opts ...LeakyBucketOption) *LeakyBucket                       // 创建漏桶限流器（恒定输出速率、拒绝突发；name 隔离同限流器）；已弃用，见 ratelimit 模块，为兼容保留于接口
+	CompareAndSet(ctx context.Context, key string, oldValue, newValue any) (bool, error)      // CompareAndSet 原子比较并设置：key 当前值等于 oldValue 时设置为 newValue。
+	CompareAndDelete(ctx context.Context, key string, oldValue any) (bool, error)             // CompareAndDelete 原子比较并删除：key 当前值等于 oldValue 时删除。
+	GracefulClose(ctx context.Context) error                                                  // GracefulClose 优雅关闭连接池：幂等，级联关闭 AddPrefix 派生的子连接池，
 }
 
 type redisClient struct {
@@ -58,14 +49,9 @@ type redisClient struct {
 	state    *closeState
 	ownsPool bool            // 是否拥有底层连接池：NewWithClient 包装外部 uc 时为 false
 	breaker  *CircuitBreaker // 熔断器（默认启用；nil 表示禁用）
-	// luaSupport 记录服务器对 EVAL/Lua 脚本的支持情况（服务器级共享，所有
-	// 扩展的所有过滤器实例共用一份记忆）：0=未知 1=支持 -1=不支持。
-	// 用指针而非规格字面的值类型 atomic.Int32，两个硬约束所致：
-	//   1) redisClient 的方法均为值接收者（复制结构体），atomic.Int32 内嵌
-	//      noCopy，值字段直接触发 vet copylocks（已取证：passes lock by value）；
-	//   2) 值字段在副本间状态分裂，违背"服务器级共享"语义。
-	// 与 closeState 同理由指针保证共享（见其注释）。nil（零值构造的
-	// redisClient，仅测试场景）按"未知"处理，见 luaState 等访问方法。
+	// luaSupport 记录服务器对 EVAL/Lua 脚本的支持情况（服务器级共享，
+	// 所有扩展实例共用一份记忆）：0=未知 1=支持 -1=不支持。用指针保证
+	// 值接收者的所有副本共享同一份状态（与 closeState 同理）。
 	luaSupport *atomic.Int32
 }
 
@@ -79,25 +65,14 @@ type closeState struct {
 }
 
 func ParseURL(redisURL string, opts ...Option) (RedisOptions, error) {
-	// 统一先用 net/url 解析，做两件事：
-	//
-	// 1. 检测 host 段是否含逗号：逗号分隔的多地址是 Redis Cluster/Sentinel
-	//    的种子列表。go-redis 的 ParseClusterURL 只支持单一 host（逗号串会
-	//    被当作整体地址，dial 阶段才报 lookup 失败）；用户名/密码由 url.Parse
-	//    分离到 User 字段，密码中的逗号/特殊字符不会污染 host 判断。
-	//
-	// 2. 剥离哨兵参数 master_name：go-redis 官方无哨兵 URL 格式，其
-	//    ParseClusterURL 对未知 query 参数直接报 "unexpected option"，因此
-	//    必须先行剥离，解析完成后再回填 UniversalOptions.MasterName。
-	//    master_name 存在即剥离（含空值，空值同样会被 ParseClusterURL 拒绝）；
-	//    仅当非空时回填字段，空值按不存在处理（与空 host 列表的宽容风格一致）。
+	// 逗号分隔的多地址按 cluster/sentinel 种子列表处理；master_name 是本库
+	// 扩展的 query 参数（go-redis 不识别未知参数，需先行剥离再回填）。
 	//
 	// 交互语义：
-	//   - master_name 非空 → 哨兵 failover client（NewUniversalClient 按
-	//     MasterName 字段自动创建）；Addrs 多地址 + master_name 是哨兵节点
-	//     列表；单地址 + master_name 是单哨兵节点（failover client 同样适用）。
-	//   - 多地址无 master_name → 集群 client（len(Addrs)>1 自动判断）。
-	//   - 单地址无 master_name → 单机 client。
+	//   - master_name 非空 → 哨兵 failover client（多地址 = 哨兵节点列表，
+	//     单地址 = 单哨兵节点）
+	//   - 多地址无 master_name → 集群 client
+	//   - 单地址无 master_name → 单机 client
 	u, err := url.Parse(redisURL)
 	if err != nil {
 		return RedisOptions{}, err
@@ -127,9 +102,6 @@ func ParseURL(redisURL string, opts ...Option) (RedisOptions, error) {
 }
 
 // parseSingleAddrURL 解析单地址 URL（已剥离 master_name）。
-// ParseClusterURL 返回 *redis.ClusterOptions，经 universalOptionsFromCluster
-// 转为 UniversalOptions，保证 MaxRedirects/ReadOnly/RouteByLatency/
-// RouteRandomly/CredentialsProvider 等字段完整拷贝（见 extract_options.go）。
 func parseSingleAddrURL(u *url.URL, opts ...Option) (RedisOptions, error) {
 	ropt, err := redis.ParseClusterURL(u.String())
 	if err != nil {
@@ -144,11 +116,9 @@ func parseSingleAddrURL(u *url.URL, opts ...Option) (RedisOptions, error) {
 	return copt, nil
 }
 
-// parseMultiAddrURL 解析逗号分隔的多地址集群 URL。
-// 以第一个地址重建 URL 交给 ParseClusterURL 提取完整连接配置（userinfo 中的
-// 用户名/密码、TLS、超时等），再把 Addrs 替换为拆分后的地址列表。
-// 注意：db path（如 redis://host:6379/1）在集群场景无意义（集群仅 db0），
-// ParseClusterURL 不解析 path，DB 保持零值，与单地址行为一致。
+// parseMultiAddrURL 解析逗号分隔的多地址集群 URL：以第一个地址重建 URL
+// 提取完整连接配置，再替换为拆分后的地址列表。db path 在集群场景无意义
+// （仅 db0），保持零值。
 func parseMultiAddrURL(u *url.URL, opts ...Option) (RedisOptions, error) {
 	hosts := strings.Split(u.Host, ",")
 	addrs := make([]string, 0, len(hosts))
@@ -158,11 +128,11 @@ func parseMultiAddrURL(u *url.URL, opts ...Option) (RedisOptions, error) {
 		}
 	}
 	if len(addrs) == 0 {
-		// 错误消息只输出 host（u.String() 含 userinfo 明文密码，记录错误会泄露）
+		// 只输出 host：u.String() 含 userinfo 明文密码
 		return RedisOptions{}, fmt.Errorf("redis: empty host list in URL host %q", u.Host)
 	}
 
-	// 以第一个地址重建 URL（保留 scheme/userinfo/query），交给 ParseClusterURL 解析
+	// 以第一个地址重建 URL（保留 scheme/userinfo/query）解析连接配置
 	u2 := *u
 	u2.Host = addrs[0]
 	ropt, err := redis.ParseClusterURL(u2.String())
@@ -170,9 +140,8 @@ func parseMultiAddrURL(u *url.URL, opts ...Option) (RedisOptions, error) {
 		return RedisOptions{}, err
 	}
 
-	// 第一个地址以 ParseClusterURL 规范化的结果为准（无端口时补默认端口 6379），
-	// 其余逗号拆分的地址保持原样，并保留 addr query 参数追加的额外地址
-	// （ParseClusterURL 的 addr 参数可多次指定并追加到 Addrs）
+	// 第一个地址以 ParseClusterURL 规范化结果为准（补默认端口），其余保持
+	// 原样，并保留 addr query 参数追加的额外地址
 	addrs = append([]string{ropt.Addrs[0]}, addrs[1:]...)
 	if len(ropt.Addrs) > 1 {
 		addrs = append(addrs, ropt.Addrs[1:]...)
@@ -206,18 +175,18 @@ func New(opts ...Option) Client {
 
 // NewWithClient 包装一个外部已有的 go-redis UniversalClient，返回本库的 Client。
 // 会在传入的 uc 上注册前缀改写 hook（PrefixHook），前缀取自 opts 中的 WithPrefix；
-// 若 opts 未提供前缀，则返回无前缀的纯包装 client（hook 直通，不影响原 client 行为）。
+// 若 opts 未提供前缀，则返回无前缀的纯包装 client（hook 直通）。
 //
-// 注意：一个 uc 只能被 NewWithClient 包装一次（go-redis 的 hook 只能追加不能移除，
-// 重复包装会导致前缀 hook 叠加）。
+// 一个 uc 只能被 NewWithClient 包装一次（hook 只增不减，重复包装会导致
+// 前缀 hook 叠加）。
 //
-// 连接池所有权：NewWithClient 不拥有传入的 uc —— GracefulClose/Close 只级联关闭
-// AddPrefix 派生的子连接池，不会关闭传入的 uc，由调用方负责在适当时机关闭自己的 uc。
+// 连接池所有权：不拥有传入的 uc——GracefulClose/Close 只级联关闭 AddPrefix
+// 派生的子连接池，不关闭 uc，由调用方负责。
 //
-// AddPrefix 派生的子连接池：自动继承 uc 的真实连接配置（地址、密码、DB、TLS 等，
-// 支持 *redis.Client/*redis.ClusterClient/*redis.Ring），保证派生池与 uc 连到同一
-// 服务器；显式传入的连接 Option（WithAddr/WithRedisOptions 等）会覆盖提取出的配置。
-// 若 uc 为无法提取配置的类型，则必须显式提供连接 Option，否则返回错误。
+// AddPrefix 派生的子连接池自动继承 uc 的真实连接配置（地址、密码、DB、
+// TLS 等，支持 *redis.Client/*redis.ClusterClient/*redis.Ring）；显式传入的
+// 连接 Option 会覆盖提取的配置。无法提取配置的类型必须显式提供连接
+// Option，否则返回错误。
 func NewWithClient(uc redis.UniversalClient, opts ...Option) (Client, error) {
 	if uc == nil {
 		return nil, errors.New("redis: nil UniversalClient")
@@ -225,8 +194,7 @@ func NewWithClient(uc redis.UniversalClient, opts ...Option) (Client, error) {
 
 	opt := defaultOptions
 
-	// 从外部 uc 提取真实连接配置作为子连接池的基础配置，避免 AddPrefix
-	// 派生的子连接池静默回落到默认的 127.0.0.1:6379 而写错服务器。
+	// 从外部 uc 提取真实连接配置，作为 AddPrefix 派生子连接池的基础配置
 	if uo := extractUniversalOptions(uc); uo != nil {
 		opt.UniversalOptions = *uo
 	} else {
@@ -297,8 +265,8 @@ func (rdb redisClient) AddPrefix(prefixes ...string) Client {
 	old := rdb.prefix
 	p := newPrefix(old.separator, old.rename(prefixes...))
 
-	// AddPrefix 会创建独立的连接池，父 client 必须登记该子连接池，
-	// 以便父 client 关闭（GracefulClose）时级联关闭，避免连接池泄漏。
+	// 创建独立子连接池并登记，供父 client GracefulClose 级联关闭，
+	// 避免连接池泄漏。
 	child := newWithOpts(&RedisOptions{UniversalOptions: *rdb.conf}, p)
 
 	rdb.state.mu.Lock()
@@ -327,16 +295,11 @@ func (rdb redisClient) ComposeKey(key ...string) string {
 	return rdb.prefix.rename(key...)
 }
 
-// LoadFunction 加载函数脚本。
-// 集群环境下只加载到当前连接节点会导致其他主节点执行函数时报错，
-// 因此按底层连接类型分发：
+// LoadFunction 加载函数脚本。函数是实例级状态，按底层连接类型分发以保证
+// 所有节点可用：
 //   - *redis.ClusterClient：并发向所有主节点加载（ForEachMaster，返回首个错误）
-//   - *redis.Ring：向所有 shard 实例加载（ForEachShard，函数为实例级状态，
-//     路由到未加载的 shard 会执行失败）
+//   - *redis.Ring：向所有 shard 实例加载（ForEachShard）
 //   - 其余（单机/哨兵 failover）：直接加载到当前连接
-//
-// 注：miniredis 不支持 FUNCTION 命令，单机路径验证需真实 Redis；
-// 集群/Ring 路径需真实多实例环境。
 func (rdb redisClient) LoadFunction(code string) error {
 	ctx := context.Background()
 
@@ -396,12 +359,9 @@ func (rdb redisClient) GracefulClose(ctx context.Context) error {
 		return nil
 	}
 
-	// go-redis v9 的 UniversalClient.Close() 不接受 context，
-	// 因此在 goroutine 中执行连接池关闭，并通过 select 同时监听关闭结果与 ctx 信号。
-	// 若 ctx 先超时/取消，返回 ctx 错误；后台 Close() 仍会继续执行
-	// （done 为缓冲 channel，无需读取也不会泄漏 goroutine）。
-	// 注意：必须显式调用底层 UniversalClient.Close()（而非 rdb.Close()），
-	// 否则会递归调用本类型重写的 Close() 造成死循环。
+	// go-redis 的 Close() 不接受 context：放 goroutine 执行，ctx 先到期则
+	// 返回 ctx.Err()（后台 Close 继续完成，done 有缓冲不会泄漏）。
+	// 必须调用底层 UniversalClient.Close()，直接调 rdb.Close() 会递归死循环。
 	done := make(chan error, 1)
 	go func() {
 		done <- rdb.UniversalClient.Close()
@@ -431,8 +391,7 @@ func newWithOpts(opt *RedisOptions, prefix redisPrefix) *redisClient {
 	}
 	client.cap = newCapability(client)
 
-	// 注册熔断 hook：必须在 renameHook 之后注册（go-redis hook 链后注册的
-	// 最外层，先熔断判断再前缀改写）
+	// 熔断 hook 须在 renameHook 之后注册（后注册的最外层：先熔断判断再前缀改写）
 	client.initBreaker(rdb, opt)
 
 	return client
@@ -448,35 +407,31 @@ func (c *redisClient) initBreaker(rdb redis.UniversalClient, opt *RedisOptions) 
 	rdb.AddHook(&breakerHook{breaker: c.breaker})
 }
 
-// --- Lua 能力记忆（C3a）---
+// --- Lua 能力记忆 ---
 //
-// bitmap 类扩展（bloom 等）优先用 Lua 脚本单往返原子完成位操作；在不支持
-// EVAL 的服务器（代理层屏蔽、ACL 禁用、精简编译）上每次请求都会先撞一次
-// 脚本错误再降级，白付一次往返。luaSupport 把这一探测结果记忆为服务器级
-// 三态（0=未知 1=支持 -1=不支持），入口分派见 bloom.go 的 runBitmapScript。
+// bitmap 类扩展优先用 Lua 脚本单往返原子完成位操作；luaSupport 记忆服务器
+// 对 EVAL 的支持结果，在不支持 EVAL 的服务器（代理屏蔽、ACL 禁用等）上
+// 入口直接走非原子回退路径，避免每次白付一次脚本错误往返。
+// 入口分派见 bloom_bitmap.go 的 runBitmapScript。
 
 // luaVerdict 是 EVAL 失败后的分诊结论（见 classifyLuaError）。
 type luaVerdict uint8
 
 const (
 	// luaVerdictUnavailable 瞬态错误（连接/服务不可用类）：不动记忆，调用方
-	// 按 FailPolicy 兜底（fallbackBool）——服务器可能只是抖动，误置 -1 会把
-	// 恢复后的好服务器永久打入慢路径。
+	// 按 FailPolicy 兜底——服务器可能只是抖动，误置 -1 会永久打入慢路径。
 	luaVerdictUnavailable luaVerdict = iota
 	// luaVerdictUnsupported 命令不存在/被禁类：置记忆 -1，调用方降级走
 	// 非原子回退路径，此后入口跳过 EVAL。
 	luaVerdictUnsupported
 	// luaVerdictDataError 数据类错误（WRONGTYPE/NOPERM/位偏移非法等）：
-	// 原样透传且**不置记忆**——与 Lua 支持与否无关，误置位同样会把好服务器
-	// 永久打入慢路径。
+	// 原样透传且不置记忆——与 Lua 支持与否无关。
 	luaVerdictDataError
 )
 
 // classifyLuaError 对 EVAL 失败原因分诊，决定 luaSupport 的状态迁移与调用方
-// 处置。纯函数、可独立测试；判定顺序：先瞬态错误（IsUnavailable），再命令
-// 禁用类（Redis 错误文本特征："unknown command" / "ERR unknown" /
-// "not allowed"，分别覆盖代理屏蔽、标准 Redis 未知命令、ACL/脚本内禁用），
-// 其余一律视为数据类错误。
+// 处置。判定顺序：先瞬态错误（IsUnavailable），再命令禁用类（错误文本含
+// "unknown command" / "ERR unknown" / "not allowed"），其余一律视为数据类错误。
 func classifyLuaError(err error) luaVerdict {
 	if IsUnavailable(err) {
 		return luaVerdictUnavailable

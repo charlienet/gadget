@@ -7,7 +7,7 @@ import (
 
 	"github.com/alicebob/miniredis"
 	"github.com/charlienet/gadget/redis"
-	"github.com/charlienet/gadget/redis/test"
+	mini "github.com/charlienet/gadget/redis/test/mini"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -15,7 +15,7 @@ import (
 // TestAllowAtMost 验证 AllowAtMost 的"尽力而为"语义：
 // 配额充足全部消耗、配额不足部分放行（Consumed=剩余量）、无配额拒绝。
 func TestAllowAtMost(t *testing.T) {
-	test.RunOnMiniRedis(t, func(rdb redis.Client) {
+	mini.Run(t, func(rdb redis.Client) {
 		ctx := context.Background()
 		require.NoError(t, rdb.FlushDB(ctx).Err())
 

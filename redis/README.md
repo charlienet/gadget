@@ -241,14 +241,64 @@ RedisBloom）；`Info` 的 NumItems 由 BITCOUNT 置位数反推
 （`numItems≈-(m/k)·ln(1-bitsSet/m)`），BITCOUNT 为 O(bytes) 全量扫描，
 仅适合低频运维查询。
 
+**Redis Cluster 分片**：`Mode()==ModeCluster` 时工厂自动把过滤器打散为
+`effectiveN` 个物理键 `<base>#<idx>`（idx = xxh3-128 高 64 位 %
+effectiveN，分片键不带 hash tag、由 go-redis 按整键自动路由），突破单键
+单节点的容量与并发瓶颈；standalone/sentinel/ring 不分片，键名与行为完全
+不变。`WithCapacity` 在分片下是**全局总容量**，均摊每分片
+（`ceil(总/N)`）且下限 1000——容量不足时分片数自动收缩
+（`effectiveN = min(请求 N, 总/1000)`，总容量 <2000 退化为单片）；
+`WithShardCount(n)` 设置请求分片数（默认 8，n<=0 静默忽略保留默认）。
+集群下即使退化为单片也统一带 `#0` 后缀（键名连续）。语义注意：
+
+- 分片后实测 FPR ≈p 且**略偏高**（哈希到各分片的负载天然不均，每分片
+  容量越小越明显），对误判率敏感的场景预留余量或增大总容量。
+- base 键自带 `{hashtag}` 时所有分片键路由同一 slot，分片退化为纯命名
+  拆分（行为仍正确，但失去跨节点打散的意义）。
+- standalone ↔ cluster **键空间不互通**：后者键名带 `#idx` 后缀，切换
+  部署形态读不到旧键，等同重建过滤器（布隆无删除语义，只能重新灌入），
+  请纳入迁移预案。
+- 集群下 `HasBloom()`（路径分派依据）与 Lua 能力记忆只探测 go-redis
+  路由到的**随机单节点**，要求各节点模块/配置同构，否则分派错路径会
+  表现为部分分片键 "unknown command" 类错误。
+- `Info()` 对每个分片键各发一轮命令（成本 ×effectiveN），更严格限制为
+  低频运维查询；`AddMulti`/`ExistsMulti` 中途失败时可能已部分写入
+  （已成功的分片不回滚）——布隆置位幂等、整体重试无数据危害（仅重试
+  时"新增"返回值失准）；任一分片组服务不可用则全部结果按 FailPolicy
+   整体兜底（FailOpen 全 true / FailClosed 全 false + 哨兵错误），不产生
+   混合结果。
+- 分片批量路径（`multiSharded`）在**单个 Pipeline 内发送 inline EVAL 而非
+  EVALSHA**：Pipeline 内无法表达 NOSCRIPT 重试——EVALSHA 的错误要 `Exec`
+  后才可见，同一 Pipeline 不能补发 EVAL（go-redis `Script.Run` 的 NOSCRIPT
+  回退只覆盖非 pipeline 单命令）。脚本体仅数百字节，内联的额外带宽开销可
+  忽略，是"单 Pipeline"约束下的最优实现；单键路径仍走 EVALSHA+三态记忆。
+
+**强制实现路径 `WithBloomImpl`**：默认 `BloomImplAuto` 按 `HasBloom()`
+探测选 BF.*/bitmap；`BloomImplBF` / `BloomImplBitmap` 跳过能力探测直接
+选定实现，用途是同一实例上对两条路径做 **A/B 对照测试**（不同 key 各
+强制一路）。"强制"即字面义：无模块服务器上 `BloomImplBF` 的命令直接
+报 "unknown command" 类错误且**不自动降级**；`BloomImplBitmap` 无视模块
+恒走 Lua/pipeline 路径。越界枚举值按 auto 处理。生产建议保留 auto，让
+包装层自动利用模块能力。两条路径的分片路由/分组回填/Info 聚合/FailOpen
+语义完全一致（共享同一实现层），强制选项只影响命令层选择。
+
 **BREAKING（v0.5.0）**：位图路径换 xxh3-128 双哈希，并奇化位图大小（m|1）
 与哈希步长（h2|1）——修复旧实现步长与模数共享公因子 2 导致的探测轨道减半
 （实测 p=0.001 时 FPR 超标 34.95 倍）。旧位图 key 对新代码会产生**假阴性**，
 升级时必须删除旧 key 或换 key 重建；BF.*（RedisBloom）路径不受影响，
-并修正 bitmap 路径 Add 新增判定（对齐 BF.ADD：调用前不可能存在即返回 true）。
+ 并修正 bitmap 路径 Add 新增判定（对齐 BF.ADD：调用前不可能存在即返回 true）。
+
+**BREAKING（v0.5.0）测试辅助与环境变量**：`redis/test` 包删除 `RunOnRedisStack()`（改用 `RunOnRedis()`）、`RunOnMiniRedis()`（改用 `mini.Run()`，import `github.com/charlienet/gadget/redis/test/mini`）。环境变量对照迁移：
+
+| 旧 | 新 |
+|---|---|
+| `REDIS_STACK_URL` | 并入 `REDIS_URL` |
+| `REDIS_CLUSTER_ADDRS` + `REDIS_PASSWORD` | 统一为 `REDIS_CLUSTER`（完整 URL，密码内嵌） |
+
+`REDIS_CLUSTER` 为完整 URL 格式（密码写在 userinfo）：`redis://:pass@host1:7001,host2:7002`；单机/哨兵的 `REDIS_URL` 同形式，如 `redis://:pass@host:6379`。
 
 
-布谷鸟过滤器（双实现，无需 RedisBloom 模块）：
+ 布谷鸟过滤器（双实现，无需 RedisBloom 模块）：
 
 ```go
 cf := rdb.NewCuckooFilter("cf:1", redis.WithCuckooCapacity(1000000))

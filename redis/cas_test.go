@@ -5,14 +5,14 @@ import (
 	"testing"
 
 	"github.com/charlienet/gadget/redis"
-	"github.com/charlienet/gadget/redis/test"
+	mini "github.com/charlienet/gadget/redis/test/mini"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 // TestCompareAndSet 验证 CAS 原子比较并设置（miniredis + Lua）。
 func TestCompareAndSet(t *testing.T) {
-	test.RunOnMiniRedis(t, func(rdb redis.Client) {
+	mini.Run(t, func(rdb redis.Client) {
 		ctx := context.Background()
 
 		t.Run("值匹配时设置", func(t *testing.T) {
@@ -69,7 +69,7 @@ func TestCompareAndSet(t *testing.T) {
 
 // TestCompareAndDelete 验证 CAS 原子比较并删除（miniredis + Lua）。
 func TestCompareAndDelete(t *testing.T) {
-	test.RunOnMiniRedis(t, func(rdb redis.Client) {
+	mini.Run(t, func(rdb redis.Client) {
 		ctx := context.Background()
 
 		t.Run("值匹配时删除", func(t *testing.T) {

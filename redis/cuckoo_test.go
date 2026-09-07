@@ -14,7 +14,7 @@ import (
 // miniredis 不支持 CF.* 命令，需真实 Redis + RedisBloom 的 cuckoo 模块；
 // 服务器未加载 cuckoo 模块（Capability().HasCuckoo() == false）时跳过。
 func TestCuckooFilter(t *testing.T) {
-	test.RunOnRedisStack(t, func(rdb redis.Client) {
+	test.RunOnRedis(t, func(rdb redis.Client) {
 		if !rdb.Capability().HasCuckoo() {
 			t.Skip("服务器未加载 cuckoo 模块，跳过 CF.* 测试（需 RedisBloom）")
 		}

@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	"github.com/charlienet/gadget/redis"
-	"github.com/charlienet/gadget/redis/test"
+	mini "github.com/charlienet/gadget/redis/test/mini"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -44,7 +44,7 @@ func cuckooFingerprintInAnyBucket(buckets map[string]string, fp int64) bool {
 // NewCuckooFilter 自动分派到 hashImpl；miniredis 支持 Lua 与 Hash 操作）。
 // 覆盖：Add/Exists/Del/Info、幂等语义、驱逐路径与模块版行为对齐。
 func TestCuckooHashImpl(t *testing.T) {
-	test.RunOnMiniRedis(t, func(rdb redis.Client) {
+	mini.Run(t, func(rdb redis.Client) {
 		ctx := context.Background()
 		cf := rdb.NewCuckooFilter("cfh:1", redis.WithCuckooCapacity(1000))
 		require.NoError(t, rdb.Del(ctx, "cfh:1").Err())

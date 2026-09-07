@@ -14,6 +14,7 @@ import (
 	"github.com/alicebob/miniredis"
 	"github.com/charlienet/gadget/redis"
 	"github.com/charlienet/gadget/redis/test"
+	mini "github.com/charlienet/gadget/redis/test/mini"
 	goredis "github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -105,7 +106,7 @@ func TestNewRedis(t *testing.T) {
 }
 
 func TestRunMiniRedis(t *testing.T) {
-	test.RunOnMiniRedis(t, func(rdb redis.Client) {
+	mini.Run(t, func(rdb redis.Client) {
 		_ = rdb.Constraint(redis.Ping())
 	})
 }
@@ -126,7 +127,7 @@ func TestPrefix(t *testing.T) {
 // TestAddPrefixCascadeClose 验证 AddPrefix 派生的子连接池会随父连接池
 // 级联关闭（修复连接池泄漏），且 GracefulClose 幂等。
 func TestAddPrefixCascadeClose(t *testing.T) {
-	test.RunOnMiniRedis(t, func(rdb redis.Client) {
+	mini.Run(t, func(rdb redis.Client) {
 		// 派生多个子连接池
 		child1 := rdb.AddPrefix("h1")
 		child2 := child1.AddPrefix("h2")
@@ -453,7 +454,7 @@ func TestSubscribeWithPrefix(t *testing.T) {
 // TestNewBloomFilterWithEstimateViaInterface 验证 P2-1：
 // NewBloomFilterWithEstimate 已加入 Client 接口，miniredis 走 bitmap 实现。
 func TestNewBloomFilterWithEstimateViaInterface(t *testing.T) {
-	test.RunOnMiniRedis(t, func(rdb redis.Client) {
+	mini.Run(t, func(rdb redis.Client) {
 		bf := rdb.NewBloomFilterWithEstimate("bfkey", 1000, 0.01)
 		ctx := context.Background()
 
@@ -470,7 +471,7 @@ func TestNewBloomFilterWithEstimateViaInterface(t *testing.T) {
 // TestCapabilityModules 验证单一能力判定接口在 miniredis 上的行为：
 // miniredis 不加载任何模块，因此各 HasXXX 判定均应返回 false。
 func TestCapabilityModules(t *testing.T) {
-	test.RunOnMiniRedis(t, func(rdb redis.Client) {
+	mini.Run(t, func(rdb redis.Client) {
 		cap := rdb.Capability()
 		assert.False(t, cap.HasBloom(), "miniredis 不应具备 Bloom 模块")
 		assert.False(t, cap.HasCMS(), "miniredis 不应具备 CMS 模块")
@@ -486,7 +487,7 @@ func TestCapabilityModules(t *testing.T) {
 }
 
 func TestBf(t *testing.T) {
-	test.RunOnRedisStack(t, func(rdb redis.Client) {
+	test.RunOnRedis(t, func(rdb redis.Client) {
 		key := "ffff"
 		rdb.Del(context.Background(), key)
 
@@ -505,7 +506,7 @@ func TestBf(t *testing.T) {
 func BenchmarkBF(b *testing.B) {
 	key := "abcdef"
 
-	test.RunOnRedisStack(b, func(rdb redis.Client) {
+	test.RunOnRedis(b, func(rdb redis.Client) {
 		rdb.BFReserve(context.Background(), key, 0.0001, 100000)
 		ctx := context.Background()
 
@@ -518,7 +519,7 @@ func BenchmarkBF(b *testing.B) {
 
 }
 func TestRateLimiter(t *testing.T) {
-	test.RunOnMiniRedis(t, func(rdb redis.Client) {
+	mini.Run(t, func(rdb redis.Client) {
 		if err := rdb.FlushDB(context.Background()).Err(); err != nil {
 			panic(err)
 		}
@@ -541,7 +542,7 @@ func TestRateLimiter(t *testing.T) {
 // TestRateLimiterNameIsolation 验证按名称隔离限流 key 空间：
 // 不同 name 的限流器对相同业务 key 互不影响（各自独立配额）。
 func TestRateLimiterNameIsolation(t *testing.T) {
-	test.RunOnMiniRedis(t, func(rdb redis.Client) {
+	mini.Run(t, func(rdb redis.Client) {
 		ctx := context.Background()
 		require.NoError(t, rdb.FlushDB(ctx).Err(), "清空限流相关 key")
 
@@ -599,7 +600,7 @@ func TestRateLimiterKeyNamespace(t *testing.T) {
 // TestNewBloomFilterViaInterface 验证通过 Client 接口调用 NewBloomFilter：
 // miniredis 无 bf 模块，走 bitmap 回退实现，验证接口动态分派正确。
 func TestNewBloomFilterViaInterface(t *testing.T) {
-	test.RunOnMiniRedis(t, func(rdb redis.Client) {
+	mini.Run(t, func(rdb redis.Client) {
 		bf := rdb.NewBloomFilter("bfkey")
 		ctx := context.Background()
 
@@ -621,7 +622,7 @@ func TestNewBloomFilterViaInterface(t *testing.T) {
 // TestBloomBitmapMultiViaInterface 验证 bitmap 路径 AddMulti/ExistsMulti 的
 // 返回值顺序与入参严格对应（对齐 BF.MADD 语义），以及空入参早返回。
 func TestBloomBitmapMultiViaInterface(t *testing.T) {
-	test.RunOnMiniRedis(t, func(rdb redis.Client) {
+	mini.Run(t, func(rdb redis.Client) {
 		ctx := context.Background()
 		bf := rdb.NewBloomFilterWithEstimate("bfmulti", 10000, 0.01)
 
@@ -656,7 +657,7 @@ func TestBloomBitmapMultiViaInterface(t *testing.T) {
 // 置位数反推，应落在真实插入数的合理区间；Capacity/Size 正常填充；
 // NumFilters/Expansion 仅 BF.* 路径有意义，bitmap 路径保持零值。
 func TestBloomBitmapInfo(t *testing.T) {
-	test.RunOnMiniRedis(t, func(rdb redis.Client) {
+	mini.Run(t, func(rdb redis.Client) {
 		ctx := context.Background()
 		const inserted = 1000
 
@@ -740,7 +741,7 @@ func TestBloomNativeBFViaRealRedis(t *testing.T) {
 // AddMulti/ExistsMulti/Info 全链路。
 //
 // 共享实例纪律：key 带 bloomtest:<随机> 唯一前缀，收尾 Del 清理；
-// 严禁 FLUSHDB/FLUSHALL。REDIS_CLUSTER_ADDRS 未设置时跳过。
+// 严禁 FLUSHDB/FLUSHALL。REDIS_CLUSTER 未设置时跳过。
 func TestBloomClusterSingleKey(t *testing.T) {
 	test.RunOnRedisCluster(t, func(rdb redis.Client) {
 		ctx := context.Background()
@@ -775,7 +776,7 @@ func TestBloomClusterSingleKey(t *testing.T) {
 // BenchmarkBitmapAdd 在 miniredis 上测 bitmap 路径单条 Add（Lua 原子脚本）
 // 的吞吐基线；命名对齐现有 BenchmarkBF。
 func BenchmarkBitmapAdd(b *testing.B) {
-	test.RunOnMiniRedis(b, func(rdb redis.Client) {
+	mini.Run(b, func(rdb redis.Client) {
 		bf := rdb.NewBloomFilterWithEstimate("bench:bitmap:add", 1000000, 0.01)
 		ctx := context.Background()
 
@@ -792,7 +793,7 @@ func BenchmarkBitmapAdd(b *testing.B) {
 func BenchmarkBitmapMulti(b *testing.B) {
 	const batchSize = 64
 
-	test.RunOnMiniRedis(b, func(rdb redis.Client) {
+	mini.Run(b, func(rdb redis.Client) {
 		bf := rdb.NewBloomFilterWithEstimate("bench:bitmap:multi", 1000000, 0.01)
 		ctx := context.Background()
 
