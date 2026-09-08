@@ -3,6 +3,7 @@ package redis
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"testing"
@@ -33,6 +34,17 @@ func TestIsUnavailable(t *testing.T) {
 		{name: "EOF 判定", err: io.EOF, want: true},
 		{name: "连接池超时判定", err: errors.New("redis: connection pool timeout"), want: true},
 		{name: "连接已关闭判定", err: errors.New("redis: client is closed"), want: true},
+		{name: "CLUSTERDOWN 判定", err: errors.New("CLUSTERDOWN The cluster is down"), want: true},
+		{
+			name: "CLUSTERDOWN 包装链判定",
+			err:  fmt.Errorf("cmd exec: %w", errors.New("CLUSTERDOWN The cluster is down")),
+			want: true,
+		},
+		{
+			name: "非前缀 CLUSTERDOWN 文本子串匹配",
+			err:  errors.New("ERR invalid CLUSTERDOWN usage"),
+			want: true, // strings.Contains 子串匹配：含 "CLUSTERDOWN " 即判定（与连接池文本判定一致）
+		},
 		{
 			name: "i/o timeout 判定",
 			err:  &net.OpError{Op: "read", Err: errors.New("i/o timeout")},

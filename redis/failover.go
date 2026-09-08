@@ -31,6 +31,10 @@ const (
 //     ctx 超时约束，**不代表 Redis 失效，不触发兜底**（ctx 取消是调用方行为）
 //   - "redis: connection pool timeout" / "redis: client is closed"：
 //     连接池超时 / 连接池已关闭（internal/pool 的错误文本）
+//   - "CLUSTERDOWN "：Redis 集群整体不可用（cluster_state:fail），
+//     go-redis 内部重试耗尽后原样透传；子串匹配确保对包装链有弹性
+//     （与连接池文本判定风格一致），与 go-redis IsClusterDownError
+//     的前缀回退判定等价
 //   - *net.OpError：dial 失败、连接重置等网络层错误
 //   - io.EOF / io.ErrUnexpectedEOF：连接被服务端关闭
 //   - net.Error（Timeout() 为 true）：读写超时（服务端未响应），但排除
@@ -49,6 +53,12 @@ func IsUnavailable(err error) bool {
 	msg := err.Error()
 	if strings.Contains(msg, "redis: connection pool timeout") ||
 		strings.Contains(msg, "redis: client is closed") {
+		return true
+	}
+
+	// 集群整体不可用（cluster_state:fail）；go-redis 重试耗尽后透传，
+	// 触发应用层重试/熔断/兜底是期望行为；子串匹配对包装链有弹性
+	if strings.Contains(msg, "CLUSTERDOWN ") {
 		return true
 	}
 
