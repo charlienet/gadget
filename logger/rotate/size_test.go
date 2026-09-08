@@ -14,7 +14,7 @@ func TestNewRotateSizeWriter(t *testing.T) {
 	if w == nil {
 		t.Fatal("NewRotateSizeWriter returned nil")
 	}
-	defer w.Close() // 释放文件句柄，否则 Windows 上 TempDir 清理失败
+	defer func() { _ = w.Close() }() // 释放文件句柄，否则 Windows 上 TempDir 清理失败
 
 	n, err := w.Write([]byte("hello\n"))
 	if err != nil {
@@ -38,7 +38,7 @@ func TestNewRotateSizeWriterMultipleWrites(t *testing.T) {
 	filename := filepath.Join(dir, "multi.log")
 
 	w := NewRotateSizeWriter(filename, 10, 3, 5, true)
-	defer w.Close() // 释放文件句柄
+	defer func() { _ = w.Close() }() // 释放文件句柄
 
 	for i := range 3 {
 		_, err := w.Write([]byte("line\n"))
@@ -64,7 +64,7 @@ func TestCompressRotate(t *testing.T) {
 	filename := filepath.Join(dir, "compress.log")
 
 	w := NewRotateSizeWriter(filename, 1, 1, 1, true)
-	defer w.Close()
+	defer func() { _ = w.Close() }()
 
 	n, err := w.Write([]byte("compressible data\n"))
 	if err != nil {

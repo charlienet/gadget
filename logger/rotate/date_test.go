@@ -17,7 +17,7 @@ func TestWrite(t *testing.T) {
 	filename := filepath.Join(dir, "av.log")
 
 	w := &RotateDateWriter{Filename: filename}
-	defer w.Close()
+	defer func() { _ = w.Close() }()
 
 	for i := range 100 {
 		if _, err := w.Write([]byte("abc" + strconv.Itoa(i) + "\n")); err != nil {
@@ -37,7 +37,7 @@ func TestWrite(t *testing.T) {
 func TestMuti(t *testing.T) {
 	dir := t.TempDir()
 	w := &RotateDateWriter{Filename: filepath.Join(dir, "av.test.log")}
-	defer w.Close()
+	defer func() { _ = w.Close() }()
 
 	for i := range 10 {
 		if _, err := w.Write([]byte("abc" + strconv.Itoa(i) + "\n")); err != nil {
@@ -53,7 +53,7 @@ func TestMuti(t *testing.T) {
 func TestNoExt(t *testing.T) {
 	dir := t.TempDir()
 	w := &RotateDateWriter{Filename: filepath.Join(dir, "av")}
-	defer w.Close()
+	defer func() { _ = w.Close() }()
 
 	if _, err := w.Write([]byte("noext")); err != nil {
 		t.Fatalf("write: %v", err)
@@ -66,7 +66,7 @@ func TestNoExt(t *testing.T) {
 func TestHideFile(t *testing.T) {
 	dir := t.TempDir()
 	w := &RotateDateWriter{Filename: filepath.Join(dir, ".hidefile")}
-	defer w.Close()
+	defer func() { _ = w.Close() }()
 
 	if _, err := w.Write([]byte("hidefile")); err != nil {
 		t.Fatalf("write: %v", err)
@@ -82,7 +82,7 @@ func TestNoFileName(t *testing.T) {
 	t.Chdir(t.TempDir())
 
 	w := &RotateDateWriter{}
-	defer w.Close() //nolint:errcheck
+	defer func() { _ = w.Close() }() //nolint:errcheck
 
 	if _, err := w.Write([]byte("abc11")); err != nil {
 		t.Fatalf("write: %v", err)
@@ -95,7 +95,7 @@ func TestNoFileName(t *testing.T) {
 func BenchmarkWrite(b *testing.B) {
 	dir := b.TempDir()
 	w := &RotateDateWriter{Filename: filepath.Join(dir, "bench.log")}
-	defer w.Close()
+	defer func() { _ = w.Close() }()
 
 	for i := 0; b.Loop(); i++ {
 		_, _ = w.Write([]byte("abc" + strconv.Itoa(i) + "\n"))

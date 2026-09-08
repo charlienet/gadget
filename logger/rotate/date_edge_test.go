@@ -88,7 +88,7 @@ func TestRotateDateSwitchCompressAndCleanup(t *testing.T) {
 		Compress: true,
 		MaxAge:   3,
 	}
-	defer w.Close()
+	defer func() { _ = w.Close() }()
 
 	// 第一日：首次打开（oldDate==""，跳过压缩/清理分支）
 	if err := w.rotate(oldDate); err != nil {
@@ -271,7 +271,7 @@ func TestCompressFileCreateError(t *testing.T) {
 	if _, err := os.Stat(raw); err != nil {
 		t.Errorf("raw file must survive failed compress: %v", err)
 	}
-	defer w.Close()
+	defer func() { _ = w.Close() }()
 }
 
 // --- ③ cleanupOld：目录不存在时返回 ReadDir 错误 ---
@@ -365,12 +365,12 @@ func TestDateSwitchCompressInBackgroundNonBlocking(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected .gz produced: %v", err)
 	}
-	defer gzf.Close()
+	defer func() { _ = gzf.Close() }()
 	zr, err := gzip.NewReader(gzf)
 	if err != nil {
 		t.Fatalf("gzip reader: %v", err)
 	}
-	defer zr.Close()
+	defer func() { _ = zr.Close() }()
 	decompressed, err := io.ReadAll(zr)
 	if err != nil {
 		t.Fatalf("read gzip: %v", err)

@@ -171,7 +171,7 @@ func compressFileAt(filename, date string) error {
 	if err != nil {
 		return err
 	}
-	defer src.Close()
+	defer func() { _ = src.Close() }()
 
 	dst, err := os.Create(full + ".gz")
 	if err != nil {
@@ -186,8 +186,8 @@ func compressFileAt(filename, date string) error {
 	if cerr := dst.Close(); err == nil {
 		err = cerr
 	}
-	// Windows 上删除文件前必须已关闭其句柄：先关源文件再删除（defer src.Close 兜底）
-	src.Close()
+	// Windows 上删除文件前必须已关闭其句柄：先关源文件再删除（defer 中 _ = src.Close() 兜底）
+	_ = src.Close()
 	if err != nil {
 		return err
 	}
