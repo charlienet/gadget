@@ -123,6 +123,14 @@ type CuckooFilter struct {
 // 探测结果有缓存，与 bloom.go 的 NewBloomFilter 分派方式一致）。
 // 失效兜底策略默认 FailOpen（过滤器是保护性能力：服务不可用时放行业务）；
 // 可用 WithFailPolicy 显式改为 FailClosed。
+//
+// ⚠️ v0.7.0 行为变更（BREAKING）：HasCuckoo 自本版起经
+// `COMMAND INFO CF.ADD` 真实确认命令族可用性；此前误把命令前缀 "cf" 当
+// 模块名查 INFO MODULES，**恒 false**，导致有 CF.* 的服务器静默回退到
+// Lua 回退实现。修复后这类服务器会自动改分派 CF.* 原生路径——两实现的
+// 键结构完全不同（CF.* 的模块内部编码 vs 回退版的单个 Hash key），
+// **数据不互通**：升级前用回退版写入的过滤器，升级后在 CF.* 路径下读不到，
+// 需按新 key 重建过滤器（或显式接受一次冷启动）。
 func (rdb *redisClient) NewCuckooFilter(key string, opts ...CuckooOption) *CuckooFilter {
 	cfg := defaultCuckooConfig()
 	cfg.policy = FailOpen // 过滤器默认 FailOpen：宁可放行不阻塞业务

@@ -289,9 +289,11 @@ n=1）时不分片，键名与行为完全不变。`WithCapacity` 在分片下�
 - 开启分片（`WithShardCount(n>1)`）与未分片（默认/standalone）**键空间
   不互通**：前者键名带 `#idx` 后缀，切换部署形态或分片配置会读不到旧键，
   等同重建过滤器（布隆无删除语义，只能重新灌入），请纳入迁移预案。
-- 集群下 `HasBloom()`（路径分派依据）与 Lua 能力记忆只探测 go-redis
-  路由到的**随机单节点**，要求各节点模块/配置同构，否则分派错路径会
-  表现为部分分片键 "unknown command" 类错误。
+- 集群下 `HasBloom()`（路径分派依据）、`HasCuckoo()`/`HasCMS()` 等命令族
+  判定（`COMMAND INFO` 探测）与 Lua 能力记忆都只探测 go-redis 路由到的
+  **随机单节点**（`COMMAND INFO` 是无 key 命令，集群下不做逐分片探测），
+  要求各节点模块/配置同构，否则分派错路径会表现为部分分片键
+  "unknown command" 类错误。
 - `Info()` 对每个分片键各发一轮命令（成本 ×effectiveN），更严格限制为
   低频运维查询；`AddMulti`/`ExistsMulti` 中途失败时可能已部分写入
   （已成功的分片不回滚）——布隆置位幂等、整体重试无数据危害（仅重试
@@ -372,7 +374,8 @@ cf.Info(ctx)              // 元数据
 （field=桶索引，value=桶内指纹数组）、模加候选桶 + 方向位驱逐链保证
 **插入成功的元素必可命中（无假阴性）**；驱逐置换与 CF.ADD 语义对齐
 （超容量时 Add 返回 false，元素可能被驱逐丢失，属 cuckoo 正常行为）。
-可用 rdb.Capability().HasCuckoo() 预检模块是否加载。item 参数同样是 `any`，
+可用 rdb.Capability().HasCuckoo() 预检 CF.* 命令族是否可用（v0.7.0 起经
+`COMMAND INFO CF.ADD` 真实确认，不再是"查模块名"）。item 参数同样是 `any`，
 支持类型清单与序列化冻结契约见上文布隆章节（回退版的指纹/桶索引由
 `marshalItem(item)` 的规范字节导出）。
 
@@ -387,8 +390,34 @@ xxh3-64 全位雪崩均匀修正该偏斜。
 代价是**存量数据不可读**：旧哈希写入的回退版过滤器在新版本下条目定位口径
 变了，表现为 `Exists` 假 miss、`Del` 失效（不是误判率变化，而是查错桶）。
 **升级后请重建存量 Lua cuckoo 过滤器**：`Del` 旧 key 后重新灌入，或直接换
-新 key 灰度切换。判断是否受影响：仅 `HasCuckoo()==false`（未部署 RedisBloom
-cuckoo 模块）时使用的回退版过滤器需要重建，模块版 CF.* 的存量数据无需处理。
+新 key 灰度切换。受影响面：凡走过回退版（Lua 键结构）的过滤器都需重建
+——服务器确实没有 CF.* 的，因本次哈希换源重建；服务器本来有 CF.* 的，因
+能力探测修复（见下）会自动改分派 CF.*，旧回退键结构不再被读。原本就由
+CF.*（模块版）写入的存量数据不受影响。
+
+**BREAKING（v0.7.0）能力探测修复：HasCuckoo/HasCMS/HasTopK/HasTDigest 此前恒 false**：
+`INFO MODULES` 报出的是模块加载名（`bf`、`cb`、`RedisBloom` 等），而
+`cf`/`cms`/`topk`/`tdigest` 只是**命令前缀**、不是模块名——旧实现拿前缀去查
+模块名，四个判定在任何服务器上都恒 false。后果不止误报：`NewCuckooFilter`
+以 `HasCuckoo()` 选实现路径，于是装了 RedisBloom 的服务器也被静默降级到
+Lua 回退实现（丢掉模块的自动扩容等能力，键结构还不通用）。
+
+v0.7.0 起改为**分层探测**：先由 `INFO MODULES` 确认 bf 在场（这是
+`HasBloom()` 的唯一口径——bf 在场 ⇒ BF.* 可用，在 RedisBloom、valkey-bloom、
+Redis 8 内建等形态下均成立）；bf 在场时再用
+`COMMAND INFO CF.ADD / CMS.MERGE / TOPK.ADD / TDIGEST.ADD` 逐族真实确认，
+结果缓存进四个独立字段。bf 不在场则四族直接为 false（省 4 个往返）。因此
+下列形态的判定均正确：valkey-bloom（只有 BF 族，四族 false）、旧版
+RedisBloom（缺 CF/CMS/TOPK/TDIGEST 中某几族，按实际逐族给值）、Redis 8 裸
+二进制（无模块条目但有 BF.*，`HasBloom` true、四族 false）、以及探测期
+服务瞬断（错误原样返回、**不**被当作"不支持"缓存，下次访问重试）。
+
+**升级影响面（属纠正）**：只有"服务器本来有 CF.*、却因旧版误判一直用着
+Lua 回退版"的用户会看到行为切换——自动改走 CF.* 路径，旧回退键读不到，
+需重建过滤器。原本就没有 CF.* 的部署不受本次修复影响，继续走回退版（其
+存量数据受上文哈希换源影响需重建）。若代码里有把 cf/cms/topk/tdigest 前缀
+当模块名传给 `HasModule` 判可用性的用法，请改用对应的 `HasCuckoo()` /
+`HasCMS()` / `HasTopK()` / `HasTDigest()` 判定函数。
 
 
 go-redis 升级回归提醒
