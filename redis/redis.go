@@ -16,17 +16,10 @@ var (
 	NotFound = redis.Nil
 )
 
-// IsNil 判断 err 是否为「键不存在」错误（即 go-redis 的 redis.Nil，含被包装后的错误）。
-// 应用层用 sredis.IsNil(err) 判定 cache/查询 miss，无需再引入 github.com/redis/go-redis/v9。
-func IsNil(err error) bool {
+// IsNotFound 判断 err 是否为「键不存在」错误（即 go-redis 的 redis.Nil，含被包装后的错误）。
+// 应用层用 sredis.IsNotFound(err) 判定 cache/查询 miss，无需再引入 github.com/redis/go-redis/v9。
+func IsNotFound(err error) bool {
 	return errors.Is(err, NotFound)
-}
-
-// IsFound 判断查询是否命中：仅当 err 为 nil（命令成功且键存在）时返回 true。
-// 与 IsNil 构成三态判定：IsFound=true 命中；IsNil=true 未命中（miss）；
-// 两者均 false 时为真实错误（网络、超时等），应另行处理。
-func IsFound(err error) bool {
-	return err == nil
 }
 
 var _ Client = &redisClient{}

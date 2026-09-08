@@ -84,7 +84,7 @@ func (r *redis_store) Get(ctx context.Context, key string) ([]byte, bool, error)
 		return e
 	})
 	if err != nil {
-		if redis.IsNil(err) {
+		if redis.IsNotFound(err) {
 			return []byte{}, false, nil
 		}
 

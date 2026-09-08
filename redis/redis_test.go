@@ -819,18 +819,14 @@ func BenchmarkBitmapMulti(b *testing.B) {
 	})
 }
 
-// TestIsNil 验证 IsNil / IsFound 对查询结果的三态判定：
-// 原始 redis.Nil、被 fmt 包装的 Nil 均命中 IsNil；nil 命中 IsFound；
-// 其他错误两者均不命中。应用层可据此判定命中/miss，无需引入 go-redis。
-func TestIsNil(t *testing.T) {
-	assert.True(t, redis.IsNil(goredis.Nil), "原始 redis.Nil 应命中")
-	assert.True(t, redis.IsNil(fmt.Errorf("get key: %w", goredis.Nil)), "包装后的 Nil 应命中")
-	assert.True(t, errors.Is(goredis.Nil, redis.NotFound), "NotFound 别名与 IsNil 判定一致")
+// TestIsNotFound 验证 IsNotFound 对「键不存在」错误的判定：
+// 原始 redis.Nil、被 fmt 包装的 Nil 均命中；nil 与其他错误不命中。
+// 应用层可据此判定 miss，无需引入 go-redis。
+func TestIsNotFound(t *testing.T) {
+	assert.True(t, redis.IsNotFound(goredis.Nil), "原始 redis.Nil 应命中")
+	assert.True(t, redis.IsNotFound(fmt.Errorf("get key: %w", goredis.Nil)), "包装后的 Nil 应命中")
+	assert.True(t, errors.Is(goredis.Nil, redis.NotFound), "NotFound 别名与 IsNotFound 判定一致")
 
-	assert.False(t, redis.IsNil(nil), "nil 不应命中 IsNil")
-	assert.False(t, redis.IsNil(errors.New("connection refused")), "其他错误不应命中 IsNil")
-
-	assert.True(t, redis.IsFound(nil), "nil 应命中 IsFound（命中）")
-	assert.False(t, redis.IsFound(goredis.Nil), "miss 不应命中 IsFound")
-	assert.False(t, redis.IsFound(errors.New("connection refused")), "真实错误不应命中 IsFound")
+	assert.False(t, redis.IsNotFound(nil), "nil 不应命中 IsNotFound")
+	assert.False(t, redis.IsNotFound(errors.New("connection refused")), "其他错误不应命中 IsNotFound")
 }
