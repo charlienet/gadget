@@ -46,7 +46,7 @@ var (
 // 对外暴露的日志 API 一律是 New 返回的原生 *slog.Logger）。
 type slogLogger struct {
 	mu         sync.RWMutex
-	opt        Options       // 保存配置（含控制台输出目标 opt.Out，构造后固定）
+	opt        Options       // 保存配置（含 sink 声明 opt.Console / opt.File，构造后固定）
 	level      *DynamicLevel // 动态级别（New 时创建一次；opt.Leveler 为 nil 时供 handler 使用，SetLevel 即时生效）
 	slog       *slog.Logger  // New 组装完成后对外返回的 logger
 	async      *AsyncHandler // 当前生效的异步处理器（nil=未启用异步）
@@ -55,8 +55,19 @@ type slogLogger struct {
 	closeOnce  sync.Once     // 保证 async/fileCloser 只关闭一次（幂等）
 }
 
+// buildOptions 把 opts 依次应用到默认基线（Level=slog.LevelInfo，不含任何 sink）之上，
+// 返回最终 Options。New 与 Init 共用，保证两处基线默认值与合并语义单一来源。
+func buildOptions(opts ...Option) Options {
+	o := Options{Level: slog.LevelInfo}
+	for _, opt := range opts {
+		opt(&o)
+	}
+	return o
+}
+
 // New 组装 handler 链并返回原生 *slog.Logger：
-//   - 默认 Level=slog.LevelInfo、Out=os.Stdout，Option 依次覆盖；
+//   - 默认 Level=slog.LevelInfo；sink 按存在性装配（WithConsole 启用控制台、WithFile 启用
+//     文件），两者皆未声明时兜底一个 stdout 控制台，保证 DefaultLogger=New() 零配置可用；
 //   - Service/Env 非空时以 With 预置 service/env 属性；
 //   - 注册到包级注册表（包级 Close/Stats 统一释放），并 slog.SetDefault 接入；
 //   - 替换默认实例引用前，先 close 旧默认实例（flush 异步队列、关文件句柄、
@@ -66,14 +77,7 @@ type slogLogger struct {
 // 所有 *Context 方法经链最外层 TraceHandler 自动提取 ctx 中的 trace_id/req_id 注入为日志属性。
 // lumberjack 为惰性 IO，文件创建失败不会在 New 时返回 error。
 func New(opts ...Option) *slog.Logger {
-	opt := Options{
-		Level: slog.LevelInfo,
-		Out:   os.Stdout,
-	}
-
-	for _, o := range opts {
-		o(&opt)
-	}
+	opt := buildOptions(opts...)
 
 	sl := newSlogLogger(opt)
 	registerLogger(sl)
@@ -128,8 +132,9 @@ func newSlogLogger(opt Options) *slogLogger {
 
 // rebuild 按当前 opt 构建 handler 链与 l.slog（仅在 newSlogLogger 调用一次；
 // 动态调级走 Leveler/DynamicLevel，不触发重建）。
-// 链顺序（内→外）：console(+file JSON 的 MultiHandler) → StackHandler(可选)
-// → SensitiveHandler(可选) → SamplingHandler(可选) → AsyncHandler(可选)
+// sink 按存在性装配（见 shouldEnableConsole）：WithConsole 启用控制台、WithFile 启用文件，
+// 两者皆无则兜底 stdout 控制台。链顺序（内→外）：console 与/或 file handler（并存时 MultiHandler）
+// → StackHandler(可选) → SensitiveHandler(可选) → SamplingHandler(可选) → AsyncHandler(可选)
 // → TraceHandler（内置总是包裹，位于最外层）。
 // Trace 放最外层：trace_id/req_id 在调用方 goroutine 内同步提取进 record 后才进入
 // 后续装饰器与异步队列，AsyncHandler 无需在队列中携带 ctx（避免长命队列持有
@@ -143,35 +148,51 @@ func (l *slogLogger) rebuild() {
 
 	var handlers []slog.Handler
 
-	// 控制台 handler（默认 stdout）：writer 取 opt.Out，构造后固定
-	noColor := false
-	if l.opt.Color != nil {
-		noColor = !*l.opt.Color
-	} else {
-		// 自动模式：NO_COLOR 环境变量或非 TTY 输出（管道/文件）时禁用颜色
-		noColor = !ShouldColor() || !IsTerminal(l.opt.Out)
+	// sink 存在性装配。hasConsole = 显式声明 WithConsole（o.Console != nil）；
+	// hasFile = New 时 File != "" 已构建 fileWriter。控制台启用条件 = hasConsole || !hasFile：
+	//   - 零 sink（既无 WithConsole 又无 File）→ 兜底 stdout 控制台，保住 DefaultLogger=New()
+	//     开箱即用、避免包级日志静默与 Fatal 黑洞；
+	//   - 有 File 且未声明 Console → 纯文件，不写 stdout。
+	hasConsole := l.opt.Console != nil
+	hasFile := l.fileWriter != nil
+	if shouldEnableConsole(hasConsole, hasFile) {
+		writer := io.Writer(os.Stdout)
+		if l.opt.Console != nil && l.opt.Console.Writer != nil {
+			writer = l.opt.Console.Writer
+		}
+		noColor := false
+		if l.opt.Console != nil && l.opt.Console.Color != nil {
+			noColor = !*l.opt.Console.Color
+		} else {
+			// 自动模式：NO_COLOR 环境变量或非 TTY 输出（管道/文件）时禁用颜色
+			noColor = !ShouldColor() || !IsTerminal(writer)
+		}
+		handlers = append(handlers, NewConsoleHandler(writer, &ConsoleOptions{
+			Level:     lvl,
+			AddSource: l.opt.Source,
+			NoColor:   noColor,
+		}))
 	}
-	console := NewConsoleHandler(l.opt.Out, &ConsoleOptions{
-		Level:     lvl,
-		AddSource: l.opt.Source,
-		NoColor:   noColor,
-	})
-	handlers = append(handlers, console)
 
-	// 文件 handler（JSON + 轮换），复用 New 时构建的 fileWriter
+	// 文件 handler（JSON/text + 轮换），复用 New 时构建的 fileWriter；
+	// 格式取 FileOpts.Format（FileFormat 枚举，零值即 FormatJSON，向后兼容）。
 	if l.fileWriter != nil {
-		file := slog.NewJSONHandler(l.fileWriter, &slog.HandlerOptions{
+		format := FormatJSON
+		if l.opt.FileOpts != nil {
+			format = l.opt.FileOpts.Format
+		}
+		handlerOpts := &slog.HandlerOptions{
 			Level:     lvl,
 			AddSource: l.opt.Source,
 			ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
-				// 时间格式化为 "2006-01-02 15:04:05.000"
+				// 时间格式化为 "2006-01-02 15:04:05.000"（JSON handler 用；text 由自研 handler 内部固定）
 				if a.Key == slog.TimeKey && len(groups) == 0 {
 					a.Value = slog.StringValue(a.Value.Time().Format("2006-01-02 15:04:05.000"))
 				}
 				return a
 			},
-		})
-		handlers = append(handlers, file)
+		}
+		handlers = append(handlers, newFileHandler(l.fileWriter, format, handlerOpts))
 	}
 
 	var handler slog.Handler
@@ -211,6 +232,36 @@ func (l *slogLogger) rebuild() {
 	handler = NewTraceHandler(handler)
 
 	l.slog = slog.New(handler)
+}
+
+// shouldEnableConsole 依 sink 存在性决定控制台 handler 是否启用：显式声明 WithConsole
+// （hasConsole），或"完全无 sink"（既无 Console 又无 File）时兜底一个 stdout 控制台，
+// 避免包级日志静默与 Fatal 黑洞；有 File 且未声明 Console 则关闭控制台（纯文件输出）。
+func shouldEnableConsole(hasConsole, hasFile bool) bool {
+	return hasConsole || !hasFile
+}
+
+// newFileHandler 按 format 枚举选择文件输出后端（仅作用于文件 handler，控制台不受影响）：
+//   - FormatText → 自研排序 handler newFileTextHandler，字段顺序固定为
+//     time/level/trace_id(如有)/req_id(如有)/msg/source(可选)/其余 attrs，时间格式由该
+//     handler 内部固定为 "2006-01-02 15:04:05.000"（不吃标准 HandlerOptions）；
+//   - FormatJSON（默认，含任何非 FormatText 值）→ slog.NewJSONHandler，保持既有行为。
+//
+// handlerOpts 由调用方（rebuild）统一构建：JSON 分支完整复用（Level/AddSource/ReplaceAttr 时间定制）；
+// text 分支自研 handler 不识别标准 HandlerOptions，仅从中取 Level/AddSource 两个字段。
+func newFileHandler(w io.Writer, format FileFormat, handlerOpts *slog.HandlerOptions) slog.Handler {
+	switch format {
+	case FormatJSON:
+		return slog.NewJSONHandler(w, handlerOpts)
+	case FormatText:
+		return newFileTextHandler(w, &FileTextOptions{
+			Level:     handlerOpts.Level,
+			AddSource: handlerOpts.AddSource,
+		})
+	default: // 零值 ""（语义等同 JSON）及未来新增未知值回退 JSON；
+		// 显式枚举分支让 exhaustive 类 linter 在新增 FileFormat 常量时报警提醒补分支
+		return slog.NewJSONHandler(w, handlerOpts)
+	}
 }
 
 // close 内部实现（包级 Close / New 替换默认实例时调用）：关闭实例持有的异步处理器

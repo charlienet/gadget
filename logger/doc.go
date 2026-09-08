@@ -24,13 +24,29 @@
 //
 // 未注入时不产生这两个属性，无副作用。
 //
-// # 可选能力
+// # 输出 sink（按存在性装配）
 //
-// 以下能力均为 slog.Handler 装饰器，按需在 New 时启用：
-// 文件输出与轮换（WithFile，lumberjack 按大小 / 按日期轮换）、异步写入
-// （WithAsync）、敏感信息打码（WithSensitiveKeys）、日志采样（WithSampling）、
-// 错误堆栈（WithStackTrace，配合 Err / Wrap）、动态调级（WithLeveler 或包级
-// SetLevel）。可选项未启用时不参与 handler 链。
+// 控制台与文件是两路独立 sink，各自开关：
+//   - WithConsole(opts...) 启用彩色控制台；子选项 WithConsoleWriter(w) 指定 writer
+//     （缺省 os.Stdout）、WithConsoleColor(b) 控制颜色（缺省自动：NO_COLOR + 是否 TTY）。
+//   - WithFile(path, opts...) 启用文件 sink（lumberjack 按大小 / 按日期轮换）；
+//     子选项 WithFormat(logger.FormatText) 切换自研排序 text handler（默认 FormatJSON）。
+//
+// 两者皆未声明时兜底一个 stdout 控制台，保证 logger.New() 零配置开箱即用、包级日志不静默；
+// 仅声明 WithFile 则纯文件输出、不写 stdout；WithConsole + WithFile 即双端输出。
+//
+// 配置驱动面（Init/Config）：Config.Color 为 *bool 三态，映射到 WithConsoleColor——
+// nil=自动判定（NO_COLOR + TTY）、true=强制开色、false=强制关；DefaultConfig 默认 true。
+// Config.Layout 非空→WithDateRotate 启用按日期轮换（空则维持 lumberjack 按大小轮换，仅 file/both 消费）；
+// Config.Sensitive_Keys / Sensitive_Mask 非空→WithSensitiveKeys / WithSensitiveMask（横切打码，console/file
+// 双端生效）；三者零值均不注入对应 Option，DefaultConfig 保持默认行为不变。
+//
+// # 其余可选能力
+//
+// 以下能力均为 slog.Handler 装饰器，按需在 New 时启用：异步写入（WithAsync）、
+// 敏感信息打码（WithSensitiveKeys）、日志采样（WithSampling）、错误堆栈
+// （WithStackTrace，配合 Err / Wrap）、动态调级（WithLeveler 或包级 SetLevel）。
+// 可选项未启用时不参与 handler 链。
 //
 // # 生命周期
 //

@@ -12,7 +12,7 @@ import (
 // （第 5、8 条保留）→ 共保留 4 条
 func TestSampling(t *testing.T) {
 	var buf bytes.Buffer
-	l := logger.New(logger.WithOutput(&buf), logger.WithColor(false), logger.WithSampling(2, 3))
+	l := logger.New(logger.WithConsole(logger.WithConsoleWriter(&buf)), logger.WithConsole(logger.WithConsoleColor(false)), logger.WithSampling(2, 3))
 
 	for range 8 {
 		l.Info("sample msg")

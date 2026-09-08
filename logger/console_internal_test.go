@@ -153,7 +153,7 @@ func TestConsoleHandlerDerivedNoops(t *testing.T) {
 	if dh == h {
 		t.Error("expected new handler from WithAttrs")
 	}
-	dh.Handle(context.Background(), slog.NewRecord(time.Now(), Info, "m", 0))
+	_ = dh.Handle(context.Background(), slog.NewRecord(time.Now(), Info, "m", 0))
 	if !strings.Contains(buf.String(), "pre=set") {
 		t.Errorf("expected preset attr in derived output, got: %s", buf.String())
 	}
@@ -184,7 +184,7 @@ func TestTraceHandlerEdges(t *testing.T) {
 	th := NewTraceHandler(slog.NewTextHandler(&buf, nil))
 
 	r := slog.NewRecord(time.Now(), slog.LevelInfo, "nil ctx msg", 0)
-	if err := th.Handle(nil, r); err != nil {
+	if err := th.Handle(nil, r); err != nil { //nolint:staticcheck // 故意验证 nil ctx 防御分支行为
 		t.Fatalf("Handle(nil ctx): %v", err)
 	}
 	got := buf.String()
@@ -211,7 +211,7 @@ func TestTraceHandlerEdges(t *testing.T) {
 // --- GetTraceID/GetReqID nil ctx 分支 ---
 
 func TestTraceGettersNilCtx(t *testing.T) {
-	if GetTraceID(nil) != "" || GetReqID(nil) != "" {
+	if GetTraceID(nil) != "" || GetReqID(nil) != "" { //nolint:staticcheck // 故意验证 nil ctx 防御分支行为
 		t.Error("expected empty ids for nil ctx")
 	}
 }
@@ -226,7 +226,10 @@ func TestBuildFileWriterSizeMode(t *testing.T) {
 	if w == nil {
 		t.Fatal("expected non-nil writer")
 	}
-	defer w.Close()
+	defer func() {
+		_ = w.Close()
+	}()
+
 	if _, err := w.Write([]byte("size mode line\n")); err != nil {
 		t.Fatalf("write: %v", err)
 	}
@@ -250,7 +253,7 @@ func TestBuildFileWriterDateMode(t *testing.T) {
 	// 日期模式：真实文件名带日期后缀
 	want := filepath.Join(dir, fmt.Sprintf("date.%s.log", time.Now().Format("2006-01-02")))
 	data, err := os.ReadFile(want)
-	w.Close()
+	_ = w.Close()
 	if err != nil || !strings.Contains(string(data), "date mode line") {
 		t.Errorf("expected date-mode content at %s, got %q err=%v", want, data, err)
 	}
@@ -354,20 +357,20 @@ func TestRegistryRegisterUnregister(t *testing.T) {
 
 func TestFlushAsyncBranches(t *testing.T) {
 	// 无异步：直接返回
-	syncL := newSlogLogger(Options{Out: io.Discard, Level: Info})
-	syncL.flushAsync() // async == nil，不应 panic
+	syncL := newSlogLogger(Options{Level: Info, Console: &ConsoleSettings{Writer: io.Discard}})
+	_ = syncL.flushAsync() // async == nil，不应 panic
 
 	// 有异步：Close 队列 flush
-	asyncL := newSlogLogger(Options{Out: io.Discard, Level: Info, Async: true, QueueSize: 8})
+	asyncL := newSlogLogger(Options{Level: Info, Console: &ConsoleSettings{Writer: io.Discard}, Async: true, QueueSize: 8})
 	asyncL.slog.Info("queued")
-	asyncL.flushAsync()
+	_ = asyncL.flushAsync()
 
 	total, _ := asyncL.async.Stats()
 	if total != 1 {
 		t.Errorf("expected 1 enqueued, got %d", total)
 	}
 	// 重复 flush 幂等（Close 已置位）
-	asyncL.flushAsync()
+	_ = asyncL.flushAsync()
 }
 
 // --- stackHandler 空派生 no-op 分支 ---
@@ -418,4 +421,79 @@ func TestSlogLoggerCloseErrorPropagation(t *testing.T) {
 	}
 	// 已注销（close 内部 unregister），未注册实例的注销走未命中分支
 	unregisterLogger(sl)
+}
+
+// --- console 字段顺序：trace_id/req_id 前置到 msg 之前、其余 attrs 去重 ---
+
+// TestConsoleHandlerTraceFieldOrder：注入带 trace_id/req_id 的 record（经 TraceHandler 包一层），
+// 断言两字段出现在消息之前、消息之后不重复；并核对 console 观感（[LEVEL] 括号、值不加引号）。
+func TestConsoleHandlerTraceFieldOrder(t *testing.T) {
+	var buf bytes.Buffer
+	th := NewTraceHandler(NewConsoleHandler(&buf, &ConsoleOptions{Level: slog.LevelInfo, NoColor: true}))
+
+	ctx := WithReqID(WithTraceID(context.Background(), "trace-abc"), "req-xyz")
+	r := slog.NewRecord(time.Now(), slog.LevelInfo, "hello world", 0)
+	r.AddAttrs(slog.String("user", "bob"))
+	if err := th.Handle(ctx, r); err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+	line := strings.TrimSpace(buf.String())
+
+	traceIdx := strings.Index(line, "trace_id=")
+	reqIdx := strings.Index(line, "req_id=")
+	msgIdx := strings.Index(line, "hello world")
+	userIdx := strings.Index(line, "user=")
+	if traceIdx < 0 || reqIdx < 0 || msgIdx < 0 || userIdx < 0 {
+		t.Fatalf("expected trace_id/req_id/msg/user present, got: %q", line)
+	}
+	if traceIdx >= reqIdx || reqIdx >= msgIdx || msgIdx >= userIdx {
+		t.Errorf("expected order trace_id<req_id<msg<user, got: %q", line)
+	}
+	// 去重：消息之后不得再出现 trace_id/req_id
+	if afterMsg := line[msgIdx:]; strings.Contains(afterMsg, "trace_id=") || strings.Contains(afterMsg, "req_id=") {
+		t.Errorf("trace/req duplicated after msg: %q", afterMsg)
+	}
+	// console 观感：值不加引号、级别为 [INFO] 括号
+	if !strings.Contains(line, "trace_id=trace-abc") || !strings.Contains(line, "user=bob") {
+		t.Errorf("expected unquoted values, got: %q", line)
+	}
+	if !strings.Contains(line, "[INFO]") {
+		t.Errorf("expected bracketed level, got: %q", line)
+	}
+}
+
+// TestConsoleHandlerTraceFieldColor：彩色分支——trace_id 的 key 上色、reset 紧邻值之前、
+// 值本身不上色不加引号（与现有 attr 彩色输出风格一致）。
+func TestConsoleHandlerTraceFieldColor(t *testing.T) {
+	var buf bytes.Buffer
+	th := NewTraceHandler(NewConsoleHandler(&buf, &ConsoleOptions{Level: slog.LevelInfo, NoColor: false}))
+
+	ctx := WithTraceID(context.Background(), "trace-abc")
+	r := slog.NewRecord(time.Now(), slog.LevelInfo, "color trace", 0)
+	if err := th.Handle(ctx, r); err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+	got := buf.String()
+	if !strings.Contains(got, colorKey) {
+		t.Errorf("expected colored key, got: %q", got)
+	}
+	// key 上色后立即 reset，再接未上色的值：... trace_id=<reset>trace-abc
+	if !strings.Contains(got, "trace_id="+colorReset+"trace-abc") {
+		t.Errorf("expected key colored then reset before unquoted value, got: %q", got)
+	}
+}
+
+// TestConsoleHandlerNoTrace：ctx 未注入 trace/req 时，不输出这两个 key。
+func TestConsoleHandlerNoTrace(t *testing.T) {
+	var buf bytes.Buffer
+	h := NewConsoleHandler(&buf, &ConsoleOptions{Level: slog.LevelInfo, NoColor: true})
+
+	r := slog.NewRecord(time.Now(), slog.LevelInfo, "plain", 0)
+	if err := h.Handle(context.Background(), r); err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+	line := buf.String()
+	if strings.Contains(line, "trace_id") || strings.Contains(line, "req_id") {
+		t.Errorf("expected no trace/req keys, got: %q", line)
+	}
 }

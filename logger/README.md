@@ -9,7 +9,7 @@
 - **链路追踪**：`*Context` 方法自动从 `context.Context` 提取 `trace_id`/`req_id` 注入日志属性
 - **日志切割**：lumberjack 按大小轮换 / 自研按日期轮换（+gzip+清理）
 - **可选装饰器**：异步写入、敏感信息打码、日志采样、错误堆栈、动态调级（全部基于 `slog.Handler`，按需启用）
-- **双端输出**：控制台彩色文本，文件 JSON
+- **双端输出**：控制台彩色文本 / 文件 JSON 或自研排序 text（`WithFormat`）
 
 依赖：仅 `gopkg.in/natefinch/lumberjack.v2`。
 
@@ -39,12 +39,17 @@ l := logger.New(
     logger.WithService("opencode-api"),   // 全局 service 字段（非空才注入）
     logger.WithEnv("prod"),               // 全局 env 字段
     logger.WithLevel(slog.LevelDebug),    // 静态级别
-    logger.WithFile("./logs/app.log",     // 文件输出（JSON 格式）
+    logger.WithConsole(                   // 控制台 sink：writer 缺省 os.Stdout、颜色自动
+        logger.WithConsoleColor(true),    //   可选强制彩色；亦可 WithConsoleWriter(w) 指定 writer
+    ),
+    logger.WithFile("./logs/app.log",     // 文件 sink（默认 JSON）
         logger.WithMaxSize(100),          // MB，默认 100
         logger.WithMaxAge(30),            // 天，默认 30
         logger.WithMaxBackups(10),        // 默认 10
         logger.WithCompress(true),        // 默认 true
-        logger.WithDateRotate("2006-01-02")), // 可选：按日期轮换
+        logger.WithFormat(logger.FormatText), // 可选：自研排序 text（默认 FormatJSON）
+        logger.WithDateRotate("2006-01-02"),  // 可选：按日期轮换
+    ),
     logger.WithAsync(),                   // 可选：异步写入（默认队列 10240）
 )
 // l 是 *slog.Logger，注入业务代码即可
@@ -52,22 +57,30 @@ l := logger.New(
 defer logger.Close(0) // 进程退出前 flush 异步队列、关闭文件句柄
 ```
 
+> **sink 按「存在性」装配**：`WithConsole(...)` 启用控制台、`WithFile(...)` 启用文件，各为独立开关。
+> 二者皆不声明时兜底一个 stdout 控制台（`logger.New()` 零配置即用、包级日志不静默）；仅 `WithFile`
+> 则纯文件输出、不写 stdout；`WithConsole` + `WithFile` 即双端输出。
+
 ### Config + Init（配置文件驱动）
 
 ```yaml
 log:
   level: "info"          # trace | debug | info | warn | error | fatal
   output: "both"         # console | file | both
+  no_color: false        # true 强制关闭颜色；默认 false=自动（终端支持 ANSI 即应用，跟随 NO_COLOR）
   file: "./logs/app.log"
   max_size: 100
   max_age: 30
   max_backups: 10
   compress: true
+  layout: "2006-01-02"   # 可选：非空=按日期轮换(WithDateRotate)，省略/空=lumberjack 按大小轮换
   async: true
   queue_size: 10240
   source: false          # 输出 file:line
   service: "opencode-api"
   env: "prod"
+  sensitive_keys: ["mytoken"]  # 可选：追加敏感字段词(子串匹配、与内置词集合并)，省略/空=不注入
+  sensitive_mask: "[REDACTED]" # 可选：自定义掩码(默认 ******)，省略/空=不注入
 ```
 
 ```go
@@ -77,11 +90,22 @@ viper.UnmarshalKey("log", &cfg) // 或 yaml.Unmarshal
 if err := logger.Init(cfg); err != nil { // 内部自动 slog.SetDefault
     log.Fatalf("init logger: %v", err)
 }
+
+// 变参精调：Init(cfg, opts...) 把 Config 打底为分组 Option，再叠加用户 opts（同名后者胜）
+if err := logger.Init(cfg, logger.WithSensitiveKeys("password")); err != nil {
+    log.Fatalf("init logger: %v", err)
+}
 ```
 
-> `Init` 在 `output: file / both` 但 `file` 为空时返回错误（黑洞配置，日志无处落地），
-> 且此时**不**改动 `DefaultLogger`。`Init` / `New` 每次替换默认实例前会关闭（flush + 释放句柄）
-> 上一个默认实例，见「设计说明」。
+> **控制台颜色 `color` 三态**：`true` 强制开色（非 TTY / 管道也输出 ANSI）、`false` 强制关、**省略该键**（`Config.Color == nil`）走自动判定（`NO_COLOR` 环境变量 + 是否 TTY）。仅作用于会启用控制台 sink 的 `output: console/both`；`file` 无控制台不受影响。
+> 注意：`DefaultConfig()` 把 `Color` 预置为 `true`（强制开色），故「`DefaultConfig()` 打底 + yaml 未写 `color`」会得到强制开色、非 TTY 也带 ANSI——这是默认 `true` 的既定含义；若想要 TTY 自动判定，请用 `var cfg logger.Config`（零值，`Color` 为 `nil`）打底而非 `DefaultConfig()`。
+
+> `Init(cfg, opts...)` 先由 Config 生成打底 Option、再拼接用户 opts（后者覆盖同类项），**合并后**才校验：
+> `output: file / both` 但合并后文件路径仍为空 → 报错（黑洞；可用 `WithFile(path)` 补路径消除）；
+> `file_format` 为非法非空值 → 报错（不静默回退 JSON）。任一失败均**不**改动 `DefaultLogger`。
+> `Init` / `New` 每次替换默认实例前会关闭（flush + 释放句柄）上一个默认实例，见「设计说明」。
+
+> **Config 能力映射**：`layout` 非空 → `WithDateRotate(layout)`（按日期轮换，仅 `file`/`both` 消费，空则维持 lumberjack 按大小轮换）；`sensitive_keys` 非空 → `WithSensitiveKeys(...)`（追加词、与内置词集合并）、`sensitive_mask` 非空 → `WithSensitiveMask(...)`——敏感打码为横切能力，console/file 双端生效。三者**零值均不注入**对应 Option（默认行为不变，`DefaultConfig` 保持 `layout` 空、敏感配置 nil/空）；Init 打底后用户 opts 可再追加（`WithSensitiveKeys` 为 append 语义，两组词都生效）。
 
 ## 链路追踪（trace_id / req_id 自动注入）
 
@@ -143,6 +167,7 @@ l := logger.New(
     // 敏感信息打码：命中 key 的属性值替换为掩码（Group 递归）
     logger.WithSensitiveKeys("password", "token"), // 子串匹配，与内置词集合并
     logger.WithSensitiveMask("******"),            // 自定义掩码
+    // Config 面可直接声明 sensitive_keys / sensitive_mask（映射同上「Config + Init」）
     // logger.WithSensitiveMatch(func(key string) bool { ... }), // 自定义匹配
 
     // 日志采样：窗口内前 10 条全留，之后每 100 条留 1 条
@@ -202,15 +227,30 @@ logger.Close(2 * time.Second)        // 进程退出前统一 flush + 关文件
 | `l.Infof("x=%v", x)` | `slog.Info(fmt.Sprintf("x=%v", x))` |
 | `l.WithField(k, v)` / `WithFields(map)` | `l.With(k, v)`（成对参数） |
 | `l.SetLevel(lvl)`（实例方法） | `logger.SetLevel(lvl)`（包级）或 `WithLeveler` |
-| `l.SetOutput(w)` | 重新 `logger.New(logger.WithOutput(w))` |
+| `l.SetOutput(w)` | 重新 `logger.New(logger.WithConsole(logger.WithConsoleWriter(w)))` |
 | `logger.WithLogger(ctx, l)` / `FromContext` | `logger.WithTraceID(ctx, id)` + `InfoContext(ctx, ...)` |
 | 常量 `logger.Fatal` | 常量 `logger.FatalLevel`；函数 `logger.Fatal(msg, args...)` |
 | `logger.LogRecorder` / `WithRecorder`（logrus 插件） | 已整体移除，统一走 `slog.Handler` 生态 |
 
+### v0.3.0 → v0.4.0（sink 分组，破坏性）
+
+独立发布 module `logger/v0.4.0` 的破坏性重构：删除顶层 sink Option、按输出目标分组，**不保留** deprecated 兼容层。
+
+| 旧 API（已删除） | 新写法 |
+| :--- | :--- |
+| `logger.WithOutput(w)` | `logger.WithConsole(logger.WithConsoleWriter(w))` |
+| `logger.WithColor(b)` | `logger.WithConsole(logger.WithConsoleColor(b))` |
+| `logger.WithFileFormat("text")` | `logger.WithFile(path, logger.WithFormat(logger.FormatText))` |
+
+- **sink 按存在性开关**：`WithConsole` 启用控制台、`WithFile` 启用文件；二者皆不声明时兜底一个 stdout 控制台（`logger.New()` 零配置即用、避免包级日志静默），仅 `WithFile` 则纯文件、不写 stdout。
+- **文件格式改枚举** `FileFormat`（`FormatJSON` 默认 / `FormatText`），`WithFormat` 收 typed 值而非裸 string；`Config.FileFormat` 的 yaml 字符串（`"json"`/`"text"`，大小写不敏感）仍向后兼容，非法非空值经 `Init` 报错而非静默回退。
+- `Config` 字段名与 `yaml`/`mapstructure` tag（含 `output`/`file_format`）**保持不变**，仅内部映射为分组 Option；`Init` 新增变参 `Init(cfg, opts...)`（`Init(cfg)` 源码兼容）。
+
 ## 设计说明
 
-- handler 链（内 → 外）：`console + file(JSON)` → `StackHandler` → `SensitiveHandler` → `SamplingHandler` → `AsyncHandler` → `TraceHandler`（内置，始终位于最外层）；可选项未启用时不参与链
+- **sink 装配**：控制台与文件为两路独立 sink，按存在性装配——`WithConsole`（彩色文本）与/或 `WithFile`（`FormatJSON` 默认 / `FormatText` 自研排序：`time → level → trace_id → req_id → msg → source → 其余 attrs`）；二者并存时以 `MultiHandler` 汇聚，皆未声明则兜底 stdout 控制台（`New()` 零配置不静默），仅 `WithFile` 则不写 stdout
+- handler 链（内 → 外）：`(console 与/或 file)` → `StackHandler` → `SensitiveHandler` → `SamplingHandler` → `AsyncHandler` → `TraceHandler`（内置，始终位于最外层）；可选项未启用时不参与链
 - `TraceHandler` 置于最外层：`trace_id`/`req_id` 在**调用方 goroutine 内同步提取进 record**后才进入采样 / 异步队列，因此异步队列 entry 无需（也不应）持有请求级 `context.Context`；异步模式下 trace 提取同样生效，且避免了长命队列持有可取消 ctx 的反模式
-- 默认输出为 **stdout**；`WithAsync` 队列容量默认 10240（与引擎一致）
+- 默认（零 sink）输出为 **stdout 控制台**（见上「sink 装配」）；`WithAsync` 队列容量默认 10240（与引擎一致）
 - `With` 派生共享底层设施（writer/异步队列/文件句柄），均为并发安全共享；派生实例与父实例的属性互不影响
 - **连续 `New` / `Init` 语义**：每次 `New` 在把新实例登记为「默认实例」前，会 `close` 上一个默认实例（flush 其异步队列、关闭文件句柄、从注册表注销），避免队列 / 句柄累积；首次创建（无旧实例）跳过。`SetLevel` / `Fatal` 读取的默认实例引用与 `New` / `Init` 的写入由 `defaultMu` 互斥

@@ -17,13 +17,13 @@ import (
 //   - 不用 Fatal（会触发 ExitFunc/Close 副作用），统一用 t.Error。
 
 func TestAsyncFlush(t *testing.T) {
-	t.Cleanup(func() { logger.Close(2 * time.Second) })
+	t.Cleanup(func() { _ = logger.Close(2 * time.Second) })
 
 	var buf bytes.Buffer
-	l := logger.New(logger.WithOutput(&buf), logger.WithAsync(), logger.WithColor(false))
+	l := logger.New(logger.WithConsole(logger.WithConsoleWriter(&buf)), logger.WithAsync(), logger.WithConsole(logger.WithConsoleColor(false)))
 
 	l.Info("async msg")
-	logger.Close(2 * time.Second) // flush 队列，队列内日志落盘
+	_ = logger.Close(2 * time.Second) // flush 队列，队列内日志落盘
 
 	if !strings.Contains(buf.String(), "async msg") {
 		t.Errorf("expected async msg flushed to output, got: %q", buf.String())
@@ -31,19 +31,17 @@ func TestAsyncFlush(t *testing.T) {
 }
 
 func TestAsyncNonBlocking(t *testing.T) {
-	t.Cleanup(func() { logger.Close(2 * time.Second) })
+	t.Cleanup(func() { _ = logger.Close(2 * time.Second) })
 
 	var buf bytes.Buffer
 	// 8 容量的极小队列：阻塞模式会卡住并发调用方，非阻塞必须快速返回
-	l := logger.New(logger.WithOutput(&buf), logger.WithAsync(8), logger.WithColor(false))
+	l := logger.New(logger.WithConsole(logger.WithConsoleWriter(&buf)), logger.WithAsync(8), logger.WithConsole(logger.WithConsoleColor(false)))
 
 	var wg sync.WaitGroup
 	for range 1000 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			l.Info("nonblocking msg")
-		}()
+		})
 	}
 
 	// 断言 goroutine 全部完成（非阻塞生效）；若阻塞则 5s 超时报错
@@ -63,22 +61,20 @@ func TestAsyncNonBlocking(t *testing.T) {
 }
 
 func TestAsyncBlocking(t *testing.T) {
-	t.Cleanup(func() { logger.Close(2 * time.Second) })
+	t.Cleanup(func() { _ = logger.Close(2 * time.Second) })
 
 	var buf bytes.Buffer
 	// 队列容量 1 + 阻塞模式：并发写触发队列满时的阻塞背压路径，但不丢日志
-	l := logger.New(logger.WithOutput(&buf), logger.WithAsync(1), logger.WithAsyncBlocking(), logger.WithColor(false))
+	l := logger.New(logger.WithConsole(logger.WithConsoleWriter(&buf)), logger.WithAsync(1), logger.WithAsyncBlocking(), logger.WithConsole(logger.WithConsoleColor(false)))
 
 	var wg sync.WaitGroup
 	for range 10 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			l.Info("blocking msg")
-		}()
+		})
 	}
 	wg.Wait() // 阻塞模式下队列满时等待消费，最终全部入队
-	logger.Close(2 * time.Second)
+	_ = logger.Close(2 * time.Second)
 
 	// 阻塞模式绝不丢：10 条全部落盘
 	if got := strings.Count(buf.String(), "blocking msg"); got != 10 {
@@ -87,14 +83,14 @@ func TestAsyncBlocking(t *testing.T) {
 }
 
 func TestAsyncPreserveSource(t *testing.T) {
-	t.Cleanup(func() { logger.Close(2 * time.Second) })
+	t.Cleanup(func() { _ = logger.Close(2 * time.Second) })
 
 	var buf bytes.Buffer
 	// WithSource(true)：异步复制 Record 保留 PC，源码位置不丢失
-	l := logger.New(logger.WithOutput(&buf), logger.WithAsync(), logger.WithSource(true), logger.WithColor(false))
+	l := logger.New(logger.WithConsole(logger.WithConsoleWriter(&buf)), logger.WithAsync(), logger.WithSource(true), logger.WithConsole(logger.WithConsoleColor(false)))
 
 	l.Info("src")
-	logger.Close(2 * time.Second)
+	_ = logger.Close(2 * time.Second)
 
 	if !strings.Contains(buf.String(), "source=") {
 		t.Errorf("expected source= in output (PC preserved through async), got: %q", buf.String())
@@ -102,13 +98,13 @@ func TestAsyncPreserveSource(t *testing.T) {
 }
 
 func TestAsyncWithAttrs(t *testing.T) {
-	t.Cleanup(func() { logger.Close(2 * time.Second) })
+	t.Cleanup(func() { _ = logger.Close(2 * time.Second) })
 
 	var buf bytes.Buffer
-	l := logger.New(logger.WithOutput(&buf), logger.WithAsync(), logger.WithColor(false))
+	l := logger.New(logger.WithConsole(logger.WithConsoleWriter(&buf)), logger.WithAsync(), logger.WithConsole(logger.WithConsoleColor(false)))
 
 	l.With("k", "v").Info("attrs msg")
-	logger.Close(2 * time.Second)
+	_ = logger.Close(2 * time.Second)
 
 	if !strings.Contains(buf.String(), "k=v") {
 		t.Errorf("expected k=v in output (attrs preserved through async), got: %q", buf.String())
@@ -119,20 +115,18 @@ func TestAsyncWithAttrs(t *testing.T) {
 // 不得出现 send on closed channel panic（-race 下运行）。
 // 注意：包级 Close 会清空注册表，每轮需重新创建 logger；t.Cleanup 兜底。
 func TestAsyncCloseConcurrent(t *testing.T) {
-	t.Cleanup(func() { logger.Close(2 * time.Second) })
+	t.Cleanup(func() { _ = logger.Close(2 * time.Second) })
 
 	var buf1 bytes.Buffer
 	var wg sync.WaitGroup
 
 	for range 5 {
-		l := logger.New(logger.WithOutput(&buf1), logger.WithAsync(), logger.WithColor(false))
+		l := logger.New(logger.WithConsole(logger.WithConsoleWriter(&buf1)), logger.WithAsync(), logger.WithConsole(logger.WithConsoleColor(false)))
 
 		stop := make(chan struct{})
 		// 持续写日志的 goroutine：Close 后 Handle 应静默丢弃而非 panic
 		for range 4 {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
+			wg.Go(func() {
 				for {
 					select {
 					case <-stop:
@@ -141,19 +135,17 @@ func TestAsyncCloseConcurrent(t *testing.T) {
 						l.Info("concurrent msg")
 					}
 				}
-			}()
+			})
 		}
 
 		// 反复包级 Close（关闭注册的 async）的 goroutine
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for range 10 {
-				logger.Close(100 * time.Millisecond)
+				_ = logger.Close(100 * time.Millisecond)
 				l.Info("after close")
 			}
 			close(stop)
-		}()
+		})
 
 		wg.Wait()
 	}
@@ -164,16 +156,16 @@ func TestAsyncCloseConcurrent(t *testing.T) {
 // 内即被提取为 record 属性，随后才入队——AsyncHandler 不再持有 ctx（消费时传
 // context.Background）。断言的行为等价：异步落盘的行依然带 trace_id/req_id。
 func TestAsyncTraceCtx(t *testing.T) {
-	t.Cleanup(func() { logger.Close(2 * time.Second) })
+	t.Cleanup(func() { _ = logger.Close(2 * time.Second) })
 
 	var buf bytes.Buffer
-	l := logger.New(logger.WithOutput(&buf), logger.WithAsync(), logger.WithColor(false))
+	l := logger.New(logger.WithConsole(logger.WithConsoleWriter(&buf)), logger.WithAsync(), logger.WithConsole(logger.WithConsoleColor(false)))
 
 	ctx := logger.WithTraceID(context.Background(), "async-trace")
 	ctx = logger.WithReqID(ctx, "async-req")
 	l.InfoContext(ctx, "async trace msg")
 
-	logger.Close(2 * time.Second) // flush 异步队列
+	_ = logger.Close(2 * time.Second) // flush 异步队列
 
 	got := buf.String()
 	if !strings.Contains(got, "trace_id=async-trace") {
@@ -187,10 +179,10 @@ func TestAsyncTraceCtx(t *testing.T) {
 // TestPackageCloseFlush 验证包级 Close：flush 异步队列（日志落盘）
 // 并从注册表注销（Stats 不再统计）。
 func TestPackageCloseFlush(t *testing.T) {
-	t.Cleanup(func() { logger.Close(2 * time.Second) })
+	t.Cleanup(func() { _ = logger.Close(2 * time.Second) })
 
 	var buf bytes.Buffer
-	l := logger.New(logger.WithOutput(&buf), logger.WithAsync(), logger.WithColor(false))
+	l := logger.New(logger.WithConsole(logger.WithConsoleWriter(&buf)), logger.WithAsync(), logger.WithConsole(logger.WithConsoleColor(false)))
 	l.Info("close flush msg")
 
 	if err := logger.Close(2 * time.Second); err != nil {

@@ -24,7 +24,7 @@ func TestErrAttr(t *testing.T) {
 // WithStackTrace 启用时，Wrap 过的错误自动附加 stack 属性
 func TestWrapStackTrace(t *testing.T) {
 	var buf bytes.Buffer
-	l := logger.New(logger.WithOutput(&buf), logger.WithColor(false), logger.WithStackTrace(true))
+	l := logger.New(logger.WithConsole(logger.WithConsoleWriter(&buf)), logger.WithConsole(logger.WithConsoleColor(false)), logger.WithStackTrace(true))
 	l.Error("failed", logger.Err(logger.Wrap(errors.New("boom"))))
 
 	got := buf.String()
@@ -43,7 +43,7 @@ func TestWrapStackTrace(t *testing.T) {
 // 默认不启用时，不附加 stack 属性
 func TestNoStackWhenDisabled(t *testing.T) {
 	var buf bytes.Buffer
-	l := logger.New(logger.WithOutput(&buf), logger.WithColor(false))
+	l := logger.New(logger.WithConsole(logger.WithConsoleWriter(&buf)), logger.WithConsole(logger.WithConsoleColor(false)))
 	l.Error("failed", logger.Err(logger.Wrap(errors.New("boom"))))
 
 	if got := buf.String(); strings.Contains(got, "stack") {
@@ -54,7 +54,7 @@ func TestNoStackWhenDisabled(t *testing.T) {
 // WithAttrs 预设的 Err 属性同样附加堆栈（A1：stackHandler.WithAttrs 与 Handle 逻辑对称）
 func TestStackViaWithAttrs(t *testing.T) {
 	var buf bytes.Buffer
-	l := logger.New(logger.WithOutput(&buf), logger.WithColor(false), logger.WithStackTrace(true))
+	l := logger.New(logger.WithConsole(logger.WithConsoleWriter(&buf)), logger.WithConsole(logger.WithConsoleColor(false)), logger.WithStackTrace(true))
 	l.With(logger.Err(logger.Wrap(errors.New("boom")))).Error("msg")
 
 	got := buf.String()

@@ -65,7 +65,7 @@ func TestAsyncCloseTimeoutError(t *testing.T) {
 func TestAsyncCloseDrainedReturnsNil(t *testing.T) {
 	var buf strings.Builder
 	h := logger.NewAsyncHandler(slog.NewTextHandler(&buf, nil), 8, false)
-	h.Handle(context.Background(), slog.NewRecord(time.Now(), slog.LevelInfo, "drained", 0))
+	_ = h.Handle(context.Background(), slog.NewRecord(time.Now(), slog.LevelInfo, "drained", 0))
 	if err := h.Close(2 * time.Second); err != nil {
 		t.Errorf("expected nil on clean drain, got: %v", err)
 	}
@@ -78,10 +78,10 @@ func TestAsyncCloseDrainedReturnsNil(t *testing.T) {
 
 func TestConcurrentDefaultLifecycle(t *testing.T) {
 	withRestoreDefault(t)
-	t.Cleanup(func() { logger.Close(5 * time.Second) })
+	t.Cleanup(func() { _ = logger.Close(5 * time.Second) })
 
 	// 先把 DefaultLogger 指到 discard，避免并发首轮 Init 之前 Fatal 打到真实 stdout
-	logger.DefaultLogger = logger.New(logger.WithOutput(io.Discard), logger.WithColor(false))
+	logger.DefaultLogger = logger.New(logger.WithConsole(logger.WithConsoleWriter(io.Discard)), logger.WithConsole(logger.WithConsoleColor(false)))
 
 	origExit := logger.ExitFunc
 	logger.ExitFunc = func(int) {}
@@ -94,15 +94,13 @@ func TestConcurrentDefaultLifecycle(t *testing.T) {
 	}
 	origOut := os.Stdout
 	os.Stdout = devNull
-	defer func() { os.Stdout = origOut; devNull.Close() }()
+	defer func() { os.Stdout = origOut; _ = devNull.Close() }()
 
 	var wg sync.WaitGroup
 
 	// 并发 Init：写 DefaultLogger / defaultInstance / defaultLeveler + 关闭旧默认实例
 	for range 4 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for range 5 {
 				if err := logger.Init(logger.Config{
 					Level: "info", Output: "console", Async: true, QueueSize: 64,
@@ -111,30 +109,26 @@ func TestConcurrentDefaultLifecycle(t *testing.T) {
 					return
 				}
 			}
-		}()
+		})
 	}
 
 	// 并发 SetLevel：锁下读取 defaultLeveler 后原子调整
 	for range 4 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for range 50 {
 				logger.SetLevel(logger.Warn)
 				logger.SetLevel(logger.Debug)
 			}
-		}()
+		})
 	}
 
 	// 并发 Fatal：锁下捕获 DefaultLogger/defaultInstance 引用 → Log → 尽力 flush
 	for range 4 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for range 10 {
 				logger.Fatal("concurrent fatal check", "g", "x")
 			}
-		}()
+		})
 	}
 
 	wg.Wait()

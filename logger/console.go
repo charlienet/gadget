@@ -68,7 +68,7 @@ func (h *consoleHandler) Handle(_ context.Context, r slog.Record) error {
 	buf := bufPool.Get().([]byte)[:0]
 	defer func() {
 		if cap(buf) <= maxPooledBufSize {
-			bufPool.Put(buf[:0])
+			bufPool.Put(buf[:0]) //nolint:staticcheck // sync.Pool 存取 []byte 为已知误报，boxing 开销远小于改 *[]byte 的重构风险
 		}
 	}()
 
@@ -95,6 +95,18 @@ func (h *consoleHandler) Handle(_ context.Context, r slog.Record) error {
 		buf = append(buf, colorReset...)
 	}
 
+	// trace_id / req_id：与 fileText 共享挑选判据（见 record_fields.go），前置到消息之前。
+	// console 风格——key 上色、值不上色不加引号（与该 handler 现有 attr 输出一致）。
+	traceID, reqID := scanTraceIDs(r)
+	if traceID != "" {
+		buf = h.appendColoredKey(buf, AttrTraceID)
+		buf = append(buf, traceID...)
+	}
+	if reqID != "" {
+		buf = h.appendColoredKey(buf, AttrReqID)
+		buf = append(buf, reqID...)
+	}
+
 	// 消息本体不上色
 	buf = append(buf, ' ')
 	buf = append(buf, r.Message...)
@@ -107,10 +119,14 @@ func (h *consoleHandler) Handle(_ context.Context, r slog.Record) error {
 		}
 	}
 
-	// 属性：先输出 WithAttrs 累积的 h.attrs，再输出记录自身 attrs，均带分组前缀
+	// 属性：先输出 WithAttrs 累积的 h.attrs，再输出记录自身 attrs
+	// （排除已前置的 trace_id/req_id，避免消息之后重复），均带分组前缀
 	prefix := h.groupPrefix()
 	buf = h.appendAttrs(buf, h.attrs, prefix)
 	r.Attrs(func(a slog.Attr) bool {
+		if isTraceIDAttr(a, traceID, reqID) {
+			return true
+		}
 		buf = h.appendAttr(buf, a, prefix)
 		return true
 	})
@@ -195,6 +211,23 @@ func (h *consoleHandler) appendAttr(buf []byte, a slog.Attr, prefix string) []by
 	}
 
 	return appendValue(buf, a.Value)
+}
+
+// appendColoredKey 输出一个 console 风格的固定字段 key（前导空格 + 可选上色 key + '='），
+// 值由调用方按 console 观感追加（不上色、不加引号）。专用于 trace_id/req_id 这类需前置到
+// 消息之前、且不参与分组前缀的固定字段，key 上色风格与 appendAttr 保持一致。
+func (h *consoleHandler) appendColoredKey(buf []byte, key string) []byte {
+	if !h.opts.NoColor {
+		buf = append(buf, colorKey...)
+	}
+	buf = append(buf, ' ')
+	buf = append(buf, key...)
+	buf = append(buf, '=')
+	if !h.opts.NoColor {
+		buf = append(buf, colorReset...)
+	}
+
+	return buf
 }
 
 // formatLevel 级别缩写（4 字符）

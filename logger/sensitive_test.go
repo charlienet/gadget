@@ -13,7 +13,7 @@ import (
 // 指定 Keys 命中后打码，非敏感字段保留
 func TestSensitiveFilter(t *testing.T) {
 	var buf bytes.Buffer
-	l := logger.New(logger.WithOutput(&buf), logger.WithColor(false), logger.WithSensitiveKeys("password"))
+	l := logger.New(logger.WithConsole(logger.WithConsoleWriter(&buf)), logger.WithConsole(logger.WithConsoleColor(false)), logger.WithSensitiveKeys("password"))
 	l.Info("login", "password", "secret123", "user", "bob")
 
 	got := buf.String()
@@ -31,7 +31,7 @@ func TestSensitiveFilter(t *testing.T) {
 // 启用敏感过滤但未配置 Keys 时，使用内置默认敏感词集兜底
 func TestSensitiveDefaultKeys(t *testing.T) {
 	var buf bytes.Buffer
-	l := logger.New(logger.WithOutput(&buf), logger.WithColor(false), logger.WithSensitiveKeys())
+	l := logger.New(logger.WithConsole(logger.WithConsoleWriter(&buf)), logger.WithConsole(logger.WithConsoleColor(false)), logger.WithSensitiveKeys())
 	l.Info("m", "token", "abc")
 
 	if got := buf.String(); strings.Contains(got, "abc") {
@@ -42,7 +42,7 @@ func TestSensitiveDefaultKeys(t *testing.T) {
 // 自定义掩码生效
 func TestSensitiveMask(t *testing.T) {
 	var buf bytes.Buffer
-	l := logger.New(logger.WithOutput(&buf), logger.WithColor(false), logger.WithSensitiveMask("[REDACTED]"))
+	l := logger.New(logger.WithConsole(logger.WithConsoleWriter(&buf)), logger.WithConsole(logger.WithConsoleColor(false)), logger.WithSensitiveMask("[REDACTED]"))
 	l.Info("m", "password", "pw")
 
 	got := buf.String()
@@ -57,7 +57,7 @@ func TestSensitiveMask(t *testing.T) {
 // key 匹配大小写不敏感
 func TestSensitiveKeyCaseInsensitive(t *testing.T) {
 	var buf bytes.Buffer
-	l := logger.New(logger.WithOutput(&buf), logger.WithColor(false), logger.WithSensitiveKeys("password"))
+	l := logger.New(logger.WithConsole(logger.WithConsoleWriter(&buf)), logger.WithConsole(logger.WithConsoleColor(false)), logger.WithSensitiveKeys("password"))
 	l.Info("m", "Password", "secret")
 
 	got := buf.String()
@@ -72,7 +72,7 @@ func TestSensitiveKeyCaseInsensitive(t *testing.T) {
 // 自定义匹配函数优先于默认子串匹配：只匹配 phone，内置词集（如 token）不再生效
 func TestSensitiveMatch(t *testing.T) {
 	var buf bytes.Buffer
-	l := logger.New(logger.WithOutput(&buf), logger.WithColor(false),
+	l := logger.New(logger.WithConsole(logger.WithConsoleWriter(&buf)), logger.WithConsole(logger.WithConsoleColor(false)),
 		logger.WithSensitiveMatch(func(k string) bool { return k == "phone" }))
 	l.Info("m", "phone", "123", "token", "abc")
 
@@ -91,7 +91,7 @@ func TestSensitiveMatch(t *testing.T) {
 // Group 内属性递归打码
 func TestSensitiveGroup(t *testing.T) {
 	var buf bytes.Buffer
-	l := logger.New(logger.WithOutput(&buf), logger.WithColor(false), logger.WithSensitiveKeys("password"))
+	l := logger.New(logger.WithConsole(logger.WithConsoleWriter(&buf)), logger.WithConsole(logger.WithConsoleColor(false)), logger.WithSensitiveKeys("password"))
 	l.Info("m", slog.Group("db", slog.String("password", "pw")))
 
 	got := buf.String()
@@ -106,7 +106,7 @@ func TestSensitiveGroup(t *testing.T) {
 // A5：内置默认词集精确匹配——secretary/tokenizer 等含敏感词前缀的合法字段不误伤
 func TestSensitiveBuiltinExactMatch(t *testing.T) {
 	var buf bytes.Buffer
-	l := logger.New(logger.WithOutput(&buf), logger.WithColor(false), logger.WithSensitiveKeys())
+	l := logger.New(logger.WithConsole(logger.WithConsoleWriter(&buf)), logger.WithConsole(logger.WithConsoleColor(false)), logger.WithSensitiveKeys())
 	l.Info("m",
 		"secretary", "val1", // 含 "secret" 前缀，不误伤
 		"tokenizer", "val2", // 含 "token" 前缀，不误伤
@@ -131,7 +131,7 @@ func TestSensitiveBuiltinExactMatch(t *testing.T) {
 // A5：新增内置词 salt/cookie/jwt/x-api-key/client_id/session 精确命中打码（大小写不敏感）
 func TestSensitiveBuiltinExtendedKeys(t *testing.T) {
 	var buf bytes.Buffer
-	l := logger.New(logger.WithOutput(&buf), logger.WithColor(false), logger.WithSensitiveKeys())
+	l := logger.New(logger.WithConsole(logger.WithConsoleWriter(&buf)), logger.WithConsole(logger.WithConsoleColor(false)), logger.WithSensitiveKeys())
 	l.Info("m",
 		"salt", "s1",
 		"cookie", "c1",
@@ -155,7 +155,7 @@ func TestSensitiveBuiltinExtendedKeys(t *testing.T) {
 // A5：用户 WithSensitiveKeys 追加的词保持子串匹配（显式指定即有意）
 func TestSensitiveUserKeysSubstring(t *testing.T) {
 	var buf bytes.Buffer
-	l := logger.New(logger.WithOutput(&buf), logger.WithColor(false), logger.WithSensitiveKeys("phone"))
+	l := logger.New(logger.WithConsole(logger.WithConsoleWriter(&buf)), logger.WithConsole(logger.WithConsoleColor(false)), logger.WithSensitiveKeys("phone"))
 	l.Info("m", "phone_number", "123", "phone", "456")
 
 	got := buf.String()
@@ -189,7 +189,7 @@ func TestSensitiveString(t *testing.T) {
 // trace_id / req_id；同 key 子串规则的其它属性（sessionid）照常打码
 func TestSensitiveReservedTraceKeysExempt(t *testing.T) {
 	var buf bytes.Buffer
-	l := logger.New(logger.WithOutput(&buf), logger.WithColor(false), logger.WithSensitiveKeys("id"))
+	l := logger.New(logger.WithConsole(logger.WithConsoleWriter(&buf)), logger.WithConsole(logger.WithConsoleColor(false)), logger.WithSensitiveKeys("id"))
 
 	ctx := logger.WithTraceID(context.Background(), "trace-keep")
 	ctx = logger.WithReqID(ctx, "req-keep")
@@ -211,7 +211,7 @@ func TestSensitiveReservedTraceKeysExempt(t *testing.T) {
 // 手动写入的保留名属性与系统注入走同一豁免
 func TestSensitiveReservedKeysInsideGroup(t *testing.T) {
 	var buf bytes.Buffer
-	l := logger.New(logger.WithOutput(&buf), logger.WithColor(false), logger.WithSensitiveKeys("id"))
+	l := logger.New(logger.WithConsole(logger.WithConsoleWriter(&buf)), logger.WithConsole(logger.WithConsoleColor(false)), logger.WithSensitiveKeys("id"))
 
 	l.Info("m", slog.Group("meta",
 		slog.String("trace_id", "g-trace-keep"),
@@ -231,7 +231,7 @@ func TestSensitiveReservedKeysInsideGroup(t *testing.T) {
 // N-2：自定义 Match 函数路径同样保留豁免（match 入口统一包装）
 func TestSensitiveReservedKeysExemptWithCustomMatch(t *testing.T) {
 	var buf bytes.Buffer
-	l := logger.New(logger.WithOutput(&buf), logger.WithColor(false),
+	l := logger.New(logger.WithConsole(logger.WithConsoleWriter(&buf)), logger.WithConsole(logger.WithConsoleColor(false)),
 		logger.WithSensitiveMatch(func(k string) bool { return strings.Contains(k, "id") }))
 
 	ctx := logger.WithTraceID(context.Background(), "custom-keep")

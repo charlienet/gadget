@@ -54,7 +54,7 @@ func TestAsyncHandlerDerivedHandlers(t *testing.T) {
 func TestAsyncHandlerCloseEdges(t *testing.T) {
 	// queueSize<=0 默认容量分支 + timeout<=0 默认 2s 分支
 	h := logger.NewAsyncHandler(slog.NewTextHandler(io.Discard, nil), 0, false)
-	h.Handle(context.Background(), slog.NewRecord(time.Now(), slog.LevelInfo, "q", 0))
+	_ = h.Handle(context.Background(), slog.NewRecord(time.Now(), slog.LevelInfo, "q", 0))
 	if err := h.Close(0); err != nil {
 		t.Fatalf("Close(0): %v", err)
 	}
@@ -79,7 +79,7 @@ func TestAsyncHandlerCloseEdges(t *testing.T) {
 
 func TestSamplingDerivedHandlers(t *testing.T) {
 	var buf bytes.Buffer
-	l := logger.New(logger.WithOutput(&buf), logger.WithColor(false),
+	l := logger.New(logger.WithConsole(logger.WithConsoleWriter(&buf)), logger.WithConsole(logger.WithConsoleColor(false)),
 		logger.WithSampling(100, 100)) // 阈值放宽：只验证派生透传，不验证丢弃
 
 	l.With("k", "v").Info("sampled derived")
@@ -99,7 +99,7 @@ func TestSamplingDerivedHandlers(t *testing.T) {
 
 func TestSensitiveDerivedHandlers(t *testing.T) {
 	var buf bytes.Buffer
-	l := logger.New(logger.WithOutput(&buf), logger.WithColor(false),
+	l := logger.New(logger.WithConsole(logger.WithConsoleWriter(&buf)), logger.WithConsole(logger.WithConsoleColor(false)),
 		logger.WithSensitiveKeys("password"))
 
 	// With 预设的敏感属性同样打码（sensitiveHandler.WithAttrs）
@@ -162,7 +162,7 @@ func TestWrapUnwrapChain(t *testing.T) {
 
 func TestStackHandlerWithGroup(t *testing.T) {
 	var buf bytes.Buffer
-	l := logger.New(logger.WithOutput(&buf), logger.WithColor(false), logger.WithStackTrace(true))
+	l := logger.New(logger.WithConsole(logger.WithConsoleWriter(&buf)), logger.WithConsole(logger.WithConsoleColor(false)), logger.WithStackTrace(true))
 
 	err := logger.Wrap(errors.New("boom"))
 	l.WithGroup("e").Error("failed", logger.Err(err))
@@ -183,7 +183,7 @@ func TestStackHandlerWithGroup(t *testing.T) {
 // 普通 error（未 Wrap）与非 KindAny 属性：不追加 stack（stackTracerOf 双 false 分支）
 func TestStackSkipsPlainValues(t *testing.T) {
 	var buf bytes.Buffer
-	l := logger.New(logger.WithOutput(&buf), logger.WithColor(false), logger.WithStackTrace(true))
+	l := logger.New(logger.WithConsole(logger.WithConsoleWriter(&buf)), logger.WithConsole(logger.WithConsoleColor(false)), logger.WithStackTrace(true))
 
 	l.Error("plain", "err", errors.New("not wrapped"), "count", 5, "name", "n")
 	got := buf.String()
@@ -198,7 +198,7 @@ func TestStackSkipsPlainValues(t *testing.T) {
 // --- Fatal 经异步默认 logger：flushAsync 的 async!=nil 分支 ---
 
 func TestFatalFlushesAsyncDefault(t *testing.T) {
-	t.Cleanup(func() { logger.Close(2 * time.Second) })
+	t.Cleanup(func() { _ = logger.Close(2 * time.Second) })
 
 	var exitCode int
 	origExit := logger.ExitFunc
@@ -209,7 +209,7 @@ func TestFatalFlushesAsyncDefault(t *testing.T) {
 	defer func() { logger.DefaultLogger = origDefault }()
 
 	var buf bytes.Buffer
-	l := logger.New(logger.WithOutput(&buf), logger.WithAsync(64), logger.WithColor(false))
+	l := logger.New(logger.WithConsole(logger.WithConsoleWriter(&buf)), logger.WithAsync(64), logger.WithConsole(logger.WithConsoleColor(false)))
 	logger.DefaultLogger = l
 
 	logger.Fatal("fatal async msg")

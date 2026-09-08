@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/charlienet/gadget/logger"
 )
@@ -17,7 +18,7 @@ import (
 func newBufLogger(t *testing.T, level logger.Level) (*slog.Logger, *bytes.Buffer) {
 	t.Helper()
 	var buf bytes.Buffer
-	l := logger.New(logger.WithLevel(level), logger.WithOutput(&buf), logger.WithColor(false))
+	l := logger.New(logger.WithLevel(level), logger.WithConsole(logger.WithConsoleWriter(&buf)), logger.WithConsole(logger.WithConsoleColor(false)))
 	return l, &buf
 }
 
@@ -60,7 +61,7 @@ func TestWithAttr(t *testing.T) {
 func TestWithMultipleAttrOrder(t *testing.T) {
 	// 原生 slog With 按调用方给定的成对顺序输出（原 WithFields map 排序能力的等价物）
 	var buf bytes.Buffer
-	l := logger.New(logger.WithOutput(&buf), logger.WithColor(false))
+	l := logger.New(logger.WithConsole(logger.WithConsoleWriter(&buf)), logger.WithConsole(logger.WithConsoleColor(false)))
 	l.With("a", 2, "m", 3, "z", 1).Info("msg")
 
 	got := buf.String()
@@ -70,7 +71,7 @@ func TestWithMultipleAttrOrder(t *testing.T) {
 	if ai < 0 || mi < 0 || zi < 0 {
 		t.Fatalf("expected all fields in output, got: %s", got)
 	}
-	if !(ai < mi && mi < zi) {
+	if ai >= mi || mi >= zi {
 		t.Errorf("expected caller order a<m<z, got: %s", got)
 	}
 }
@@ -151,9 +152,9 @@ func TestNewSlogDefault(t *testing.T) {
 	}
 	l.Info("no panic")
 
-	// WithOutput 后输出 Info 消息
+	// 声明控制台 sink（WithConsoleWriter 注入 buffer）后输出 Info 消息
 	var buf bytes.Buffer
-	l2 := logger.New(logger.WithOutput(&buf), logger.WithColor(false))
+	l2 := logger.New(logger.WithConsole(logger.WithConsoleWriter(&buf)), logger.WithConsole(logger.WithConsoleColor(false)))
 	l2.Info("default slog works")
 	if !strings.Contains(buf.String(), "default slog works") {
 		t.Errorf("expected message in output, got: %s", buf.String())
@@ -163,7 +164,7 @@ func TestNewSlogDefault(t *testing.T) {
 // SetDefault 生效：New 返回的 logger 即 slog.Default()，包级函数走同一条 handler 链
 func TestSetDefaultApplied(t *testing.T) {
 	var buf bytes.Buffer
-	l := logger.New(logger.WithOutput(&buf), logger.WithColor(false))
+	l := logger.New(logger.WithConsole(logger.WithConsoleWriter(&buf)), logger.WithConsole(logger.WithConsoleColor(false)))
 
 	if slog.Default() != l {
 		t.Error("expected New to slog.SetDefault the returned logger")
@@ -177,7 +178,7 @@ func TestSetDefaultApplied(t *testing.T) {
 // WithService/WithEnv 注入 service/env 属性
 func TestServiceEnvInjection(t *testing.T) {
 	var buf bytes.Buffer
-	l := logger.New(logger.WithOutput(&buf), logger.WithColor(false),
+	l := logger.New(logger.WithConsole(logger.WithConsoleWriter(&buf)), logger.WithConsole(logger.WithConsoleColor(false)),
 		logger.WithService("pay-svc"), logger.WithEnv("prod"))
 
 	l.Info("msg")
@@ -191,7 +192,7 @@ func TestServiceEnvInjection(t *testing.T) {
 
 	// 未设置时不出现对应属性
 	var buf2 bytes.Buffer
-	l2 := logger.New(logger.WithOutput(&buf2), logger.WithColor(false))
+	l2 := logger.New(logger.WithConsole(logger.WithConsoleWriter(&buf2)), logger.WithConsole(logger.WithConsoleColor(false)))
 	l2.Info("msg")
 	if strings.Contains(buf2.String(), "service=") || strings.Contains(buf2.String(), "env=") {
 		t.Errorf("expected no service/env attrs when not configured, got: %s", buf2.String())
@@ -201,7 +202,7 @@ func TestServiceEnvInjection(t *testing.T) {
 // 包级 SetLevel 动态调整最近一次 New 实例的级别
 func TestSetLevelPackage(t *testing.T) {
 	var buf bytes.Buffer
-	l := logger.New(logger.WithLevel(logger.Error), logger.WithOutput(&buf), logger.WithColor(false))
+	l := logger.New(logger.WithLevel(logger.Error), logger.WithConsole(logger.WithConsoleWriter(&buf)), logger.WithConsole(logger.WithConsoleColor(false)))
 
 	l.Debug("hidden")
 	if buf.Len() > 0 {
@@ -220,7 +221,7 @@ func TestSetLevelPackage(t *testing.T) {
 func TestLevelerDynamic(t *testing.T) {
 	var buf bytes.Buffer
 	dl := logger.NewDynamicLevel(logger.Error)
-	l := logger.New(logger.WithLeveler(dl), logger.WithLevel(logger.Info), logger.WithOutput(&buf), logger.WithColor(false))
+	l := logger.New(logger.WithLeveler(dl), logger.WithLevel(logger.Info), logger.WithConsole(logger.WithConsoleWriter(&buf)), logger.WithConsole(logger.WithConsoleColor(false)))
 
 	l.Info("hidden") // Leveler=Error，Info 应被过滤
 	if buf.Len() > 0 {
@@ -338,17 +339,17 @@ func TestConsoleColor(t *testing.T) {
 	// 确保不受环境变量影响
 	t.Setenv("NO_COLOR", "")
 
-	// WithColor(true)：非 TTY（bytes.Buffer）也强制输出 ANSI 转义序列
+	// WithConsole(logger.WithConsoleColor(true))：非 TTY（bytes.Buffer）也强制输出 ANSI 转义序列
 	var buf bytes.Buffer
-	l := logger.New(logger.WithOutput(&buf), logger.WithColor(true))
+	l := logger.New(logger.WithConsole(logger.WithConsoleWriter(&buf)), logger.WithConsole(logger.WithConsoleColor(true)))
 	l.Info("colored")
 	if !strings.Contains(buf.String(), "\033[") {
 		t.Errorf("expected ANSI color codes, got: %q", buf.String())
 	}
 
-	// WithColor(false)：无 ANSI 转义
+	// WithConsole(logger.WithConsoleColor(false))：无 ANSI 转义
 	var buf2 bytes.Buffer
-	l2 := logger.New(logger.WithOutput(&buf2), logger.WithColor(false))
+	l2 := logger.New(logger.WithConsole(logger.WithConsoleWriter(&buf2)), logger.WithConsole(logger.WithConsoleColor(false)))
 	l2.Info("plain")
 	if strings.Contains(buf2.String(), "\033[") {
 		t.Errorf("expected no ANSI color codes, got: %q", buf2.String())
@@ -362,7 +363,7 @@ func TestFileOutput(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(dir) // 句柄占用时删除会失败，进程退出后自动释放，忽略错误
+	defer func() { _ = os.RemoveAll(dir) }() // 句柄占用时删除会失败，进程退出后自动释放，忽略错误
 
 	path := filepath.Join(dir, "app.log")
 
@@ -384,10 +385,10 @@ func TestFileOutputWithTrace(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(dir)
+	defer func() { _ = os.RemoveAll(dir) }()
 
 	path := filepath.Join(dir, "app.log")
-	l := logger.New(logger.WithOutput(os.Stdout), logger.WithFile(path))
+	l := logger.New(logger.WithConsole(logger.WithConsoleWriter(os.Stdout)), logger.WithFile(path))
 
 	ctx := logger.WithTraceID(context.Background(), "file-trace-1")
 	l.InfoContext(ctx, "traced file msg")
@@ -404,42 +405,36 @@ func TestFileOutputWithTrace(t *testing.T) {
 // --- 并发安全 ---
 
 func TestConcurrentSafety(t *testing.T) {
-	l := logger.New(logger.WithLevel(logger.Debug), logger.WithOutput(blackHole{}), logger.WithColor(false))
+	l := logger.New(logger.WithLevel(logger.Debug), logger.WithConsole(logger.WithConsoleWriter(blackHole{})), logger.WithConsole(logger.WithConsoleColor(false)))
 
 	var wg sync.WaitGroup
 
 	// Multiple goroutines logging concurrently
 	for range 10 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for range 100 {
 				l.Info("concurrent info")
 				l.Debug("concurrent debug")
 				l.With("key", "val").Warn("with attr")
 			}
-		}()
+		})
 	}
 
 	// 包级 SetLevel 与日志并发（DynamicLevel 原子级别）
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		for range 50 {
 			logger.SetLevel(logger.Warn)
 			logger.SetLevel(logger.Debug)
 		}
-	}()
+	})
 
 	// With 派生与日志并发
 	for range 5 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for range 50 {
 				l.With("k", "v").Info("derived")
 			}
-		}()
+		})
 	}
 
 	wg.Wait()
@@ -449,3 +444,49 @@ func TestConcurrentSafety(t *testing.T) {
 type blackHole struct{}
 
 func (blackHole) Write(p []byte) (int, error) { return len(p), nil }
+
+// --- sink 存在性装配（重构后行为）---
+
+// TestNewZeroSinkDefaultsToConsole：既无 WithConsole 又无 WithFile 的零配置 New()，
+// 兜底启用一个 stdout 控制台——消息落在 os.Stdout，包级日志不会静默。
+func TestNewZeroSinkDefaultsToConsole(t *testing.T) {
+	withRestoreDefault(t)
+	t.Cleanup(func() { _ = logger.Close(2 * time.Second) })
+
+	got := captureStdout(t, func() {
+		l := logger.New() // 零配置：无任何 sink 声明
+		l.Info("zero sink default")
+	})
+	if !strings.Contains(got, "zero sink default") {
+		t.Errorf("zero-sink New() must fall back to stdout console, got: %q", got)
+	}
+}
+
+// TestFileOnlyNoConsole：仅 WithFile（不声明 WithConsole）时，控制台不装配——
+// 消息只进文件，stdout 不写。
+func TestFileOnlyNoConsole(t *testing.T) {
+	withRestoreDefault(t)
+
+	dir, err := os.MkdirTemp("", "logger-fileonly-*")
+	if err != nil {
+		t.Fatalf("mkdir temp: %v", err)
+	}
+	defer func() { _ = os.RemoveAll(dir) }() // 同 TestFileOutput：忽略句柄占用错误
+
+	path := filepath.Join(dir, "app.log")
+
+	got := captureStdout(t, func() {
+		l := logger.New(logger.WithFile(path)) // 仅文件 sink
+		l.Info("only in file")
+	})
+	if strings.Contains(got, "only in file") {
+		t.Errorf("file-only must not write stdout, got: %q", got)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read file: %v", err)
+	}
+	if !strings.Contains(string(data), "only in file") {
+		t.Errorf("expected message in file, got: %s", data)
+	}
+}
