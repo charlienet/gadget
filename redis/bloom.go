@@ -31,15 +31,25 @@ import (
 // #idx 后缀），切换部署形态或分片配置时旧键空间不会被读到，等同于重建
 // 过滤器。集群各节点须配置同构：模块/Lua 能力探测只命中单节点，配置不
 // 一致时可能分派错路径。
+//
+// item 序列化承诺：item 为 any，位哈希与分片路由前统一经 marshalItem
+// 编码为规范字节（见 marshal.go）。编码格式与 go-redis v9.22
+// internal/proto/writer.go 的 WriteArg 逐类型对齐并**冻结**（int/uint 十
+// 进制文本、float 'f' 最短表示、bool→"1"/"0"、time.Time→RFC3339Nano、
+// net.IP 原始字节、支持 encoding.BinaryMarshaler；不支持指针变体）——
+// 存量过滤器数据的有效性依赖该格式永久不变，格式变更属 breaking change。
+// 不支持的类型返回数据类错误（不 panic、不触发 FailPolicy 兜底、不发
+// 命令）。同一 item 在 BF.*（服务端序列化）与 bitmap（客户端 marshalItem
+// 后哈希）两条路径、以及路由与位哈希之间字节口径一致。
 type BloomFilter interface {
 	// Add adds an item to the filter. 返回 true 表示调用前该 item 不可能
 	// 存在（对齐 RedisBloom BF.ADD 语义），false 表示它可能已存在。
 	// Returns true if the item could not have existed before this call.
-	Add(ctx context.Context, item string) (bool, error)
+	Add(ctx context.Context, item any) (bool, error)
 
 	// Exists checks whether an item has possibly been added to the filter.
 	// Returns false if definitely not present; true if it may be present.
-	Exists(ctx context.Context, item string) (bool, error)
+	Exists(ctx context.Context, item any) (bool, error)
 
 	// AddMulti adds multiple items at once. Returns a slice of booleans
 	// indicating whether each item was newly added, in the same order as
@@ -49,11 +59,14 @@ type BloomFilter interface {
 	// 失效兜底（集群分片）：任一分片组不可用即整体按 FailPolicy 兜底
 	// （FailOpen 全 true / FailClosed 全 false）并返回 ErrRedisUnavailable，
 	// 不产生"部分真实部分兜底"的混合结果。
-	AddMulti(ctx context.Context, items ...string) ([]bool, error)
+	//
+	// 任一 item 属不支持类型（marshalItem 失败）时整体返回数据类错误、
+	// 不发命令。
+	AddMulti(ctx context.Context, items ...any) ([]bool, error)
 
 	// ExistsMulti checks multiple items at once. 结果与入参顺序一一对应；
-	// 失效兜底规则与 AddMulti 相同。
-	ExistsMulti(ctx context.Context, items ...string) ([]bool, error)
+	// 失效兜底规则与 AddMulti 相同；不支持类型 item 同样整体报错不发命令。
+	ExistsMulti(ctx context.Context, items ...any) ([]bool, error)
 
 	// Info returns metadata about the Bloom filter. 聚合所有分片键的
 	// 元数据（Size/Capacity/NumItems 为求和）。

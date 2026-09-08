@@ -6,6 +6,7 @@ import (
 	"sync"
 
 	goredis "github.com/redis/go-redis/v9"
+	"github.com/zeebo/xxh3"
 )
 
 // CuckooInfo 包含布谷鸟过滤器的元数据（模块版对应 CF.INFO 输出；
@@ -79,10 +80,13 @@ func WithExpansion(n int64) CuckooOption {
 
 // cuckooFilterImpl 是布谷鸟过滤器的实现接口：模块版（cfCmdImpl）与
 // 无模块回退版（hashImpl）各自实现，由 NewCuckooFilter 按能力分派。
+// item 为 any：cfCmdImpl 把原始 item 透传给 CF.* 模块命令（go-redis
+// writer 序列化）；hashImpl 先经 marshalItem 编码为规范字节再算指纹与
+// 候选桶（格式对齐 go-redis writer 并冻结，见 marshal.go）。
 type cuckooFilterImpl interface {
-	Add(ctx context.Context, item string) (bool, error)
-	Exists(ctx context.Context, item string) (bool, error)
-	Del(ctx context.Context, item string) (bool, error)
+	Add(ctx context.Context, item any) (bool, error)
+	Exists(ctx context.Context, item any) (bool, error)
+	Del(ctx context.Context, item any) (bool, error)
 	Info(ctx context.Context) (*CuckooInfo, error)
 }
 
@@ -91,6 +95,13 @@ type cuckooFilterImpl interface {
 //   - 未加载 → hashImpl（Hash + Lua 回退，普通 Redis 即可运行，无模块依赖）
 //
 // 与 BloomFilter 不同，布谷鸟过滤器支持删除（Del），且误判率更低。
+//
+// item 序列化承诺：item 为 any。回退版（hashImpl）的指纹/桶索引由
+// marshalItem(item) 的规范字节经 xxh3-64 导出；模块版（cfCmdImpl）由
+// go-redis writer 序列化原始 item。marshalItem 与 writer 逐类型对齐并
+// **冻结**（见 marshal.go），两路径同一 item 的字节口径一致；存量过滤器
+// 数据的有效性依赖该格式永久不变，格式变更属 breaking change。不支持的
+// 类型（含指针变体）返回数据类错误（不 panic、不触发 FailPolicy 兜底）。
 //
 // 使用示例：
 //
@@ -136,7 +147,8 @@ func (cf *CuckooFilter) fallbackBool(err error) (bool, error) {
 
 // Add 向过滤器添加一个元素，返回是否新增（false 表示元素已存在）。
 // Redis 服务失效时按兜底策略：FailOpen → (true, nil)；FailClosed → (false, nil)。
-func (cf *CuckooFilter) Add(ctx context.Context, item string) (bool, error) {
+// item 属不支持类型（marshalItem 失败）时返回数据类错误，不触发兜底。
+func (cf *CuckooFilter) Add(ctx context.Context, item any) (bool, error) {
 	added, err := cf.impl.Add(ctx, item)
 	if err != nil && IsUnavailable(err) {
 		return cf.fallbackBool(err)
@@ -147,7 +159,8 @@ func (cf *CuckooFilter) Add(ctx context.Context, item string) (bool, error) {
 // Exists 检查元素是否可能存在于过滤器（布谷鸟过滤器无假阴性，可能有假阳性）。
 // Redis 服务失效时按兜底策略：FailOpen → (true, nil)（视为存在，防穿透失效
 // 但放行业务）；FailClosed → (false, nil)。
-func (cf *CuckooFilter) Exists(ctx context.Context, item string) (bool, error) {
+// item 属不支持类型时返回数据类错误，不触发兜底。
+func (cf *CuckooFilter) Exists(ctx context.Context, item any) (bool, error) {
 	exists, err := cf.impl.Exists(ctx, item)
 	if err != nil && IsUnavailable(err) {
 		return cf.fallbackBool(err)
@@ -159,7 +172,8 @@ func (cf *CuckooFilter) Exists(ctx context.Context, item string) (bool, error) {
 // （元素不存在或删除导致桶耗尽时返回 false）。
 // Redis 服务失效时按兜底策略：FailOpen → (true, nil)（视为删除成功）；
 // FailClosed → (false, nil)。
-func (cf *CuckooFilter) Del(ctx context.Context, item string) (bool, error) {
+// item 属不支持类型时返回数据类错误，不触发兜底。
+func (cf *CuckooFilter) Del(ctx context.Context, item any) (bool, error) {
 	deleted, err := cf.impl.Del(ctx, item)
 	if err != nil && IsUnavailable(err) {
 		return cf.fallbackBool(err)
@@ -213,18 +227,20 @@ func (cf *cfCmdImpl) ensureReserve(ctx context.Context) error {
 	return err
 }
 
-func (cf *cfCmdImpl) Add(ctx context.Context, item string) (bool, error) {
+// Add/Exists/Del 把原始 item 透传给 CF.* 模块命令，由 go-redis writer
+// 序列化（与回退版 marshalItem 的字节口径一致，见 marshal.go）。
+func (cf *cfCmdImpl) Add(ctx context.Context, item any) (bool, error) {
 	if err := cf.ensureReserve(ctx); err != nil {
 		return false, err
 	}
 	return cf.client.CFAdd(ctx, cf.key, item).Result()
 }
 
-func (cf *cfCmdImpl) Exists(ctx context.Context, item string) (bool, error) {
+func (cf *cfCmdImpl) Exists(ctx context.Context, item any) (bool, error) {
 	return cf.client.CFExists(ctx, cf.key, item).Result()
 }
 
-func (cf *cfCmdImpl) Del(ctx context.Context, item string) (bool, error) {
+func (cf *cfCmdImpl) Del(ctx context.Context, item any) (bool, error) {
 	return cf.client.CFDel(ctx, cf.key, item).Result()
 }
 
@@ -263,17 +279,26 @@ const (
 // 指纹 0 表示空槽（指纹计算时保证非 0）；方向位 0 表示"本桶是该指纹的 i1"、
 // 1 表示"本桶是 i2"。模块版与回退版按能力分派互斥，可共用同一业务 key。
 //
-// 哈希（Go 侧计算候选桶，Lua 侧计算指纹哈希，公式一致）：
-//   - fp = fnv1a(item) & 0xFFFF（2 字节指纹，0 时取 1）——**2 字节空间
+// 哈希（Go 侧计算候选桶，Lua 侧计算指纹哈希，公式一致；item 均为
+// marshalItem 编码后的规范字节，格式冻结见 marshal.go）：
+//   - fp = xxh3.Hash(marshalItem(item)) & 0xFFFF（2 字节指纹，0 时取 1）——**2 字节空间
 //     大幅降低指纹冲突**：1 字节（255 种）在元素多时冲突严重，驱逐链无法
 //     区分同指纹的不同元素（owner），会把元素指纹移入"另一同指纹元素的
 //     候选桶"造成放错（方向错误假阴性）；2 字节（65535 种）冲突率极低，
 //     驱逐链的 alternate 恒为该指纹 owner 的候选桶。
-//   - i1 = fnv1a(item) % numBuckets
+//   - i1 = xxh3.Hash(marshalItem(item)) % numBuckets
 //   - i2 = (i1 + h(fp)) % numBuckets —— 模加候选桶关系（Lua 5.1 无位运算，
 //     XOR 需算术模拟；模加可直接计算）
 //   - h(fp) = (fp × 2654435761) % 2^32 % numBuckets —— 乘法哈希（模拟 32 位
 //     回绕；fp < 65536 时乘积 < 2^53，Lua double 可精确表示）
+//
+// ⚠️ v0.7.0 起主哈希由 fnv1a（FNV-1a 64 位）换为 xxh3.Hash（xxh3-64）——
+// **BREAKING**：存量 Lua cuckoo 过滤器（本回退实现）的条目按旧哈希定位，
+// 升级后对旧 key 的 Exists 会假 miss、Del 失效，必须重建过滤器（Del 旧
+// key 后重新灌入，或换新 key）。换哈希动机：① xxh3 吞吐显著高于 FNV-1a；
+// ② FNV-1a 低位雪崩质量差，i1 = h % numBuckets 在 numBuckets 为 2 的幂时
+// 只用低位、桶分布偏斜，fp = h & 0xFFFF 同样受低位相关性影响，xxh3-64
+// 全位雪崩均匀修正该偏斜。i2 的派生（hashFingerprint 乘法哈希）不变。
 //
 // 驱逐机制（Add Lua 脚本）：两候选桶均满时确定性扰动选一个槽位踢出旧指纹。
 // 被踢指纹的 alternate 桶由**方向位**决定：方向 0（本桶是 i1）→ 去
@@ -324,8 +349,15 @@ func (h *hashImpl) hashFingerprint(fp int64) int64 {
 }
 
 // cuckooHashs 计算 item 的指纹与两个候选桶索引（模加候选桶关系）。
-func (h *hashImpl) cuckooHashs(item string) (fp int64, i1, i2 int64) {
-	h1 := fnv1a(item)
+// item 先经 marshalItem 编码为规范字节再 xxh3-64（编码格式与 go-redis
+// writer 对齐并冻结，见 marshal.go——存量桶数据的有效性依赖该格式不变）；
+// 不支持的类型返回数据类错误，调用方不得继续发命令。
+func (h *hashImpl) cuckooHashs(item any) (fp int64, i1, i2 int64, err error) {
+	data, err := marshalItem(item)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	h1 := xxh3.Hash(data)
 	fp = int64(h1 & 0xFFFF) // 2 字节指纹（0 时取 1，避免与空槽哨兵冲突）
 	if fp == 0 {
 		fp = 1
@@ -449,8 +481,11 @@ end
 return 0
 `)
 
-func (h *hashImpl) Add(ctx context.Context, item string) (bool, error) {
-	fp, i1, i2 := h.cuckooHashs(item)
+func (h *hashImpl) Add(ctx context.Context, item any) (bool, error) {
+	fp, i1, i2, err := h.cuckooHashs(item)
+	if err != nil {
+		return false, err
+	}
 	n, err := cuckooAddScript.Run(ctx, h.client, []string{h.key},
 		fp, i1, i2, h.maxIterations, h.bucketSize, h.numBuckets).Int()
 	if err != nil {
@@ -487,8 +522,11 @@ end
 return bucketContains(i2)
 `)
 
-func (h *hashImpl) Exists(ctx context.Context, item string) (bool, error) {
-	fp, i1, i2 := h.cuckooHashs(item)
+func (h *hashImpl) Exists(ctx context.Context, item any) (bool, error) {
+	fp, i1, i2, err := h.cuckooHashs(item)
+	if err != nil {
+		return false, err
+	}
 	n, err := cuckooExistsScript.Run(ctx, h.client, []string{h.key}, fp, i1, i2, h.bucketSize).Int()
 	if err != nil {
 		return false, err
@@ -533,8 +571,11 @@ end
 return removeFrom(i2)
 `)
 
-func (h *hashImpl) Del(ctx context.Context, item string) (bool, error) {
-	fp, i1, i2 := h.cuckooHashs(item)
+func (h *hashImpl) Del(ctx context.Context, item any) (bool, error) {
+	fp, i1, i2, err := h.cuckooHashs(item)
+	if err != nil {
+		return false, err
+	}
 	n, err := cuckooDelScript.Run(ctx, h.client, []string{h.key}, fp, i1, i2, h.bucketSize).Int()
 	if err != nil {
 		return false, err

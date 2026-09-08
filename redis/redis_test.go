@@ -663,7 +663,7 @@ func TestBloomBitmapInfo(t *testing.T) {
 		const inserted = 1000
 
 		bf := rdb.NewBloomFilterWithEstimate("bfinfo", 10000, 0.01)
-		items := make([]string, 0, inserted)
+		items := make([]any, 0, inserted)
 		for i := range inserted {
 			items = append(items, fmt.Sprintf("info-%d", i))
 		}
@@ -808,7 +808,7 @@ func BenchmarkBitmapMulti(b *testing.B) {
 		bf := rdb.NewBloomFilterWithEstimate("bench:bitmap:multi", 1000000, 0.01)
 		ctx := context.Background()
 
-		batch := make([]string, batchSize)
+		batch := make([]any, batchSize)
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
 			for j := range batch {

@@ -173,7 +173,7 @@ func TestClusterIntegration(t *testing.T) {
 				redis.WithCapacity(100_000), redis.WithFalsePositive(0.01),
 				redis.WithShardCount(8))
 
-			items := make([]string, 300)
+			items := make([]any, 300)
 			for i := range items {
 				items[i] = fmt.Sprintf("bloomct-%s-%d", base, i)
 			}
@@ -289,7 +289,7 @@ func TestClusterIntegration(t *testing.T) {
 			assert.Equal(t, int64(0), info.NumFilters, "空分片聚合 NumFilters 应为 0")
 
 			// 灌入后聚合转正（分片态 BF 路径逐片惰性 BF.RESERVE）
-			seed := make([]string, 30)
+			seed := make([]any, 30)
 			for i := range seed {
 				seed[i] = fmt.Sprintf("emptynorm-%s-%d", base, i)
 			}
@@ -334,7 +334,7 @@ func TestClusterIntegration(t *testing.T) {
 				redis.WithCapacity(100_000), redis.WithFalsePositive(0.01),
 				redis.WithBloomImpl(redis.BloomImplBitmap), redis.WithShardCount(8))
 
-			items := make([]string, 300)
+			items := make([]any, 300)
 			for i := range items {
 				items[i] = fmt.Sprintf("abctest-%d", i)
 			}

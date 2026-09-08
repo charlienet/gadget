@@ -28,6 +28,20 @@ func bloomTestKey(suffix string) string {
 	return fmt.Sprintf("bloomtest:%s:%s", hex.EncodeToString(b), suffix)
 }
 
+// anyItems 把 []string 转为 []any，供 item any 化后的批量接口调用
+// （测试内部辅助；生产路径的编码校验在 marshalItem/group 内完成）。
+func anyItems(items []string) []any {
+	args := make([]any, len(items))
+	for i, v := range items {
+		args[i] = v
+	}
+	return args
+}
+
+// routeBytes 返回 item 的路由字节——item any 化后 indexOf/keyFor/group 的
+// 入参口径（string 与 marshalItem(string) 同字节，测试里直取）。
+func routeBytes(item string) []byte { return []byte(item) }
+
 // newSimBitmap 构造仅用于哈希纯计算的 bitmapImpl（client 为 nil，
 // 只调用 hashs/m/k 等不触网的方法，用于位图算法层的统计回归）。
 func newSimBitmap(t *testing.T, n int64, p float64) *bitmapImpl {
@@ -77,7 +91,10 @@ func TestBitmapHashParity(t *testing.T) {
 					t.Fatalf("步长 h2 必须恒奇，item=%s h2=%d", item, h2)
 				}
 
-				pos := b.hashs(item)
+				pos, err := b.hashs(item)
+				if err != nil {
+					t.Fatalf("hashs(%s)：%v", item, err)
+				}
 				if len(pos) != int(b.k) {
 					t.Fatalf("位置数 got %d want %d", len(pos), b.k)
 				}
@@ -147,7 +164,11 @@ func TestBitmapFPRRegression(t *testing.T) {
 			bitset := make([]bool, b.m)
 
 			for i := int64(0); i < c.n; i++ {
-				for _, pos := range b.hashs(fmt.Sprintf("inserted-%d", i)) {
+				positions, err := b.hashs(fmt.Sprintf("inserted-%d", i))
+				if err != nil {
+					t.Fatalf("hashs inserted-%d：%v", i, err)
+				}
+				for _, pos := range positions {
 					bitset[pos] = true
 				}
 			}
@@ -155,7 +176,10 @@ func TestBitmapFPRRegression(t *testing.T) {
 			var fp int64
 			var dupItems int64
 			for i := int64(0); i < c.n; i++ {
-				positions := b.hashs(fmt.Sprintf("missing-%d", i))
+				positions, err := b.hashs(fmt.Sprintf("missing-%d", i))
+				if err != nil {
+					t.Fatalf("hashs missing-%d：%v", i, err)
+				}
 				// 位置互异性（规格断言的统计化放宽，偏差说明见函数注释）：
 				// 存在重复位置的 item 占比必须极低（<0.5%）。绝对互异需 h2 与
 				// m 完整互质，而 C2 仅消除公因子 2（奇公因子 3/5/… 造成 ppm 级
@@ -602,7 +626,10 @@ func TestBitmapAddSemanticsHighFill(t *testing.T) {
 	// add 复刻 Lua 脚本新判据：k 位中至少一位在置位前为 0 → 新增（true），
 	// 并把所有为 0 的位补置 1；k 位全 1 → false（可能存在，无缺位可补）。
 	add := func(item string) bool {
-		positions := b.hashs(item)
+		positions, err := b.hashs(item)
+		if err != nil {
+			t.Fatalf("hashs(%s)：%v", item, err)
+		}
 		added := false
 		for _, pos := range positions {
 			if !bitset[pos] {
@@ -654,7 +681,10 @@ func TestBitmapAddDenseViaLua(t *testing.T) {
 	setDenseSingleZero := func(item string) {
 		t.Helper()
 		// 非分片实例：物理键即 sharder.base（key 字段已删除，等价表达）
-		positions := b.hashs(item)
+		positions, err := b.hashs(item)
+		if err != nil {
+			t.Fatalf("hashs(%s)：%v", item, err)
+		}
 		for _, pos := range positions {
 			if err := rc.SetBit(ctx, b.sharder.base, int64(pos), 1).Err(); err != nil {
 				t.Fatalf("预置 SetBit(%d,1)：%v", pos, err)
@@ -701,9 +731,12 @@ func TestBitmapAddDenseViaLua(t *testing.T) {
 // 顺序对应性由该布局保证。
 func TestBitmapMultiPositionsArgs(t *testing.T) {
 	b := newSimBitmap(t, 10000, 0.01)
-	items := []string{"m1", "m2", "m3"}
+	items := []any{"m1", "m2", "m3"}
 
-	args := b.multiPositionsArgs(items)
+	args, err := b.multiPositionsArgs(items)
+	if err != nil {
+		t.Fatalf("multiPositionsArgs：%v", err)
+	}
 	if len(args) != 1+len(items)*int(b.k) {
 		t.Fatalf("参数总数 got %d want %d", len(args), 1+len(items)*int(b.k))
 	}
@@ -711,7 +744,10 @@ func TestBitmapMultiPositionsArgs(t *testing.T) {
 		t.Fatalf("ARGV[0] 应为 k=%d，got %v", b.k, args[0])
 	}
 	for i, item := range items {
-		want := b.hashs(item)
+		want, err := b.hashs(item)
+		if err != nil {
+			t.Fatalf("hashs(%v)：%v", item, err)
+		}
 		for j, w := range want {
 			if got := args[1+i*int(b.k)+j].(uint64); got != w {
 				t.Fatalf("item %s 第 %d 位 got %d want %d（顺序对应性破坏）", item, j, got, w)
@@ -762,7 +798,7 @@ func TestBitmapClusterFallbackRouting(t *testing.T) {
 		if err != nil || !added {
 			t.Fatalf("cluster Add 路由失败：added=%v err=%v", added, err)
 		}
-		multiArgs := []string{"u2", "u1", "u3"}
+		multiArgs := []any{"u2", "u1", "u3"}
 		addedMulti, err := b.AddMulti(ctx, multiArgs...)
 		if err != nil {
 			t.Fatalf("cluster AddMulti（批量 Lua）失败：%v", err)
@@ -820,7 +856,7 @@ func TestBitmapMultiVsLoopConsistency(t *testing.T) {
 
 	cfg := defaultBloomConfig()
 	cfg.capacity = 10000
-	items := []string{"x1", "x2", "x3", "x4", "x5", "x6", "x7"}
+	items := []any{"x1", "x2", "x3", "x4", "x5", "x6", "x7"}
 
 	// 批量脚本路径
 	bBatch := newBitmapImpl(rc, "mv:batch", cfg)
@@ -853,7 +889,7 @@ func TestBitmapMultiVsLoopConsistency(t *testing.T) {
 	}
 
 	// 重复批量：与入参顺序对应的"已存在"（验证批量语义而非全 false 假通过）
-	again := []string{"x7", "nope", "x3"}
+	again := []any{"x7", "nope", "x3"}
 	ra, err := bBatch.AddMulti(ctx, again...)
 	if err != nil {
 		t.Fatal(err)
@@ -868,7 +904,7 @@ func TestBitmapMultiVsLoopConsistency(t *testing.T) {
 	}
 
 	// ExistsMulti 两路径一致 + 顺序对应
-	query := []string{"nope", "x1", "zzz", "x7"}
+	query := []any{"nope", "x1", "zzz", "x7"}
 	ea, err := bBatch.ExistsMulti(ctx, query...)
 	if err != nil {
 		t.Fatal(err)
@@ -912,12 +948,12 @@ func TestShardIndexRouting(t *testing.T) {
 	// 确定性 + 模映射 + 值域
 	for n := 1; n <= 8; n++ {
 		for _, item := range items[:200] {
-			first := shardIndex(item, n)
+			first := shardIndex(routeBytes(item), n)
 			if first < 0 || first >= n {
 				t.Fatalf("n=%d 值域越界：item=%s idx=%d", n, item, first)
 			}
 			for range 2 {
-				if got := shardIndex(item, n); got != first {
+				if got := shardIndex(routeBytes(item), n); got != first {
 					t.Fatalf("路由不确定：n=%d item=%s 两次结果 %d != %d", n, item, got, first)
 				}
 			}
@@ -933,10 +969,10 @@ func TestShardIndexRouting(t *testing.T) {
 
 	// n<=1 恒 0（退化路径）
 	for _, item := range items {
-		if got := shardIndex(item, 1); got != 0 {
+		if got := shardIndex(routeBytes(item), 1); got != 0 {
 			t.Fatalf("n=1 应恒 0，got %d", got)
 		}
-		if got := shardIndex(item, 0); got != 0 {
+		if got := shardIndex(routeBytes(item), 0); got != 0 {
 			t.Fatalf("n=0 防御性应恒 0，got %d", got)
 		}
 	}
@@ -945,7 +981,7 @@ func TestShardIndexRouting(t *testing.T) {
 	const n, total = 8, 8000
 	buckets := make([]int, n)
 	for i := range total {
-		buckets[shardIndex(fmt.Sprintf("uniform-%d", i), n)]++
+		buckets[shardIndex(routeBytes(fmt.Sprintf("uniform-%d", i)), n)]++
 	}
 	exp := total / n
 	for i, c := range buckets {
@@ -1075,13 +1111,16 @@ func TestBloomSharderKeysAndGroup(t *testing.T) {
 		if got := s.shardKey(3); got != "plain" {
 			t.Fatalf("关闭态 shardKey 应恒为 base，got %q", got)
 		}
-		if got := s.keyFor("anything"); got != "plain" {
+		if got := s.keyFor(routeBytes("anything")); got != "plain" {
 			t.Fatalf("关闭态 keyFor 应为 base，got %q", got)
 		}
 		if keys := s.allKeys(); len(keys) != 1 || keys[0] != "plain" {
 			t.Fatalf("关闭态 allKeys got %v", keys)
 		}
-		groups := s.group([]string{"a", "b", "c"})
+		groups, err := s.group([]any{"a", "b", "c"})
+		if err != nil {
+			t.Fatalf("关闭态 group：%v", err)
+		}
 		if len(groups) != 1 || groups[0].key != "plain" {
 			t.Fatalf("关闭态 group 应单组 base，got %+v", groups)
 		}
@@ -1097,7 +1136,10 @@ func TestBloomSharderKeysAndGroup(t *testing.T) {
 		if got := s.shardKey(0); got != "base#0" {
 			t.Fatalf("集群退化态键名应为 base#0，got %q", got)
 		}
-		groups := s.group([]string{"x", "y"})
+		groups, err := s.group([]any{"x", "y"})
+		if err != nil {
+			t.Fatalf("退化态 group：%v", err)
+		}
 		if len(groups) != 1 || groups[0].key != "base#0" {
 			t.Fatalf("退化态 group 键名应为 base#0，got %+v", groups)
 		}
@@ -1113,9 +1155,9 @@ func TestBloomSharderKeysAndGroup(t *testing.T) {
 		seen := map[string]bool{}
 		for i := range 500 {
 			item := fmt.Sprintf("sk-%d", i)
-			k := s.keyFor(item)
+			k := s.keyFor(routeBytes(item))
 			seen[k] = true
-			if want := "base#" + fmt.Sprint(shardIndex(item, 4)); k != want {
+			if want := "base#" + fmt.Sprint(shardIndex(routeBytes(item), 4)); k != want {
 				t.Fatalf("keyFor(%s) got %s want %s", item, k, want)
 			}
 		}
@@ -1130,7 +1172,10 @@ func TestBloomSharderKeysAndGroup(t *testing.T) {
 		for i := range items {
 			items[i] = fmt.Sprintf("grp-%d", i)
 		}
-		groups := s.group(items)
+		groups, err := s.group(anyItems(items))
+		if err != nil {
+			t.Fatalf("group：%v", err)
+		}
 		if len(groups) == 0 || len(groups) > 6 {
 			t.Fatalf("分组数异常：%d", len(groups))
 		}
@@ -1145,12 +1190,17 @@ func TestBloomSharderKeysAndGroup(t *testing.T) {
 				t.Fatalf("分组键名错误：%q", g.key)
 			}
 			for j, item := range g.items {
-				if shardIndex(item, 6) != g.idx {
-					t.Fatalf("item %s 落错分组（idx=%d）", item, g.idx)
+				// group 组内保留原始 any（不改写为路由字节），断言可安全还原
+				sItem, ok := item.(string)
+				if !ok {
+					t.Fatalf("分组内 item 应为原始 any，got %T", item)
+				}
+				if shardIndex(routeBytes(sItem), 6) != g.idx {
+					t.Fatalf("item %s 落错分组（idx=%d）", sItem, g.idx)
 				}
 				orig := g.srcIdx[j]
-				if items[orig] != item {
-					t.Fatalf("srcIdx[%d]=%d 指回错误 item：%q != %q", j, orig, items[orig], item)
+				if items[orig] != sItem {
+					t.Fatalf("srcIdx[%d]=%d 指回错误 item：%q != %q", j, orig, items[orig], sItem)
 				}
 				covered[orig] = true
 			}
@@ -1206,7 +1256,7 @@ func TestBitmapShardedMiniredis(t *testing.T) {
 	ctx := context.Background()
 	const nShards = 4
 
-	items := make([]string, 200)
+	items := make([]any, 200)
 	for i := range items {
 		items[i] = fmt.Sprintf("sd-item-%d", i)
 	}
@@ -1250,8 +1300,16 @@ func TestBitmapShardedMiniredis(t *testing.T) {
 		}
 		// 抽样：item 的 k 个位置在路由分片键上必须全部为 1
 		for _, item := range items[:25] {
-			key := b.sharder.keyFor(item)
-			for _, pos := range b.hashs(item) {
+			data, err := marshalItem(item)
+			if err != nil {
+				t.Fatalf("marshalItem(%v)：%v", item, err)
+			}
+			key := b.sharder.keyFor(data)
+			positions, err := b.hashs(item)
+			if err != nil {
+				t.Fatalf("hashs(%v)：%v", item, err)
+			}
+			for _, pos := range positions {
 				v, err := rc.GetBit(ctx, key, int64(pos)).Result()
 				if err != nil {
 					t.Fatalf("GetBit(%s, %d)：%v", key, pos, err)
@@ -1282,7 +1340,7 @@ func TestBitmapShardedMiniredis(t *testing.T) {
 
 		// 交错"已灌入/未灌入"的混合查询：ExistsMulti 第 i 位必须与单条
 		// Exists（同一 sharder 路由）一致——跨分片分组回填的正确性回归
-		mix := make([]string, 0, 60)
+		mix := make([]any, 0, 60)
 		for i := range 40 {
 			mix = append(mix, items[i*3], fmt.Sprintf("sd-missing-%d", i))
 		}
@@ -1346,7 +1404,7 @@ func TestBitmapShardedMiniredis(t *testing.T) {
 // miniredis 实例（luaSupport 为 client 级记忆，共享会互相污染）。
 func TestBitmapShardedLoopVsBatchConsistency(t *testing.T) {
 	ctx := context.Background()
-	items := make([]string, 120)
+	items := make([]any, 120)
 	for i := range items {
 		items[i] = fmt.Sprintf("lbc-%d", i)
 	}
@@ -1373,7 +1431,7 @@ func TestBitmapShardedLoopVsBatchConsistency(t *testing.T) {
 	}
 
 	// 重复批量（已存在条目应全 false 且两侧一致）
-	qa := []string{items[5], "lbc-nope-1", items[60]}
+	qa := []any{items[5], "lbc-nope-1", items[60]}
 	aa, err := bBatch.AddMulti(ctx, qa...)
 	if err != nil {
 		t.Fatal(err)
@@ -1387,7 +1445,7 @@ func TestBitmapShardedLoopVsBatchConsistency(t *testing.T) {
 	}
 
 	// ExistsMulti 两路径一致
-	qu := []string{"lbc-nope-1", items[0], items[7], "lbc-nope-2"}
+	qu := []any{"lbc-nope-1", items[0], items[7], "lbc-nope-2"}
 	ea, err := bBatch.ExistsMulti(ctx, qu...)
 	if err != nil {
 		t.Fatal(err)
@@ -1432,7 +1490,7 @@ func TestBitmapShardedLoopVsBatchConsistency(t *testing.T) {
 // policy 兜底 + ErrRedisUnavailable 哨兵错误，禁止部分真实部分兜底。
 func TestBloomShardedUnavailableWholeFallback(t *testing.T) {
 	ctx := context.Background()
-	items := make([]string, 50)
+	items := make([]any, 50)
 	for i := range items {
 		items[i] = fmt.Sprintf("uf-%d", i)
 	}
@@ -1489,15 +1547,27 @@ func TestBloomShardRoutingSharedByBothImpls(t *testing.T) {
 		items[i] = fmt.Sprintf("shared-%d", i)
 	}
 	for _, item := range items {
-		if bf.sharder.keyFor(item) != bm.sharder.keyFor(item) {
-			t.Fatalf("两路径 keyFor(%s) 分叉：%q vs %q", item,
-				bf.sharder.keyFor(item), bm.sharder.keyFor(item))
+		// 与生产路径同口径：路由入参是 marshalItem 的规范字节
+		data, err := marshalItem(item)
+		if err != nil {
+			t.Fatalf("marshalItem(%s)：%v", item, err)
 		}
-		if bf.sharder.indexOf(item) != bm.sharder.indexOf(item) {
+		if bf.sharder.keyFor(data) != bm.sharder.keyFor(data) {
+			t.Fatalf("两路径 keyFor(%s) 分叉：%q vs %q", item,
+				bf.sharder.keyFor(data), bm.sharder.keyFor(data))
+		}
+		if bf.sharder.indexOf(data) != bm.sharder.indexOf(data) {
 			t.Fatalf("两路径 indexOf(%s) 分叉", item)
 		}
 	}
-	ga, gb := bf.sharder.group(items), bm.sharder.group(items)
+	ga, err := bf.sharder.group(anyItems(items))
+	if err != nil {
+		t.Fatalf("bf group：%v", err)
+	}
+	gb, err := bm.sharder.group(anyItems(items))
+	if err != nil {
+		t.Fatalf("bm group：%v", err)
+	}
 	if len(ga) != len(gb) {
 		t.Fatalf("分组数不一致：%d vs %d", len(ga), len(gb))
 	}
@@ -1647,7 +1717,7 @@ func TestBloomImplABRealRedis(t *testing.T) {
 	}()
 
 	const n = 1000
-	items := make([]string, n)
+	items := make([]any, n)
 	for i := range items {
 		items[i] = fmt.Sprintf("ab-%s-%d", keyBF, i)
 	}

@@ -83,8 +83,16 @@ func (b *bitmapImpl) fallbackBools(n int, err error) ([]bool, error) {
 
 // hashs returns the k bit positions for an item.
 // Uses double hashing (Kirsch-Mitzenmacher): h(i) = h1 + i * h2 (mod m)
-func (b *bitmapImpl) hashs(item string) []uint64 {
-	sum := xxh3.Hash128([]byte(item))
+//
+// item 先经 marshalItem 编码为规范字节再哈希（编码格式与 go-redis writer
+// 对齐并冻结，见 marshal.go——存量位图数据的有效性依赖该格式不变）；
+// 不支持的类型返回数据类错误，调用方不得继续发命令。
+func (b *bitmapImpl) hashs(item any) ([]uint64, error) {
+	data, err := marshalItem(item)
+	if err != nil {
+		return nil, err
+	}
+	sum := xxh3.Hash128(data)
 	h1 := sum.Hi
 	h2 := sum.Lo | 1 // 步长强制奇：见上方注释
 
@@ -92,7 +100,7 @@ func (b *bitmapImpl) hashs(item string) []uint64 {
 	for i := uint(0); i < b.k; i++ {
 		positions[i] = (h1 + uint64(i)*h2) % b.m
 	}
-	return positions
+	return positions, nil
 }
 
 var (
@@ -173,26 +181,35 @@ var (
 )
 
 // positions 将 item 的 k 个哈希位转为脚本参数（[]uint64 → []any）。
-func (b *bitmapImpl) positions(item string) []any {
-	hashs := b.hashs(item)
+// 编码失败（不支持类型）随 hashs 一并返回错误。
+func (b *bitmapImpl) positions(item any) ([]any, error) {
+	hashs, err := b.hashs(item)
+	if err != nil {
+		return nil, err
+	}
 	args := make([]any, len(hashs))
 	for i, p := range hashs {
 		args[i] = p
 	}
-	return args
+	return args, nil
 }
 
 // multiPositionsArgs 组装批量脚本参数：ARGV = {k, item1 位…, item2 位…, ...}，
 // 位置按 items 入参顺序展开——脚本按序输出，返回与入参严格对应。
-func (b *bitmapImpl) multiPositionsArgs(items []string) []any {
+// 任一 item 编码失败即返回错误（调用方不得发命令）。
+func (b *bitmapImpl) multiPositionsArgs(items []any) ([]any, error) {
 	args := make([]any, 0, 1+len(items)*int(b.k))
 	args = append(args, b.k)
 	for _, item := range items {
-		for _, p := range b.hashs(item) {
+		hashs, err := b.hashs(item)
+		if err != nil {
+			return nil, err
+		}
+		for _, p := range hashs {
 			args = append(args, p)
 		}
 	}
-	return args
+	return args, nil
 }
 
 // scriptOutcome 是一次位图 Lua 脚本尝试（含入口记忆分派）的处置结论。
@@ -234,8 +251,18 @@ func (b *bitmapImpl) runBitmapScript(ctx context.Context, key string, s *goredis
 	}
 }
 
-func (b *bitmapImpl) add(ctx context.Context, item string) (bool, error) {
-	cmd, outcome := b.runBitmapScript(ctx, b.sharder.keyFor(item), bitmapAddScript, b.positions(item))
+func (b *bitmapImpl) add(ctx context.Context, item any) (bool, error) {
+	// 先编码取路由键（编码失败不发命令）；positions 内部对同一 item 重复
+	// marshal——允许（保持实现简单，编码成本远低于一次网络往返）。
+	data, err := marshalItem(item)
+	if err != nil {
+		return false, err
+	}
+	args, err := b.positions(item)
+	if err != nil {
+		return false, err
+	}
+	cmd, outcome := b.runBitmapScript(ctx, b.sharder.keyFor(data), bitmapAddScript, args)
 	switch outcome {
 	case scriptOK:
 		added, err := cmd.Int()
@@ -266,9 +293,16 @@ func (b *bitmapImpl) add(ctx context.Context, item string) (bool, error) {
 // 新增：任一旧值为 0 → 新增），消除检查与写入之间的 TOCTOU 窗口；判定语义
 // 由"调用前不存在"变为"至少一位原为 0"，在 fallback（非 Lua）路径下等价
 // 且更接近原子。
-func (b *bitmapImpl) addFallback(ctx context.Context, item string) (bool, error) {
-	hashs := b.hashs(item)
-	key := b.sharder.keyFor(item)
+func (b *bitmapImpl) addFallback(ctx context.Context, item any) (bool, error) {
+	hashs, err := b.hashs(item)
+	if err != nil {
+		return false, err
+	}
+	data, err := marshalItem(item)
+	if err != nil {
+		return false, err
+	}
+	key := b.sharder.keyFor(data)
 
 	pipe := b.client.Pipeline()
 	cmds := make([]*goredis.IntCmd, len(hashs))
@@ -292,12 +326,21 @@ func (b *bitmapImpl) addFallback(ctx context.Context, item string) (bool, error)
 	return false, nil
 }
 
-func (b *bitmapImpl) Add(ctx context.Context, item string) (bool, error) {
+func (b *bitmapImpl) Add(ctx context.Context, item any) (bool, error) {
 	return b.add(ctx, item)
 }
 
-func (b *bitmapImpl) exists(ctx context.Context, item string) (bool, error) {
-	cmd, outcome := b.runBitmapScript(ctx, b.sharder.keyFor(item), bitmapExistsScript, b.positions(item))
+func (b *bitmapImpl) exists(ctx context.Context, item any) (bool, error) {
+	// 与 add 同构：先编码取路由键，编码失败不发命令。
+	data, err := marshalItem(item)
+	if err != nil {
+		return false, err
+	}
+	args, err := b.positions(item)
+	if err != nil {
+		return false, err
+	}
+	cmd, outcome := b.runBitmapScript(ctx, b.sharder.keyFor(data), bitmapExistsScript, args)
 	switch outcome {
 	case scriptOK:
 		exists, err := cmd.Int()
@@ -318,12 +361,19 @@ func (b *bitmapImpl) exists(ctx context.Context, item string) (bool, error) {
 
 // existsFallback 非原子回退：k 个 GETBIT 用 pipeline 合并为 1 次往返
 // （命令同落该 item 的分片物理键，同 slot 合法）。任一位置为 0 即不存在。
-func (b *bitmapImpl) existsFallback(ctx context.Context, item string) (bool, error) {
-	hashs := b.hashs(item)
+func (b *bitmapImpl) existsFallback(ctx context.Context, item any) (bool, error) {
+	hashs, err := b.hashs(item)
+	if err != nil {
+		return false, err
+	}
+	data, err := marshalItem(item)
+	if err != nil {
+		return false, err
+	}
 
 	pipe := b.client.Pipeline()
 	cmds := make([]*goredis.IntCmd, len(hashs))
-	key := b.sharder.keyFor(item)
+	key := b.sharder.keyFor(data)
 	for i, pos := range hashs {
 		cmds[i] = pipe.GetBit(ctx, key, int64(pos))
 	}
@@ -342,7 +392,7 @@ func (b *bitmapImpl) existsFallback(ctx context.Context, item string) (bool, err
 	return true, nil
 }
 
-func (b *bitmapImpl) Exists(ctx context.Context, item string) (bool, error) {
+func (b *bitmapImpl) Exists(ctx context.Context, item any) (bool, error) {
 	return b.exists(ctx, item)
 }
 
@@ -353,7 +403,8 @@ func (b *bitmapImpl) Exists(ctx context.Context, item string) (bool, error) {
 // 集群多分片形态：按分片分组、单个 Pipeline 提交 ≤effectiveN 条批量 EVAL，
 // 结果按原始下标回填（见 multiSharded）。
 // 不实现分块：k≤30 已封顶，超大 n 的单次 Lua 阻塞代价见脚本注释声明。
-func (b *bitmapImpl) AddMulti(ctx context.Context, items ...string) ([]bool, error) {
+// 任一 item 编码失败（marshalItem 不支持的类型）→ 返回数据类错误、不发命令。
+func (b *bitmapImpl) AddMulti(ctx context.Context, items ...any) ([]bool, error) {
 	if len(items) == 0 {
 		return nil, nil
 	}
@@ -370,7 +421,7 @@ func (b *bitmapImpl) AddMulti(ctx context.Context, items ...string) ([]bool, err
 
 // ExistsMulti 批量存在性检查：批量 Lua 脚本 / 分片 Pipeline，返回顺序与
 // items 严格对应；失败时逐条降级到 exists（含三态分派与兜底）。空入参早返回。
-func (b *bitmapImpl) ExistsMulti(ctx context.Context, items ...string) ([]bool, error) {
+func (b *bitmapImpl) ExistsMulti(ctx context.Context, items ...any) ([]bool, error) {
 	if len(items) == 0 {
 		return nil, nil
 	}
@@ -386,13 +437,18 @@ func (b *bitmapImpl) ExistsMulti(ctx context.Context, items ...string) ([]bool, 
 // multiViaScript 单物理键批量脚本路径（runBitmapScript 三态分派 + 逐条
 // 降级），standalone 行为与分片化之前逐语句一致（key 为 base；集群退化态
 // 为 base#0，除键名外语义不变）。
-func (b *bitmapImpl) multiViaScript(ctx context.Context, key string, script *goredis.Script, items []string, isAdd bool) ([]bool, error) {
+func (b *bitmapImpl) multiViaScript(ctx context.Context, key string, script *goredis.Script, items []any, isAdd bool) ([]bool, error) {
 	op := "ExistsMulti"
 	if isAdd {
 		op = "AddMulti"
 	}
 
-	cmd, outcome := b.runBitmapScript(ctx, key, script, b.multiPositionsArgs(items))
+	// 参数组装即完成全量编码校验：任一 item 失败返回数据类错误、不发命令。
+	args, err := b.multiPositionsArgs(items)
+	if err != nil {
+		return nil, err
+	}
+	cmd, outcome := b.runBitmapScript(ctx, key, script, args)
 	switch outcome {
 	case scriptOK:
 		vals, err := cmd.Int64Slice()
@@ -436,17 +492,27 @@ func (b *bitmapImpl) multiViaScript(ctx context.Context, key string, script *gor
 //     重跑零副作用）→ 记忆置 -1 并逐条安全重试（与单键降级形态一致）；
 //   - 其余数据类错误原样返回——其他组可能已写入：布隆置位幂等，整体重试
 //     无数据危害（仅重试时"新增"返回值语义失准，见 AddMulti 接口注释）。
-func (b *bitmapImpl) multiSharded(ctx context.Context, script *goredis.Script, items []string, isAdd bool) ([]bool, error) {
+func (b *bitmapImpl) multiSharded(ctx context.Context, script *goredis.Script, items []any, isAdd bool) ([]bool, error) {
 	op := "ExistsMulti"
 	if isAdd {
 		op = "AddMulti"
 	}
 
-	groups := b.sharder.group(items)
+	// group 先统一 marshalItem 得路由字节：任一 item 编码失败即数据类错误
+	// 返回，此时尚未进任何 pipeline，不发命令。
+	groups, err := b.sharder.group(items)
+	if err != nil {
+		return nil, err
+	}
 	pipe := b.client.Pipeline()
 	cmds := make([]*goredis.Cmd, len(groups))
 	for i, g := range groups {
-		cmds[i] = script.Eval(ctx, pipe, []string{g.key}, b.multiPositionsArgs(g.items)...)
+		// group 已完成全量编码校验，此处 error 仅防御性透传。
+		args, err := b.multiPositionsArgs(g.items)
+		if err != nil {
+			return nil, err
+		}
+		cmds[i] = script.Eval(ctx, pipe, []string{g.key}, args...)
 	}
 	if _, err := pipe.Exec(ctx); err != nil && IsUnavailable(err) {
 		return b.fallbackBools(len(items), err)
@@ -498,7 +564,7 @@ func (b *bitmapImpl) multiSharded(ctx context.Context, script *goredis.Script, i
 }
 
 // addMultiLoop 逐条走单条 add；任一条错误即返回（与历史逐条实现语义一致）。
-func (b *bitmapImpl) addMultiLoop(ctx context.Context, items []string) ([]bool, error) {
+func (b *bitmapImpl) addMultiLoop(ctx context.Context, items []any) ([]bool, error) {
 	result := make([]bool, len(items))
 	for i, item := range items {
 		added, err := b.add(ctx, item)
@@ -511,7 +577,7 @@ func (b *bitmapImpl) addMultiLoop(ctx context.Context, items []string) ([]bool, 
 }
 
 // existsMultiLoop 逐条走单条 exists；任一条错误即返回（与历史实现一致）。
-func (b *bitmapImpl) existsMultiLoop(ctx context.Context, items []string) ([]bool, error) {
+func (b *bitmapImpl) existsMultiLoop(ctx context.Context, items []any) ([]bool, error) {
 	result := make([]bool, len(items))
 	for i, item := range items {
 		exists, err := b.exists(ctx, item)

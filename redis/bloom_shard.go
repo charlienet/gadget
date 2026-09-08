@@ -17,9 +17,10 @@ import (
 //     （enabled=false，shardKey 恒返回 base）。
 //   - 物理键 = <base>#<idx>，idx ∈ [0, effectiveN)。开启后即使因容量
 //     收缩到 effectiveN==1（退化态）也统一带 #0 后缀，保持键名连续。
-//   - 路由 idx = xxh3.Hash128(item).Hi % effectiveN（与 bitmap 位哈希
-//     同源 xxh3-128；不引入 CRC16 新实现、不给分片键加 hash tag——
-//     客户端不算 slot，go-redis cluster 按整键自动路由）。
+//   - 路由 idx = xxh3.Hash128(marshalItem(item)).Hi % effectiveN（与 bitmap
+//     位哈希同源 xxh3-128、同一规范字节口径（见 marshal.go）；不引入
+//     CRC16 新实现、不给分片键加 hash tag——客户端不算 slot，go-redis
+//     cluster 按整键自动路由）。
 //   - cfg 总容量是全局量：每分片容量 = ceil(总/effectiveN)，且下限
 //     minShardCapacity，算不出下限即收缩 effectiveN（见
 //     bloomEffectiveShardCount）。
@@ -39,13 +40,14 @@ const (
 // bloomShardKeySep 是分片物理键的索引分隔符：<base>#<idx>。
 const bloomShardKeySep = "#"
 
-// shardIndex 是纯路由函数：idx = xxh3.Hash128(item).Hi % n；n <= 1 恒 0
+// shardIndex 是纯路由函数：idx = xxh3.Hash128(data).Hi % n；n <= 1 恒 0
 // （退化单分片）。无状态、可表驱动单测（确定性/均匀性/模映射）。
-func shardIndex(item string, n int) int {
+// data 是 marshalItem(item) 的编码结果（规范字节，格式冻结见 marshal.go）。
+func shardIndex(data []byte, n int) int {
 	if n <= 1 {
 		return 0
 	}
-	sum := xxh3.Hash128([]byte(item))
+	sum := xxh3.Hash128(data)
 	return int(sum.Hi % uint64(n))
 }
 
@@ -131,18 +133,20 @@ func (s bloomSharder) shardKey(idx int) string {
 	return s.base + bloomShardKeySep + strconv.Itoa(idx)
 }
 
-// indexOf 计算 item 的分片下标；关闭态恒 0（与单键行为一致）。
-func (s bloomSharder) indexOf(item string) int {
+// indexOf 计算路由字节所在的分片下标；关闭态恒 0（与单键行为一致）。
+// data 必须是 marshalItem(item) 的结果（调用方先编码再路由，编码失败
+// 不发命令）。
+func (s bloomSharder) indexOf(data []byte) int {
 	if !s.enabled {
 		return 0
 	}
-	return shardIndex(item, s.n)
+	return shardIndex(data, s.n)
 }
 
-// keyFor 组合路由与键名：item 所在的物理键。单条 Add/Exists 与分组
-// 批量都经此口径，保证同一条目在任何路径落同一分片。
-func (s bloomSharder) keyFor(item string) string {
-	return s.shardKey(s.indexOf(item))
+// keyFor 组合路由与键名：路由字节 data 所在的物理键。单条 Add/Exists 与
+// 分组批量都经此口径，保证同一条目在任何路径落同一分片。
+func (s bloomSharder) keyFor(data []byte) string {
+	return s.shardKey(s.indexOf(data))
 }
 
 // allKeys 列出全部分片物理键（Info 聚合遍历用）。
@@ -160,25 +164,40 @@ func (s bloomSharder) allKeys() []string {
 type shardGroup struct {
 	idx    int
 	key    string
-	items  []string
+	items  []any
 	srcIdx []int
 }
 
 // group 按分片下标对 items 分组，返回按 idx 升序的非空分组。
+// 先对全部 items 统一执行 marshalItem 得路由字节——任何 item 编码失败
+// （不支持类型）即返回错误、不产出分组，调用方据此拒绝发命令（错误是
+// 数据类错误，不会命中 IsUnavailable 兜底）。组内 items 保留原始 any，
+// 供 BF.MADD / 位哈希路径继续使用；允许后续位哈希对同批 item 重复
+// marshal（保持实现简单，编码成本远低于一次网络往返）。
+//
 // 关闭态/单分片只返回一组且 srcIdx 为恒等序列（行为等价原单键批量）；
 // 键名走 shardKey(0)——集群退化态同样得 <base>#0，与单条路径口径一致。
-func (s bloomSharder) group(items []string) []shardGroup {
+func (s bloomSharder) group(items []any) ([]shardGroup, error) {
+	routes := make([][]byte, len(items))
+	for i, item := range items {
+		data, err := marshalItem(item)
+		if err != nil {
+			return nil, err
+		}
+		routes[i] = data
+	}
+
 	if !s.enabled || s.n <= 1 {
 		g := shardGroup{key: s.shardKey(0), items: items, srcIdx: make([]int, len(items))}
 		for i := range items {
 			g.srcIdx[i] = i
 		}
-		return []shardGroup{g}
+		return []shardGroup{g}, nil
 	}
 
 	buckets := make([]shardGroup, s.n)
 	for i, item := range items {
-		idx := shardIndex(item, s.n)
+		idx := shardIndex(routes[i], s.n)
 		g := &buckets[idx]
 		if g.items == nil {
 			g.idx = idx
@@ -194,5 +213,5 @@ func (s bloomSharder) group(items []string) []shardGroup {
 			groups = append(groups, buckets[i])
 		}
 	}
-	return groups
+	return groups, nil
 }

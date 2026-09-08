@@ -86,10 +86,16 @@ func (b *bfCmdImpl) fallbackBools(n int, err error) ([]bool, error) {
 	return res, fallbackErr(err)
 }
 
-func (b *bfCmdImpl) Add(ctx context.Context, item string) (bool, error) {
+func (b *bfCmdImpl) Add(ctx context.Context, item any) (bool, error) {
+	// 先经 marshalItem 得规范字节再路由（编码格式冻结契约见 marshal.go）；
+	// 编码失败（不支持类型）直接返回数据类错误，不发命令、不触发兜底。
+	data, err := marshalItem(item)
+	if err != nil {
+		return false, err
+	}
 	// 集群分片：路由到 base#idx 并惰性 BF.RESERVE（standalone 恒走 base、
 	// 不 reserve，行为与分片化之前一致）。
-	idx := b.sharder.indexOf(item)
+	idx := b.sharder.indexOf(data)
 	key := b.sharder.shardKey(idx)
 	if err := b.reserveShard(ctx, idx); err != nil {
 		if IsUnavailable(err) {
@@ -98,6 +104,9 @@ func (b *bfCmdImpl) Add(ctx context.Context, item string) (bool, error) {
 		return false, err
 	}
 
+	// 命令参数透传原始 item，由 go-redis writer 序列化——其编码与
+	// marshalItem 逐字节对齐（见 marshal.go 与 parity 测试），保证
+	// 路由/位哈希与服务端实际处理的字节同口径。
 	added, err := b.client.BFAdd(ctx, key, item).Result()
 	if err != nil {
 		if IsUnavailable(err) {
@@ -108,10 +117,14 @@ func (b *bfCmdImpl) Add(ctx context.Context, item string) (bool, error) {
 	return added, nil
 }
 
-func (b *bfCmdImpl) Exists(ctx context.Context, item string) (bool, error) {
+func (b *bfCmdImpl) Exists(ctx context.Context, item any) (bool, error) {
+	data, err := marshalItem(item)
+	if err != nil {
+		return false, err
+	}
 	// 只读路径不触发 RESERVE：BF.EXISTS 对不存在的键返回 0（语义即
 	// "不存在"），空分片无需预分配。
-	exists, err := b.client.BFExists(ctx, b.sharder.keyFor(item), item).Result()
+	exists, err := b.client.BFExists(ctx, b.sharder.keyFor(data), item).Result()
 	if err != nil {
 		if IsUnavailable(err) {
 			return b.fallbackBool(err)
@@ -121,27 +134,21 @@ func (b *bfCmdImpl) Exists(ctx context.Context, item string) (bool, error) {
 	return exists, nil
 }
 
-func toInterfaceSlice(items []string) []any {
-	args := make([]any, len(items))
-	for i, v := range items {
-		args[i] = v
-	}
-	return args
-}
-
 // AddMulti 批量添加（BF.MADD）。集群分片下按分片分组、单个 Pipeline 提交
 // ≤effectiveN 条批量命令，结果按原始下标回填（顺序与入参严格对应）；
 // 任一分片组服务不可用 → 整体按 FailPolicy 兜底（禁止混合结果），
 // 数据类错误原样返回（可能已部分写入，置位幂等、重试无害）。
-func (b *bfCmdImpl) AddMulti(ctx context.Context, items ...string) ([]bool, error) {
+// 任一 item 编码失败（不支持类型）→ 整体返回数据类错误、不发命令。
+func (b *bfCmdImpl) AddMulti(ctx context.Context, items ...any) ([]bool, error) {
 	if len(items) == 0 {
 		return nil, nil
 	}
 	return b.multiByShards(ctx, items, true)
 }
 
-// ExistsMulti 批量存在性检查（BF.MEXISTS），分组/回填/兜底规则与 AddMulti 一致。
-func (b *bfCmdImpl) ExistsMulti(ctx context.Context, items ...string) ([]bool, error) {
+// ExistsMulti 批量存在性检查（BF.MEXISTS），分组/回填/兜底/编码校验规则
+// 与 AddMulti 一致。
+func (b *bfCmdImpl) ExistsMulti(ctx context.Context, items ...any) ([]bool, error) {
 	if len(items) == 0 {
 		return nil, nil
 	}
@@ -153,13 +160,20 @@ func (b *bfCmdImpl) ExistsMulti(ctx context.Context, items ...string) ([]bool, e
 // 多分片形态先对各组惰性 BF.RESERVE（一次性命令、无副作用不进管道），再
 // 一个 Pipeline 提交各组 BF.MADD/BF.MEXISTS——go-redis 集群 pipeline 按
 // 节点分组拆分发送，不同 slot 的键不会触发 CROSSSLOT。
-func (b *bfCmdImpl) multiByShards(ctx context.Context, items []string, isAdd bool) ([]bool, error) {
+func (b *bfCmdImpl) multiByShards(ctx context.Context, items []any, isAdd bool) ([]bool, error) {
 	op := "BF.MEXISTS"
 	if isAdd {
 		op = "BF.MADD"
 	}
 
 	if !b.sharder.enabled || b.sharder.n == 1 {
+		// 发送前整体校验编码：任一 item 不支持即数据类错误返回、不发命令
+		// （与分片态 group 的路由编码同口径，保证两形态错误语义一致）。
+		for _, item := range items {
+			if _, err := marshalItem(item); err != nil {
+				return nil, err
+			}
+		}
 		key := b.sharder.shardKey(0) // standalone 即 base；集群退化态为 base#0
 		if err := b.reserveShard(ctx, 0); err != nil {
 			if IsUnavailable(err) {
@@ -170,9 +184,9 @@ func (b *bfCmdImpl) multiByShards(ctx context.Context, items []string, isAdd boo
 		var added []bool
 		var err error
 		if isAdd {
-			added, err = b.client.BFMAdd(ctx, key, toInterfaceSlice(items)...).Result()
+			added, err = b.client.BFMAdd(ctx, key, items...).Result()
 		} else {
-			added, err = b.client.BFMExists(ctx, key, toInterfaceSlice(items)...).Result()
+			added, err = b.client.BFMExists(ctx, key, items...).Result()
 		}
 		if err != nil {
 			if IsUnavailable(err) {
@@ -183,7 +197,12 @@ func (b *bfCmdImpl) multiByShards(ctx context.Context, items []string, isAdd boo
 		return added, nil
 	}
 
-	groups := b.sharder.group(items)
+	// group 内部先统一 marshalItem 得路由字节：任一 item 编码失败即返回
+	// 数据类错误，不发任何命令。
+	groups, err := b.sharder.group(items)
+	if err != nil {
+		return nil, err
+	}
 	for _, g := range groups {
 		if err := b.reserveShard(ctx, g.idx); err != nil {
 			if IsUnavailable(err) {
@@ -197,9 +216,9 @@ func (b *bfCmdImpl) multiByShards(ctx context.Context, items []string, isAdd boo
 	cmds := make([]*goredis.BoolSliceCmd, len(groups))
 	for i, g := range groups {
 		if isAdd {
-			cmds[i] = pipe.BFMAdd(ctx, g.key, toInterfaceSlice(g.items)...)
+			cmds[i] = pipe.BFMAdd(ctx, g.key, g.items...)
 		} else {
-			cmds[i] = pipe.BFMExists(ctx, g.key, toInterfaceSlice(g.items)...)
+			cmds[i] = pipe.BFMExists(ctx, g.key, g.items...)
 		}
 	}
 	if _, err := pipe.Exec(ctx); err != nil && IsUnavailable(err) {

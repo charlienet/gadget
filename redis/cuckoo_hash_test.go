@@ -9,16 +9,14 @@ import (
 	mini "github.com/charlienet/gadget/redis/test/mini"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/zeebo/xxh3"
 )
 
-// cuckooFingerprint 复刻 hashImpl 的指纹计算（fnv1a & 0xFFFF，0 取 1），
-// 供测试区分"放错位置"与"驱逐丢失"。
+// cuckooFingerprint 复刻 hashImpl 的指纹计算（xxh3.Hash & 0xFFFF，0 取 1），
+// 供测试区分"放错位置"与"驱逐丢失"。string 入参经 marshalItem 与
+// []byte(item) 同字节（见 marshal.go），故此处直接取字节。
 func cuckooFingerprint(item string) int64 {
-	h := uint64(14695981039346656037)
-	for i := 0; i < len(item); i++ {
-		h ^= uint64(item[i])
-		h *= 1099511628211
-	}
+	h := xxh3.Hash([]byte(item))
 	fp := int64(h & 0xFFFF)
 	if fp == 0 {
 		fp = 1

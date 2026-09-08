@@ -210,6 +210,35 @@ info, err := bf.Info(ctx)                     // 元数据（bitmap 路径 NumIt
 BF.MADD 语义；不分块，超大 n 时单次脚本的 O(n·k) 服务端执行代价由调用方
 控制批量大小）。可用 rdb.Capability().HasBloom() 预检模块是否加载。
 
+**item 参数类型（any）与序列化冻结契约**：`Add/Exists/AddMulti/ExistsMulti`
+的 item 是 `any`，位哈希与集群分片路由前统一编码为规范字节。支持的类型
+白名单（与 go-redis `internal/proto/writer.go` 逐类型一致）：
+
+| 类型 | 编码字节 |
+|---|---|
+| `nil` | 空 |
+| `string` / `[]byte` | 原样字节 |
+| `int`/`int8`/`int16`/`int32`/`int64`、`uint`/`uint8`/`uint16`/`uint32`/`uint64` | 十进制文本（`-42`、`255`） |
+| `float32` / `float64` | 最短十进制浮点（`float64(1.0)`→`1`；float32 先转 float64 再格式化） |
+| `bool` | `"1"` / `"0"`（**不是** `true`/`false` 文本） |
+| `time.Time` | RFC3339Nano 文本 |
+| `time.Duration` | 纳秒整数文本（`time.Second`→`1000000000`） |
+| `net.IP` | 原始字节（4 或 16 字节 v4-in-v6；不文本化、不做 To4 归一） |
+| `encoding.BinaryMarshaler` | `MarshalBinary()` 结果原样透传 |
+
+其余类型——含**指针变体**（`*string`、`*int` 等，与 go-redis writer 的有意
+差异）、struct、map、slice——返回数据类错误
+`redis: can't marshal %T (implement encoding.BinaryMarshaler)`：不 panic、
+不触发 FailPolicy 兜底、不发命令。
+
+该编码格式**冻结**：BF.*/CF.* 路径由 go-redis 序列化原始 item 发往服务端，
+bitmap 与 Lua cuckoo 回退路径由客户端 `marshalItem` 编码后哈希，两者必须
+同字节，否则同一 item 会随实现路径落到不同的位/分片。回归防线
+`marshal_writer_parity_test.go` 把每个金表值经真实 go-redis 链路写入
+miniredis 再取回逐字节对照，go-redis 升级导致格式漂移时该测试必红。
+**存量过滤器数据的有效性依赖此格式永久不变**——任何改变编码结果的调整都属
+BREAKING，须升主版本并附"重建过滤器"迁移方案。
+
 Lua 能力记忆与降级兜底：EVAL 失败按错误类别三态记忆（连接级共享，
 未知/支持/不支持）——仅"命令不存在/被禁"类（代理屏蔽、ACL 禁用等）
 永久记住不支持、此后跳过 EVAL；服务瞬态错误（抖动/断连）不改写记忆、
@@ -317,6 +346,15 @@ n=1）时不分片，键名与行为完全不变。`WithCapacity` 在分片下�
 
 `REDIS_CLUSTER` 为完整 URL 格式（密码写在 userinfo）：`redis://:pass@host1:7001,host2:7002`；单机/哨兵的 `REDIS_URL` 同形式，如 `redis://:pass@host:6379`。
 
+**BREAKING（v0.7.0）过滤器 item 参数 string→any**：`BloomFilter` 的
+`Add/Exists/AddMulti/ExistsMulti` 与 `CuckooFilter` 的 `Add/Exists/Del`
+参数类型由 `string` 改为 `any`（支持类型清单与序列化冻结契约见上文
+布隆章节）。对**调用方兼容**——原有 string 实参无需任何改动，且同一
+string/[]byte 值的哈希结果与升级前逐位一致；对**自行实现接口的调用方
+（测试 mock、装饰器）是破坏性变更**，须同步把方法签名改为 `item any` /
+`items ...any`。不支持的类型返回数据类错误（`redis: can't marshal ...`）
+而非 panic，且不落入 FailPolicy 兜底判定。
+
 
  布谷鸟过滤器（双实现，无需 RedisBloom 模块）：
 
@@ -334,7 +372,23 @@ cf.Info(ctx)              // 元数据
 （field=桶索引，value=桶内指纹数组）、模加候选桶 + 方向位驱逐链保证
 **插入成功的元素必可命中（无假阴性）**；驱逐置换与 CF.ADD 语义对齐
 （超容量时 Add 返回 false，元素可能被驱逐丢失，属 cuckoo 正常行为）。
-可用 rdb.Capability().HasCuckoo() 预检模块是否加载。
+可用 rdb.Capability().HasCuckoo() 预检模块是否加载。item 参数同样是 `any`，
+支持类型清单与序列化冻结契约见上文布隆章节（回退版的指纹/桶索引由
+`marshalItem(item)` 的规范字节导出）。
+
+**BREAKING（v0.7.0）回退版主哈希换源 fnv1a→xxh3-64**：Lua 回退实现
+（hashImpl）的指纹 `fp` 与候选桶 `i1` 的主哈希由 `fnv1a`（FNV-1a 64 位）换
+为 `xxh3.Hash`（xxh3-64）；`i2` 的派生公式（乘法哈希 + 模加）与 CF.*
+（RedisBloom 模块）路径均不受影响。动机有二：xxh3 吞吐显著高于 FNV-1a；
+FNV-1a 低位雪崩质量差——`i1 = h % numBuckets` 在 numBuckets 为 2 的幂时
+只取低位、桶分布偏斜，`fp = h & 0xFFFF` 同样受低位相关性影响而聚集，
+xxh3-64 全位雪崩均匀修正该偏斜。
+
+代价是**存量数据不可读**：旧哈希写入的回退版过滤器在新版本下条目定位口径
+变了，表现为 `Exists` 假 miss、`Del` 失效（不是误判率变化，而是查错桶）。
+**升级后请重建存量 Lua cuckoo 过滤器**：`Del` 旧 key 后重新灌入，或直接换
+新 key 灰度切换。判断是否受影响：仅 `HasCuckoo()==false`（未部署 RedisBloom
+cuckoo 模块）时使用的回退版过滤器需要重建，模块版 CF.* 的存量数据无需处理。
 
 
 go-redis 升级回归提醒
