@@ -22,6 +22,20 @@ func IsNotFound(err error) bool {
 	return errors.Is(err, NotFound)
 }
 
+// IsNoGroup 判断 err 是否为 Stream 消费者组不存在错误（NOGROUP：group 或 stream 不存在），
+// 命中时应（重新）创建消费组后继续消费。识别 go-redis 类型化错误，含 KVRocks 的
+// "ERR " 前缀形态。应用层无需引入 github.com/redis/go-redis/v9。
+func IsNoGroup(err error) bool {
+	return redis.HasErrorPrefix(err, "NOGROUP")
+}
+
+// IsTxFailed 判断 err 是否为 Redis 事务（TxPipeline）WATCH 乐观锁冲突导致的失败
+// （EXEC 时键被并发修改，go-redis TxFailedErr）。命中时应重放整个事务逻辑重试。
+// 支持 %w 包装链。应用层无需引入 github.com/redis/go-redis/v9。
+func IsTxFailed(err error) bool {
+	return errors.Is(err, redis.TxFailedErr)
+}
+
 var _ Client = &redisClient{}
 
 type Client interface {

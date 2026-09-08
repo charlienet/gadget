@@ -242,7 +242,7 @@ func (s *streamListener) watch() {
 		if err != nil {
 			// group 可能尚未创建（例如直接使用 listener 未经过 Initialize），
 			// 检测 NOGROUP 后按需创建（MKSTREAM 确保 stream 存在）
-			if goredis.HasErrorPrefix(err, "NOGROUP") {
+			if redis.IsNoGroup(err) {
 				if cerr := rdb.XGroupCreateMkStream(context.Background(), s.stream, s.group, "0").Err(); cerr == nil {
 					// group/stream 已按需建立：消费链路可用，触发就绪
 					s.markReady()

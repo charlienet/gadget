@@ -830,3 +830,35 @@ func TestIsNotFound(t *testing.T) {
 	assert.False(t, redis.IsNotFound(nil), "nil 不应命中 IsNotFound")
 	assert.False(t, redis.IsNotFound(errors.New("connection refused")), "其他错误不应命中 IsNotFound")
 }
+
+// goredisErr 构造实现 go-redis Error 接口的类型化错误，
+// 模拟服务端返回的带前缀错误（HasErrorPrefix 要求类型命中，纯文本 errors.New 不算）。
+type goredisErr string
+
+func (e goredisErr) Error() string { return string(e) }
+func (e goredisErr) RedisError()   {}
+
+// TestIsNoGroup 验证 NOGROUP（Stream 消费组不存在）判定：
+// 类型化错误与 KVRocks "ERR " 前缀形态命中；非 NOGROUP 类型化错误与纯文本不命中。
+func TestIsNoGroup(t *testing.T) {
+	assert.True(t, redis.IsNoGroup(goredisErr("NOGROUP No such key 's' or consumer group 'g'")),
+		"原始 NOGROUP 应命中")
+	assert.True(t, redis.IsNoGroup(fmt.Errorf("xreadgroup: %w", goredisErr("NOGROUP No such key 's'"))),
+		"包装链 NOGROUP 应命中")
+	assert.True(t, redis.IsNoGroup(goredisErr("ERR NOGROUP no such group")),
+		"KVRocks ERR 前缀形态应命中")
+
+	assert.False(t, redis.IsNoGroup(nil), "nil 不应命中")
+	assert.False(t, redis.IsNoGroup(goredis.Nil), "Nil 不应命中")
+	assert.False(t, redis.IsNoGroup(errors.New("NOGROUP plain text")), "未实现 Error 接口的纯文本不应命中（与 go-redis HasErrorPrefix 行为一致）")
+}
+
+// TestIsTxFailed 验证 WATCH 事务冲突（TxFailedErr）判定，含 %w 包装链。
+func TestIsTxFailed(t *testing.T) {
+	assert.True(t, redis.IsTxFailed(goredis.TxFailedErr), "原始 TxFailedErr 应命中")
+	assert.True(t, redis.IsTxFailed(fmt.Errorf("exec: %w", goredis.TxFailedErr)), "包装链应命中")
+
+	assert.False(t, redis.IsTxFailed(nil), "nil 不应命中")
+	assert.False(t, redis.IsTxFailed(goredis.Nil), "Nil 不应命中")
+	assert.False(t, redis.IsTxFailed(errors.New("EXECABORT unknown")), "其他错误不应命中")
+}
