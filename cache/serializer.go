@@ -30,6 +30,20 @@ func (jsonSerializer) Marshal(v any) ([]byte, error) {
 	return sonic.ConfigStd.Marshal(v)
 }
 
+// unmarshalAny 将 data 经 s 解码为任意值（any），是 GetMulti 等「无已知目标类型」
+// 读取路径的统一入口：与主读路径（respond → s.Unmarshal）、写入路径
+// （Put/SetMulti → s.Marshal）共用同一 Serializer 编解码规则，消除编码不一致。
+// 解码失败时回退 string(data)，保留对非法 JSON 数据（如 Marshal 对 []byte 裸存的
+// 字节串）的兼容语义，保证存量数据读取行为不变。error 当前恒为 nil（失败已被回退
+// 消化），签名保留以贴合 Go 惯例并为自定义 Serializer 实现留上报通道。
+func unmarshalAny(s Serializer, data []byte) (any, error) {
+	var v any
+	if err := s.Unmarshal(data, &v); err != nil {
+		return string(data), nil
+	}
+	return v, nil
+}
+
 func (jsonSerializer) Unmarshal(b []byte, v any) error {
 	if len(b) == 0 {
 		return nil

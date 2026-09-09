@@ -30,7 +30,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -290,9 +289,11 @@ func New(opts ...Option) *cache {
 
 // GetMulti retrieves multiple keys at once. Uses the store's BulkStore
 // interface if available, otherwise falls back to individual Get calls.
-// Returns a map of deserialized values. Values are deserialized using the
-// standard encoding/json library, so they will be the types that json.Unmarshal
-// produces (float64 for numbers, string for quoted strings, etc.).
+// Returns a map of deserialized values. Values are deserialized through the
+// cache's Serializer (the same codec entry as the single-key read path), so
+// they will be the types the serializer produces (float64 for numbers, string
+// for quoted strings, etc.); data that cannot be decoded (e.g. bare []byte
+// stored by Marshal) falls back to the raw string.
 // 并发语义：内部逐 key 走 getFromCache（与 Get 同 key 空间、同一 singleflight
 // 合并去重）；与 Getfn 混合并发同一 key 时同样受限（不同 singleflight key，
 // 可能各自查询 remote），请统一使用同一种 API。
@@ -321,10 +322,10 @@ func (c *cache) GetMulti(ctx context.Context, keys ...string) (map[string]any, e
 			if err != nil {
 				return nil, err
 			}
-			var v any
-			if err := json.Unmarshal(plain, &v); err != nil {
-				// Fall back to raw string for serializer-optimized bare strings
-				v = string(plain)
+			// 统一经 Serializer 解码为任意值（与主读路径同一编解码入口）
+			v, err := unmarshalAny(c.serializer, plain)
+			if err != nil {
+				return nil, err
 			}
 			result[key] = v
 			hit[key] = true
@@ -339,9 +340,9 @@ func (c *cache) GetMulti(ctx context.Context, keys ...string) (map[string]any, e
 				return nil, err
 			}
 			if exist && !c.isEmptyObject(data) {
-				var v any
-				if err := json.Unmarshal(data, &v); err != nil {
-					v = string(data)
+				v, err := unmarshalAny(c.serializer, data)
+				if err != nil {
+					return nil, err
 				}
 				result[key] = v
 			}
@@ -350,17 +351,16 @@ func (c *cache) GetMulti(ctx context.Context, keys ...string) (map[string]any, e
 	}
 
 	for _, key := range keys {
-		// Use single Get to properly deserialize through the known-type pathway
-		// where possible. For the map[string]any return type, we use json.Unmarshal.
+		// 与 Get 同一取数路径（getFromCache：L1/L2/singleflight），值统一经
+		// Serializer 解码为任意值（与主读路径同一编解码入口）。
 		data, exist, err := c.getFromCache(ctx, key, 0)
 		if err != nil {
 			return nil, err
 		}
 		if exist && !c.isEmptyObject(data) {
-			var v any
-			if err := json.Unmarshal(data, &v); err != nil {
-				// Fall back to raw string for serializer-optimized bare strings
-				v = string(data)
+			v, err := unmarshalAny(c.serializer, data)
+			if err != nil {
+				return nil, err
 			}
 			result[key] = v
 		}
