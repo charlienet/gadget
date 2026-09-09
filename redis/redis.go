@@ -52,7 +52,7 @@ type Client interface {
 	Capability() *Capability                                                                  // 能力探测（版本、模块等）
 	NewBloomFilter(key string, opts ...BloomOption) BloomFilter                               // 创建布隆过滤器（自动选择 BF.* 或 bitmap 实现）
 	NewBloomFilterWithEstimate(key string, capacity int64, falsePositive float64) BloomFilter // 等价于 NewBloomFilter(key, WithCapacity(n), WithFalsePositive(p))。
-	NewCuckooFilter(key string, opts ...CuckooOption) *CuckooFilter                           // 创建布谷鸟过滤器（需 RedisBloom cuckoo 模块）
+	NewCuckooFilter(key string, opts ...CuckooOption) *CuckooFilter                           // 创建布谷鸟过滤器：服务器有 RedisBloom cuckoo 模块走 CF.* 命令，无则自动回退 Redis Hash+Lua 实现（按能力分派）
 	NewDelayedQueue(key string, opts ...QueueOption) *DelayedQueue                            // 创建延迟队列（ZSET 实现）
 	NewRateLimiter(name string, opts ...RateLimiterOption) *RateLimiter                       // 创建限流器（按名称隔离限流 key 空间，空名称不隔离）；已弃用，见 ratelimit 模块，为兼容保留于接口
 	NewLeakyBucket(name string, opts ...LeakyBucketOption) *LeakyBucket                       // 创建漏桶限流器（恒定输出速率、拒绝突发；name 隔离同限流器）；已弃用，见 ratelimit 模块，为兼容保留于接口

@@ -1,6 +1,7 @@
 package redis
 
 import (
+	"context"
 	"strconv"
 
 	"github.com/zeebo/xxh3"
@@ -156,6 +157,44 @@ func (s bloomSharder) allKeys() []string {
 		keys[i] = s.shardKey(i)
 	}
 	return keys
+}
+
+// resetBloomKeys 清空过滤器的全部物理键（BloomFilter.Reset 的共享底层，
+// bfCmdImpl 与 bitmapImpl 复用，保证两路径清空行为一致）：
+//   - 单键形态（未分片，含集群退化态 n=1）：一条 DEL <base>，Redis 单命令原子；
+//   - 分片形态：逐键各发一条单 key DEL 经同一 Pipeline 提交——禁止把多键
+//     合成一条多 key DEL 命令（跨 slot 触发 CROSSSLOT 报错；go-redis 集群
+//     pipeline 按节点拆分发送，与 AddMulti/ExistsMulti 分片批量同模式）。
+//     跨 slot 无法原子，失败时可能只清空部分分片；DEL 幂等，可安全重试。
+//
+// 键名经 sharder 生成本库口径（未加前缀，前缀由 renameHook 在命令层统一
+// 补，见 shardKey 注释）；DEL 对不存在的键计 0、返回 nil（幂等）。
+// 失败恒返回错误、不走 FailPolicy 兜底（清空结果不可用假象掩盖）：
+// Unavailable 类经 fallbackErr 包装（errors.Is(ErrRedisUnavailable) 可
+// 感知），其余数据类错误原样返回——对照包内既有错误分流惯例。
+func resetBloomKeys(ctx context.Context, client *redisClient, s bloomSharder) error {
+	keys := s.allKeys()
+	if !s.enabled || len(keys) == 1 {
+		if err := client.Del(ctx, keys[0]).Err(); err != nil {
+			if IsUnavailable(err) {
+				return fallbackErr(err)
+			}
+			return err
+		}
+		return nil
+	}
+
+	pipe := client.Pipeline()
+	for _, key := range keys {
+		pipe.Del(ctx, key) // 每分片独立一条 DEL 命令（单 key，规避 CROSSSLOT）
+	}
+	if _, err := pipe.Exec(ctx); err != nil {
+		if IsUnavailable(err) {
+			return fallbackErr(err)
+		}
+		return err
+	}
+	return nil
 }
 
 // shardGroup 是落入同一分片的 item 分组。srcIdx 记录组内每个 item 在

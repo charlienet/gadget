@@ -618,6 +618,36 @@ func (b *bitmapImpl) Info(ctx context.Context) (*BloomInfo, error) {
 	return agg, nil
 }
 
+// Card 逐分片 BITCOUNT 后对**每个分片独立** estimateNumItems 再求和。
+// 禁止先把各分片置位数合并成总数再估算——m/k 是每分片口径，合并计数会让
+// 估计量系统性失真（去重口径与误差声明见 BloomFilter.Card 接口注释；
+// StrLen 只服务 Info 的 Size 字段，Card 不需要）。
+// 服务不可用返回 (0, fallbackErr)——观测类方法不随 FailPolicy 分叉；
+// 数据类错误原样返回（对齐 Info 的既有分流）。
+func (b *bitmapImpl) Card(ctx context.Context) (int64, error) {
+	var sum int64
+	for _, key := range b.sharder.allKeys() {
+		bitsSet, err := b.client.BitCount(ctx, key, nil).Result()
+		if err != nil {
+			if IsUnavailable(err) {
+				return 0, fallbackErr(err)
+			}
+			return 0, err
+		}
+		sum += b.estimateNumItems(bitsSet) // 每分片独立估算后求和
+	}
+	return sum, nil
+}
+
+// Reset 清空 bitmap 路径的全部物理键（DEL，共享层见 resetBloomKeys）：
+// 不做逐位归零，直接删键——位图不存在时 SETBIT 天然从空串重建，m/k
+// 布局是实例构造期常量、Reset 不触碰（语义与限制见 BloomFilter.Reset
+// 接口注释）。Info 口径下位图键不存在时 StrLen/BITCOUNT 天然返回 0
+// （非 not-found 错误），NumItems 归零。
+func (b *bitmapImpl) Reset(ctx context.Context) error {
+	return resetBloomKeys(ctx, b.client, b.sharder)
+}
+
 // estimateNumItems 由置位数反推已插入元素数（标准 Bloom filter 估计量）：
 //
 //	numItems ≈ -(m / k) * ln(1 - bitsSet / m)

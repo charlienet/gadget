@@ -16,8 +16,11 @@ import (
 //
 // 容量契约（bitmap 路径）：容量在创建时固定，位图不会扩容。插入量超过
 // 预估容量后误判率单调恶化且不可恢复（布隆无删除语义），属应用端容量
-// 规划责任；对策为预留充足容量、周期性重建，或部署 RedisBloom 模块
-// （BF.* 路径支持自动扩容）。
+// 规划责任；对策为预留充足容量、周期性重建（新实例换新键，或 Reset 就地
+// 清空复用同一实例），或部署 RedisBloom 模块（BF.* 路径支持自动扩容）。
+// Reset 在集群分片下非原子（见 Reset 方法注释）。本库不封装 BF.INSERT：
+// 预分配一律经 WithCapacity/WithEstimate 惰性 RESERVE；bitmap 回退路径
+// 首写天然 autocreate。
 //
 // 集群分片（Redis Cluster）：默认关闭。经 NewBloomFilter 显式组合
 // WithShardCount(n>1)、且 Mode()==ModeCluster 时，把过滤器打散为多个
@@ -71,15 +74,50 @@ type BloomFilter interface {
 	// Info returns metadata about the Bloom filter. 聚合所有分片键的
 	// 元数据（Size/Capacity/NumItems 为求和）。
 	Info(ctx context.Context) (*BloomInfo, error)
+
+	// Card 返回过滤器中不同元素数量的估计值（去重基数，对齐 BF.CARD 语义）。
+	//
+	// 与 Info().NumItems 的区别：NumItems 是插入口径（BF.* 路径含重复插入
+	// 计数），Card 是去重口径。返回值是近似估计，两路径估计器不同、误差无
+	// 统一上界承诺，仅作观测，勿做精确业务计数。键不存在返回 0。分片模式
+	// 为全分片求和。
+	//
+	// 误差声明：bitmap 路径由置位数反推（与 Info.NumItems 同源估计量），
+	// 位图饱和时钳制到容量上界（估计失效）；BF.* 路径为模块内概率基数
+	// 计数器。
+	//
+	// 成本：与 Info 同级重命令（分片 ×N 往返 / BITCOUNT 全量扫描），勿入
+	// 热路径。
+	//
+	// 服务不可用时返回 (0, ErrRedisUnavailable 哨兵)（errors.Is 可感知），
+	// 不随 FailPolicy 分叉——观测类方法无"放行"概念。
+	Card(ctx context.Context) (int64, error)
+
+	// Reset 清空过滤器的全部物理键，计数归零，实例约束（容量/FPR）不变；
+	// bfCmdImpl 分片模式下后续首次写入会重新惰性执行 BF.RESERVE。
+	//
+	// 语义与限制：
+	//   - 单键形态（未分片）：DEL <base>，Redis 单命令原子。
+	//   - 集群分片：逐分片 DEL <base>#<idx>——跨 slot 无法原子，返回错误时
+	//     可能只清空部分分片；DEL 幂等，可安全重试直至成功。
+	//   - 幂等：分片键不存在时返回 nil（对齐 Redis DEL 语义）。
+	//   - 并发：与 Add/Exists 无全序保证，读者可能观察到旧存在性或中间态；
+	//     需要强一致清空的场景请改用全新键 + 指针原子替换。
+	//   - 失败恒返回错误（errors.Is(ErrRedisUnavailable) 可感知），
+	//     与 FailPolicy 取值无关。
+	//   - Reset 删除整个键——勿与布隆过滤器共用键。
+	Reset(ctx context.Context) error
 }
 
 // BloomInfo contains metadata about a Bloom filter.
+// bitmap 回退版仅 Capacity/Size/NumItems 有效，NumFilters/Expansion
+// 恒 0（不适用）。
 type BloomInfo struct {
 	Capacity   int64 // configured capacity
 	Size       int64 // memory size (bytes)
-	NumFilters int64 // number of filters (BF.* only)
+	NumFilters int64 // number of filters (仅 BF.* 路径有效，bitmap 回退版恒 0)
 	NumItems   int64 // approximate number of items
-	Expansion  int64 // expansion factor (BF.* only)
+	Expansion  int64 // expansion factor (仅 BF.* 路径有效，bitmap 回退版恒 0)
 }
 
 // --- Options ---
@@ -91,8 +129,7 @@ type bloomConfig struct {
 	failPolicyConfig
 	capacity      int64
 	falsePositive float64
-	shardCount    int       // 集群分片数（默认 1=关闭；仅 ModeCluster 且 n>1 生效；<=0 非法值被忽略）
-	impl          BloomImpl // 强制实现路径（零值 BloomImplAuto=按探测自动选）
+	shardCount    int // 集群分片数（默认 1=关闭；仅 ModeCluster 且 n>1 生效；<=0 非法值被忽略）
 }
 
 // BloomConfig 是 BloomFilter 的配置类型别名，供 WithFailPolicy 泛型参数使用。
@@ -147,36 +184,12 @@ func WithShardCount(n int) BloomOption {
 	}
 }
 
-// BloomImpl 强制 BloomFilter 的实现路径（WithBloomImpl 参数）。
-type BloomImpl uint8
-
-const (
-	// BloomImplAuto 按能力探测自动选择：HasBloom() 为真走 BF.*（RedisBloom
-	// 原生命令），否则走 bitmap（Lua/pipeline 回退）。**默认零值**，生产建议。
-	BloomImplAuto BloomImpl = iota
-	// BloomImplBF 强制 BF.* 路径：跳过探测直接选定 bfCmdImpl。服务器未加载
-	// bf 模块时命令直接报错并原样返回，**不自动降级**。
-	BloomImplBF
-	// BloomImplBitmap 强制 bitmap 路径：跳过探测恒走 Lua/pipeline 实现。
-	BloomImplBitmap
-)
-
-// WithBloomImpl 强制 BloomFilter 走指定实现路径，未设置（BloomImplAuto
-// 零值）时按 Capability.HasBloom() 探测结果自动选择。主要用于测试/对照：
-// 在同一 Redis 实例上分别强制 BF.* 与 bitmap 两条路径做 A/B 验证，或
-// 排除集成测试中的分派随机性。生产建议保留 auto。
-// 越界值（未定义枚举）按 auto 处理。
-func WithBloomImpl(impl BloomImpl) BloomOption {
-	return func(c *bloomConfig) {
-		c.impl = impl
-	}
-}
-
 // --- Factory ---
 
 // NewBloomFilter creates a BloomFilter for the given key. The implementation
-// is auto-selected based on the server's capabilities; WithBloomImpl 可跳过
-// 探测强制选定 BF.* 或 bitmap 路径。
+// is auto-selected based on the server's capabilities（HasBloom() 为真走
+// BF.*，否则走 bitmap 回退；不提供强制路径旋钮，两路径数据布局不互通，
+// 双路径对照用两个不同 key 分别灌入）。
 // 失效兜底策略默认 FailOpen（服务不可用时放行业务）；可用 WithFailPolicy
 // 显式改为 FailClosed。
 // 集群分片默认关闭；Mode()==ModeCluster 且显式 WithShardCount(n>1) 时打散
@@ -189,19 +202,10 @@ func (rdb *redisClient) NewBloomFilter(key string, opts ...BloomOption) BloomFil
 		o(&cfg)
 	}
 
-	switch cfg.impl {
-	case BloomImplBF:
-		// 强制 BF.*：不触发 HasBloom() 探测（不发 INFO 能力查询）
+	if rdb.cap.HasBloom() {
 		return rdb.newBFImpl(key, cfg)
-	case BloomImplBitmap:
-		// 强制 bitmap：同样跳过能力探测
-		return newBitmapImpl(rdb, key, cfg)
-	default: // BloomImplAuto 及越界值回落
-		if rdb.cap.HasBloom() {
-			return rdb.newBFImpl(key, cfg)
-		}
-		return newBitmapImpl(rdb, key, cfg)
 	}
+	return newBitmapImpl(rdb, key, cfg)
 }
 
 // NewBloomFilterWithEstimate creates a BloomFilter with explicit capacity and
@@ -214,8 +218,7 @@ func (rdb *redisClient) NewBloomFilter(key string, opts ...BloomOption) BloomFil
 // RedisBloom 服务端默认容量自动创建，capacity/falsePositive 仅影响
 // bitmap 路径的 m/k 布局。
 //
-// 需要强制实现路径（WithBloomImpl）、分片数、兜底策略等选项时，直接
-// 走 NewBloomFilter 组合对应 Option。
+// 需要分片数、兜底策略等选项时，直接走 NewBloomFilter 组合对应 Option。
 func (rdb *redisClient) NewBloomFilterWithEstimate(key string, capacity int64, falsePositive float64) BloomFilter {
 	return rdb.NewBloomFilter(key,
 		WithCapacity(capacity),
