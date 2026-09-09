@@ -148,6 +148,7 @@ c.Delete(ctx, "key")
 | Option | 说明 |
 |--------|------|
 | `WithSerializer(s)` | 自定义序列化器（默认 JSON） |
+| `WithCipher(c)` | 注入透明加解密器（默认不加密，详见"透明加解密 (Cipher)"） |
 | `WithName(name)` | 缓存实例名称（用于存储前缀） |
 | `WithLogger(l)` | 日志记录器 |
 | `WithTTLJitter(d)` | TTL 随机抖动范围（默认开启 0~30s；`WithTTLJitter(0)` 关闭） |
@@ -252,6 +253,176 @@ c.SetMulti(ctx, map[string]any{
     "y": "value2",
 }, 60)
 ```
+
+## 透明加解密 (Cipher)
+
+库不内置加密实现（不绑定密钥来源与算法选型），但提供完整注入通道：应用实现
+`Cipher` 接口并经 `WithCipher` 注入后，L1/L2 中存储的都是密文，`Put`/`Get`/
+`Getfn`/`GetMulti`/`SetMulti` 全路径对调用方透明（明文进出）。
+
+```go
+type Cipher interface {
+    Encrypt(plaintext []byte) ([]byte, error) // 序列化后的字节 → 密文
+    Decrypt(ciphertext []byte) ([]byte, error) // 密文 → 序列化后的字节
+}
+
+c := cache.New(
+    cache.WithMemStore(),
+    cache.WithStore(redisStore),
+    cache.WithCipher(myCipher), // nil 被忽略，默认不加密
+)
+```
+
+### 格式与边界契约
+
+| 契约 | 说明 |
+|------|------|
+| 存储布局 | `[9B 版本头] + [密文]`：版本头在 `Encrypt` 之后包裹、不参与加密，版本同步机制可在不解密的状态下比较时间戳 |
+| 加密时机 | `Marshal → Encrypt → Store` / `Store → Decrypt → Unmarshal`，加密作用于序列化后的最终字节，L1/L2 统一存密文，不存在某层明文 |
+| 空值占位符 | 防穿透占位符 `*` 不加密、明文存储（seal/unseal 双侧短路） |
+| 并发性 | 同一 Cipher 实例可能被多 goroutine 并发调用，实现必须并发安全 |
+| 失败语义 | 单个 key 解密失败返回 error（不影响同批其他 key），下一次回源自愈 |
+
+### 参考实现：AES-GCM + 多密钥轮换（已验证）
+
+密钥轮换通过"密文自带 1 字节 keyID"实现：`Encrypt` 恒用当前密钥，`Decrypt` 按
+keyID 选钥，轮换期间新旧密钥并存，存量密文照常可读。以下实现已通过编译与
+往返/轮换/篡改拒绝测试（`crypto/aes` + `cipher.GCM`，纯标准库，零新依赖）。
+
+```go
+// RotatingCipher 实现 cache.Cipher 接口：AES-GCM + 多密钥轮换。
+// 密文格式：[1B keyID][12B nonce][GCM 密文+tag]。
+type RotatingCipher struct {
+    mu      sync.RWMutex
+    current uint8
+    keys    map[uint8][]byte // keyID → AES 密钥（16/24/32 字节）
+}
+
+// keyID 0 保留为"非本实现密文"哨兵，有效密钥 id 为 1~12。
+func New(current uint8, keys map[uint8][]byte) (*RotatingCipher, error) {
+    if current == 0 || current > 12 {
+        return nil, fmt.Errorf("mycipher: current key id %d out of range 1..12", current)
+    }
+    if len(keys) == 0 {
+        return nil, errors.New("mycipher: keys must not be empty")
+    }
+    for id, k := range keys {
+        if id == 0 {
+            return nil, errors.New("mycipher: key id 0 is reserved")
+        }
+        switch len(k) {
+        case 16, 24, 32:
+        default:
+            return nil, fmt.Errorf("mycipher: invalid AES key length %d for id %d", len(k), id)
+        }
+    }
+    if _, ok := keys[current]; !ok {
+        return nil, fmt.Errorf("mycipher: current key id %d missing", current)
+    }
+    m := make(map[uint8][]byte, len(keys))
+    for id, k := range keys {
+        m[id] = append([]byte(nil), k...)
+    }
+    return &RotatingCipher{current: current, keys: m}, nil
+}
+
+// Rotate 切换 Encrypt 使用的密钥（新钥写入并设为当前）；旧钥保留仍可解密。
+func (r *RotatingCipher) Rotate(newID uint8, newKey []byte) error {
+    switch len(newKey) {
+    case 16, 24, 32:
+    default:
+        return fmt.Errorf("mycipher: invalid AES key length %d", len(newKey))
+    }
+    r.mu.Lock()
+    defer r.mu.Unlock()
+    r.keys[newID] = append([]byte(nil), newKey...)
+    r.current = newID
+    return nil
+}
+
+// Retire 摘除旧钥。仅当该钥加密的所有缓存数据都已过期（等待时长 > 实例最大
+// TTL）后才可调用，否则存量密文将永久解密失败。当前密钥不可摘除。
+func (r *RotatingCipher) Retire(id uint8) {
+    r.mu.Lock()
+    defer r.mu.Unlock()
+    if id != r.current {
+        delete(r.keys, id)
+    }
+}
+
+func (r *RotatingCipher) Encrypt(plain []byte) ([]byte, error) {
+    r.mu.RLock()
+    key, id := r.keys[r.current], r.current
+    r.mu.RUnlock()
+
+    gcm, err := newGCM(key)
+    if err != nil {
+        return nil, err
+    }
+    nonce := make([]byte, gcm.NonceSize()) // GCM 标准 12 字节随机 nonce
+    if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+        return nil, fmt.Errorf("mycipher: read nonce: %w", err)
+    }
+    out := make([]byte, 0, 1+len(nonce)+len(plain)+gcm.Overhead())
+    out = append(out, id)
+    out = append(out, nonce...)
+    return gcm.Seal(out, nonce, plain, nil), nil
+}
+
+func (r *RotatingCipher) Decrypt(data []byte) ([]byte, error) {
+    if len(data) < 13 {
+        return nil, errors.New("mycipher: ciphertext too short")
+    }
+    id := data[0]
+    r.mu.RLock()
+    key, ok := r.keys[id]
+    r.mu.RUnlock()
+    if !ok {
+        return nil, fmt.Errorf("mycipher: unknown key id %d", id)
+    }
+    gcm, err := newGCM(key)
+    if err != nil {
+        return nil, err
+    }
+    ns := gcm.NonceSize()
+    if len(data) < 1+ns+gcm.Overhead() {
+        return nil, errors.New("mycipher: ciphertext truncated")
+    }
+    return gcm.Open(nil, data[1:1+ns], data[1+ns:], nil)
+}
+
+func newGCM(key []byte) (cipher.AEAD, error) {
+    block, err := aes.NewCipher(key)
+    if err != nil {
+        return nil, err
+    }
+    return cipher.NewGCM(block)
+}
+
+// 编译期断言：满足 cache.Cipher 的形状。
+var _ interface {
+    Encrypt([]byte) ([]byte, error)
+    Decrypt([]byte) ([]byte, error)
+} = (*RotatingCipher)(nil)
+```
+
+### 运维纪律
+
+- **轮换**：`Rotate(newID, newKey)` 后仅新写入用新钥；等所有旧钥密文随 TTL
+  自然过期（等待时长 > 实例最大 TTL）再 `Retire(oldID)`。
+- **密钥来源**：密钥材料由应用侧供给（环境变量 / KMS / 加密配置中心），
+  严禁写入代码仓库；本参考实现只在内存中持有密钥副本（构造与 Rotate 时均
+  做拷贝，防调用方外部改写）。
+- **存量未加密数据的平滑启用**：注入 Cipher 后，Redis 中已存在的明文旧数据
+  `Decrypt` 必然失败。推荐两种迁移策略，任选其一：
+  1. **换前缀**（推荐）：启用加密时同步 `WithName("users-v2")` 切新 key 前缀，
+     旧前缀数据靠 TTL 自然淘汰，零解密冲突；
+  2. **清缓存**：低峰期对旧前缀执行批量删除，接受一波回源洪峰（已有
+     singleflight + TTL 抖动兜底）。
+  不建议在 `Decrypt` 里做"失败当明文返回"的兼容分支——认证加密的意义就在于
+  拒绝任何不可信字节，静默降级会把密文损坏/被篡改也当成明文。
+- **算法约束**：只应使用认证加密（AEAD，如 AES-GCM）；CBC 等无认证模式不
+  提供完整性保障，勿用。
 
 ## Metrics / 可观测性
 
