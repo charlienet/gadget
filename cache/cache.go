@@ -41,10 +41,9 @@ import (
 )
 
 const (
-	versionMarker              = 0xFB // magic byte prefix to distinguish versioned data
-	versionPrefixLen           = 9    // 1 magic byte + 8-byte unix millisecond timestamp
-	defaultVersionSyncBatch    = 100
-	defaultVersionSyncInterval = 30 * time.Second
+	versionMarker           = 0xFB // magic byte prefix to distinguish versioned data
+	versionPrefixLen        = 9    // 1 magic byte + 8-byte unix millisecond timestamp
+	defaultVersionSyncBatch = 100
 	// maxPendingWrites 是降级期间 pending 缓冲的最大条目数，防止长降级 × 高写速率下内存无界增长。
 	maxPendingWrites = 1024
 	// flushTimeout 是单次 flush 中逐条网络操作的总超时。
