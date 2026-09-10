@@ -13,6 +13,10 @@
 //
 // WithService / WithEnv 在 New 时注入 service / env 属性，随每条日志输出。
 //
+// 在自研 console / fileText（FormatText）handler 中，service / env 与下方 trace_id / req_id
+// 一并前置到 msg 之前（固定次序 service → env → trace_id → req_id），并按 record 优先去重；
+// JSON handler（FormatJSON）走标准语义，不套用该布局。详见 README「身份与链路字段前置」。
+//
 // # 链路追踪
 //
 // handler 链内置 TraceHandler：所有 *Context 方法（InfoContext 等）自动从

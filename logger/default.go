@@ -98,10 +98,10 @@ func New(opts ...Option) *slog.Logger {
 	lg := sl.slog
 	var preset []any
 	if opt.Service != "" {
-		preset = append(preset, slog.String("service", opt.Service))
+		preset = append(preset, slog.String(AttrService, opt.Service))
 	}
 	if opt.Env != "" {
-		preset = append(preset, slog.String("env", opt.Env))
+		preset = append(preset, slog.String(AttrEnv, opt.Env))
 	}
 	if len(preset) > 0 {
 		lg = lg.With(preset...)
@@ -243,8 +243,8 @@ func shouldEnableConsole(hasConsole, hasFile bool) bool {
 
 // newFileHandler 按 format 枚举选择文件输出后端（仅作用于文件 handler，控制台不受影响）：
 //   - FormatText → 自研排序 handler newFileTextHandler，字段顺序固定为
-//     time/level/trace_id(如有)/req_id(如有)/msg/source(可选)/其余 attrs，时间格式由该
-//     handler 内部固定为 "2006-01-02 15:04:05.000"（不吃标准 HandlerOptions）；
+//     time/level/service(如有)/env(如有)/trace_id(如有)/req_id(如有)/msg/source(可选)/其余 attrs，
+//     时间格式由该 handler 内部固定为 "2006-01-02 15:04:05.000"（不吃标准 HandlerOptions）；
 //   - FormatJSON（默认，含任何非 FormatText 值）→ slog.NewJSONHandler，保持既有行为。
 //
 // handlerOpts 由调用方（rebuild）统一构建：JSON 分支完整复用（Level/AddSource/ReplaceAttr 时间定制）；

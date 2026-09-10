@@ -200,7 +200,7 @@ type FileFormat string
 const (
 	// FormatJSON 标准 slog.NewJSONHandler（默认）。
 	FormatJSON FileFormat = "json"
-	// FormatText 自研排序 text handler（time/level/trace_id/req_id/msg/source/其余 attrs）。
+	// FormatText 自研排序 text handler（time/level/service/env/trace_id/req_id/msg/source/其余 attrs）。
 	FormatText FileFormat = "text"
 )
 
@@ -250,8 +250,8 @@ func WithDateRotate(layout string) FileOption {
 }
 
 // WithFormat 设置文件输出格式（FormatJSON 默认 / FormatText）。仅作用于文件 handler，
-// 控制台输出不受影响。FormatText 为自研排序 handler（time/level/trace_id/req_id/msg/source/
-// 其余 attrs），详见 text_file.go。
+// 控制台输出不受影响。FormatText 为自研排序 handler（time/level/service/env/trace_id/req_id/
+// msg/source/其余 attrs），详见 text_file.go。
 func WithFormat(format FileFormat) FileOption {
 	return func(f *FileOptions) {
 		f.Format = format

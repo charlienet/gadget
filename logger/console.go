@@ -95,16 +95,15 @@ func (h *consoleHandler) Handle(_ context.Context, r slog.Record) error {
 		buf = append(buf, colorReset...)
 	}
 
-	// trace_id / req_id：与 fileText 共享挑选判据（见 record_fields.go），前置到消息之前。
+	// 前置字段 service/env/trace_id/req_id：与 fileText 共享双源挑选判据（record 顶层 + h.attrs，
+	// 见 record_fields.go），按 frontFieldKeys 固定次序前置到消息之前。
 	// console 风格——key 上色、值不上色不加引号（与该 handler 现有 attr 输出一致）。
-	traceID, reqID := scanTraceIDs(r)
-	if traceID != "" {
-		buf = h.appendColoredKey(buf, AttrTraceID)
-		buf = append(buf, traceID...)
-	}
-	if reqID != "" {
-		buf = h.appendColoredKey(buf, AttrReqID)
-		buf = append(buf, reqID...)
+	picked := pickFrontFields(r, h.attrs, h.groups)
+	for _, key := range frontFieldKeys {
+		if v := picked.get(key); v != "" {
+			buf = h.appendColoredKey(buf, key)
+			buf = append(buf, v...)
+		}
 	}
 
 	// 消息本体不上色
@@ -120,11 +119,14 @@ func (h *consoleHandler) Handle(_ context.Context, r slog.Record) error {
 	}
 
 	// 属性：先输出 WithAttrs 累积的 h.attrs，再输出记录自身 attrs
-	// （排除已前置的 trace_id/req_id，避免消息之后重复），均带分组前缀
+	// （两循环均跳过已前置的前置字段，避免消息之后重复；h.attrs 带分组前缀时
+	// 其 key 与前置的裸 key 不同名，不参与去重），均带分组前缀
 	prefix := h.groupPrefix()
-	buf = h.appendAttrs(buf, h.attrs, prefix)
+	buf = h.appendAttrs(buf, h.attrs, prefix, picked)
 	r.Attrs(func(a slog.Attr) bool {
-		if isTraceIDAttr(a, traceID, reqID) {
+		// prefixed 传 false：record attr 的 key 恒为裸 key、不随 handler groups 变化，
+		// 故已前置的前置字段必与之同名、须剔除（勿改为传 prefix != ""）。
+		if isPickedFrontAttr(a, picked, false) {
 			return true
 		}
 		buf = h.appendAttr(buf, a, prefix)
@@ -177,9 +179,13 @@ func (h *consoleHandler) groupPrefix() string {
 	return strings.Join(h.groups, ".") + "."
 }
 
-// appendAttrs 批量输出属性
-func (h *consoleHandler) appendAttrs(buf []byte, attrs []slog.Attr, prefix string) []byte {
+// appendAttrs 批量输出属性；跳过已前置输出的前置字段（prefixed 见 isPickedFrontAttr）
+func (h *consoleHandler) appendAttrs(buf []byte, attrs []slog.Attr, prefix string, picked frontFields) []byte {
+	prefixed := prefix != ""
 	for _, a := range attrs {
+		if isPickedFrontAttr(a, picked, prefixed) {
+			continue
+		}
 		buf = h.appendAttr(buf, a, prefix)
 	}
 
@@ -214,8 +220,8 @@ func (h *consoleHandler) appendAttr(buf []byte, a slog.Attr, prefix string) []by
 }
 
 // appendColoredKey 输出一个 console 风格的固定字段 key（前导空格 + 可选上色 key + '='），
-// 值由调用方按 console 观感追加（不上色、不加引号）。专用于 trace_id/req_id 这类需前置到
-// 消息之前、且不参与分组前缀的固定字段，key 上色风格与 appendAttr 保持一致。
+// 值由调用方按 console 观感追加（不上色、不加引号）。专用于前置字段（service/env/trace_id/
+// req_id）这类需前置到消息之前、且不参与分组前缀的固定字段，key 上色风格与 appendAttr 保持一致。
 func (h *consoleHandler) appendColoredKey(buf []byte, key string) []byte {
 	if !h.opts.NoColor {
 		buf = append(buf, colorKey...)

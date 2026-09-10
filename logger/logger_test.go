@@ -190,6 +190,16 @@ func TestServiceEnvInjection(t *testing.T) {
 		t.Errorf("expected env attr, got: %s", got)
 	}
 
+	// 端到端锁定前置布局：service/env 须前置到消息本体（裸文本 "msg"）之前，
+	// 而非作为普通属性落在尾部。
+	msgIdx := strings.Index(got, "msg")
+	if svcIdx := strings.Index(got, "service=pay-svc"); msgIdx < 0 || svcIdx < 0 || svcIdx >= msgIdx {
+		t.Errorf("expected service promoted before msg, got: %s", got)
+	}
+	if envIdx := strings.Index(got, "env=prod"); msgIdx < 0 || envIdx < 0 || envIdx >= msgIdx {
+		t.Errorf("expected env promoted before msg, got: %s", got)
+	}
+
 	// 未设置时不出现对应属性
 	var buf2 bytes.Buffer
 	l2 := logger.New(logger.WithConsole(logger.WithConsoleWriter(&buf2)), logger.WithConsole(logger.WithConsoleColor(false)))

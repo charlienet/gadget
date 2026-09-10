@@ -19,9 +19,9 @@ type FileTextOptions struct {
 // fileTextHandler 自研文件 text slog.Handler。
 //
 // 与标准 slog.NewTextHandler 的区别：标准实现字段顺序固定为
-// time/level/msg/source/attrs，trace_id 落在末尾不满足需求。本 handler 精确控制
-// 字段顺序为：time / level / trace_id(如有) / req_id(如有) / msg / source(可选) /
-// 其余 attrs。整行无颜色、空格分隔、k=v 风格。
+// time/level/msg/source/attrs，前置字段落在末尾不满足需求。本 handler 精确控制
+// 字段顺序为：time / level / service(如有) / env(如有) / trace_id(如有) / req_id(如有) /
+// msg / source(可选) / 其余 attrs。整行无颜色、空格分隔、k=v 风格。
 //
 // mu 用指针共享，WithAttrs/WithGroup 派生时值拷贝安全；w 构造后固定
 // （与 consoleHandler 同构）。
@@ -82,22 +82,18 @@ func (h *fileTextHandler) Handle(_ context.Context, r slog.Record) error {
 	buf = append(buf, "level="...)
 	buf = append(buf, formatLevel(r.Level)...)
 
-	// 3) trace_id / req_id：TraceHandler 以 r.AddAttrs 追加为 record 顶层普通属性，
-	//    先扫描出这两个属性并前置到 msg 之前；命中后在「其余 attrs」中剔除避免重复。
-	//    仅匹配顶层精确 key（非 Group 内、Kind 为 String）；不存在则不输出（即“如有”）。
-	//    挑选/去重判据见 record_fields.go，与 consoleHandler 共享同一顺序语义。
-	traceID, reqID := scanTraceIDs(r)
-	if traceID != "" {
-		sep()
-		buf = append(buf, AttrTraceID...)
-		buf = append(buf, '=')
-		buf = appendQuoted(buf, traceID)
-	}
-	if reqID != "" {
-		sep()
-		buf = append(buf, AttrReqID...)
-		buf = append(buf, '=')
-		buf = appendQuoted(buf, reqID)
+	// 3) 前置字段 service/env/trace_id/req_id：双源挑选（record 顶层 + h.attrs，见 record_fields.go），
+	//    按 frontFieldKeys 固定次序先前置到 msg 之前；命中后在「其余 attrs」中剔除避免重复。
+	//    record 优先于 h.attrs；h.attrs 内同名重复取最后一次；groups 非空时不参与；仅匹配顶层
+	//    精确 key（非 Group 内、Kind 为 String）；不存在则不输出（即“如有”）。与 console 共享同一顺序语义。
+	picked := pickFrontFields(r, h.attrs, h.groups)
+	for _, key := range frontFieldKeys {
+		if v := picked.get(key); v != "" {
+			sep()
+			buf = append(buf, key...)
+			buf = append(buf, '=')
+			buf = appendQuoted(buf, v)
+		}
 	}
 
 	// 4) 消息本体
@@ -115,11 +111,14 @@ func (h *fileTextHandler) Handle(_ context.Context, r slog.Record) error {
 	}
 
 	// 6) 其余 attrs：先 WithAttrs 累积的 h.attrs，再 record 自身 attrs
-	//    （排除已输出的 trace_id/req_id），均带分组前缀、递归展开 Group。
+	//    （两循环均排除已输出的前置字段；h.attrs 带分组前缀时其 key 与前置的
+	//    裸 key 不同名，不参与去重），均带分组前缀、递归展开 Group。
 	prefix := h.groupPrefix()
-	buf = h.appendAttrs(buf, h.attrs, prefix)
+	buf = h.appendAttrs(buf, h.attrs, prefix, picked)
 	r.Attrs(func(a slog.Attr) bool {
-		if isTraceIDAttr(a, traceID, reqID) {
+		// prefixed 传 false：record attr 的 key 恒为裸 key、不随 handler groups 变化，
+		// 故已前置的前置字段必与之同名、须剔除（勿改为传 prefix != ""）。
+		if isPickedFrontAttr(a, picked, false) {
 			return true
 		}
 		buf = h.appendAttr(buf, a, prefix)
@@ -172,9 +171,13 @@ func (h *fileTextHandler) groupPrefix() string {
 	return strings.Join(h.groups, ".") + "."
 }
 
-// appendAttrs 批量输出属性
-func (h *fileTextHandler) appendAttrs(buf []byte, attrs []slog.Attr, prefix string) []byte {
+// appendAttrs 批量输出属性；跳过已前置输出的前置字段（prefixed 见 isPickedFrontAttr）
+func (h *fileTextHandler) appendAttrs(buf []byte, attrs []slog.Attr, prefix string, picked frontFields) []byte {
+	prefixed := prefix != ""
 	for _, a := range attrs {
+		if isPickedFrontAttr(a, picked, prefixed) {
+			continue
+		}
 		buf = h.appendAttr(buf, a, prefix)
 	}
 

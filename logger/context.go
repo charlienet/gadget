@@ -8,8 +8,15 @@ import (
 // trace 上下文工具：trace_id / req_id 的注入与提取。
 // ctx key 使用空 struct 类型（编译期隔离，禁止 string key 引发跨包冲突）。
 
-// TraceHandler 注入的日志属性名
+// 日志属性名常量（前置字段）：
+//   - AttrService / AttrEnv：由 New() 的 preset（WithService/WithEnv）注入；
+//   - AttrTraceID / AttrReqID：由最外层 TraceHandler 从 ctx 注入。
+//
+// 四者均作为「前置字段」参与自研 console/fileText handler 的固定顺序输出
+// （挑选/去重判据与相对次序见 record_fields.go）。
 const (
+	AttrService = "service"
+	AttrEnv     = "env"
 	AttrTraceID = "trace_id"
 	AttrReqID   = "req_id"
 )
