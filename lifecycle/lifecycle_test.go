@@ -523,7 +523,6 @@ func TestCloserFunc(t *testing.T) {
 		{"nil func panicked", nil, ErrPanicked},
 	}
 	for _, tc := range cases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			m := New()
 			m.Register("closer", CloserFunc(tc.fn))

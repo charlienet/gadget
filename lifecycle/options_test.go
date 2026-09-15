@@ -62,7 +62,6 @@ func TestNewAppliesValidation(t *testing.T) {
 		{"logger", []Option{WithLogger(nil)}},
 	}
 	for _, tc := range cases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			defer func() {
 				if r := recover(); r == nil {
