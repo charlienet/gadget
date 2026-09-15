@@ -91,10 +91,33 @@ type Component interface {
 // 方法值可直接桥接不同签名的关闭 API，例如 http.Server 的
 // Shutdown(ctx) error 可直接以 Func(srv.Shutdown) 注册；返回 error 的
 // Close() 则包一层闭包 Func(func(ctx context.Context) error { return c.Close() })。
+// 若方法是 Close() error（无 ctx），可直接用 [CloserFunc]（语义降级见其文档）。
 type Func func(ctx context.Context) error
 
 // Stop 调用 f 本身，使 Func 满足 [Component]。
 func (f Func) Stop(ctx context.Context) error { return f(ctx) }
+
+// CloserFunc 把无参的 Close() error 适配为 [Component]，避免手写丢弃 ctx 的闭包。
+//
+// 例如 *sql.DB、*redis.Client 这类带 Close() error 方法的对象可直接以
+// CloserFunc(db.Close)（方法值，无需类型实现 io.Closer）注册。
+//
+// 注意两点语义降级，注册前请确认可接受：
+//
+//  1. ctx 传不到被适配函数内部：Stop 无法把 ctx 交给 Close。Close 若阻塞，
+//     只能由 [Manager] 的步超时记为 [ErrTimeout] 并继续下一步，组件内部的
+//     ctx 取消不会中断 Close 本身（该 goroutine 不会被 kill）。
+//  2. 幂等契约不因本适配器而成立：本适配器只做转发，重复注册/双路径关闭时
+//     是否无害取决于被适配函数自身的幂等性。io.Closer 的传统语义不保证幂等，
+//     若该对象可能被重复关闭，请自行确认幂等，或直接实现 [Component] 的 Stop。
+//
+// 若你的类型实现的是 Close(ctx context.Context) error，通常一行 [Func](obj.Close)
+// 即可，无需本类型。
+type CloserFunc func() error
+
+// Stop 调用 f 本身，使 CloserFunc 满足 [Component]。
+// ctx 仅被接收以满足接口，不介入 f 的调用（语义降级见 CloserFunc 文档）。
+func (f CloserFunc) Stop(ctx context.Context) error { return f() }
 
 // Manager 编排多个 [Component] 的优雅关闭。零值不可用，请使用 [New] 构造。
 type Manager struct {

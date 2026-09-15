@@ -16,6 +16,9 @@ import (
 	"time"
 )
 
+// 编译期断言：CloserFunc 满足 Component 契约。
+var _ Component = CloserFunc(nil)
+
 // mustPanic 断言 fn 触发 panic。
 func mustPanic(t *testing.T, want string, fn func()) {
 	t.Helper()
@@ -504,4 +507,36 @@ func TestRunListenerGoroutineExitsAfterShutdown(t *testing.T) {
 	// signal.Stop 后 sigCh 永不再投递、Background ctx 永不取消：
 	// 监听 goroutine 只能靠 m.done 分支退出；修复前此处必超时失败。
 	waitListener(t, false)
+}
+
+// 测试11：CloserFunc 适配器转发语义。
+// error 原样透出聚合错误、nil 表示正常关闭、nil 函数被 callStop 的 recover 捕获。
+func TestCloserFunc(t *testing.T) {
+	sentinel := errors.New("close-failed")
+	cases := []struct {
+		name    string
+		fn      func() error
+		wantErr error // errors.Is 断言目标；nil 表示期望无错误
+	}{
+		{"forward nil", func() error { return nil }, nil},
+		{"forward error", func() error { return sentinel }, sentinel},
+		{"nil func panicked", nil, ErrPanicked},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			m := New()
+			m.Register("closer", CloserFunc(tc.fn))
+			err := m.Shutdown(context.Background())
+			if tc.wantErr == nil {
+				if err != nil {
+					t.Fatalf("err = %v, want nil", err)
+				}
+				return
+			}
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("聚合错误应含 %v，实得 %v", tc.wantErr, err)
+			}
+		})
+	}
 }

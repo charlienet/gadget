@@ -37,6 +37,7 @@ m.Register("cache", lifecycle.Func(func(ctx context.Context) error {
     c.Close()                                       // cache.Close() 无返回值，闭包适配
     return nil
 }))
+m.Register("redis", lifecycle.CloserFunc(rc.Close)) // Close() error 用 CloserFunc 直接适配
 m.Register("http", lifecycle.Func(srv.Shutdown))    // *http.Server 的 Shutdown(ctx) error 直接桥接
 
 // 阻塞直到信号到达 / ctx 取消，执行完关闭后返回聚合错误（全部成功时为 nil）
@@ -63,6 +64,17 @@ type Component interface {
 3. **彻底退出**：Stop 返回时，组件内部启动的所有 goroutine 必须已全部退出。
 
 `Func` 把普通函数适配为 Component：`type Func func(ctx context.Context) error`。
+
+### 适配器选择速查
+
+| 对象已有的关闭方法 | 适配方式 |
+|---|---|
+| 自实现 `Stop(ctx) error` | 直接 `Register`（本身即 Component） |
+| `Close(ctx) error` / `Shutdown(ctx) error` | `lifecycle.Func(obj.Close)` |
+| `Close() error` | `lifecycle.CloserFunc(obj.Close)` |
+| 无 error 的 `Close()` / `Stop()` | 自写闭包显式决定失败语义：`lifecycle.Func(func(ctx context.Context) error { db.Close(); return nil })` |
+
+适配器只做转发，幂等契约由被适配函数自身兑现；`CloserFunc` 另有 ctx 不透传的语义降级，详见其文档注释。
 
 ### Manager
 
