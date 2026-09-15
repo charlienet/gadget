@@ -133,11 +133,11 @@ case errors.As(err, &se):
 
 "某个组件关闭时会不会顺手把它内部依赖也关掉"，是该组件自身的实现事实，只能逐个查证，不能当通则。本仓库当前实情：
 
-- cache 的 `Close` 会级联关闭其内部 localStore / remoteStore；
+- cache 的 `Close() error` 会按 `io.Closer` 级联关闭其内部 localStore / remoteStore，store 的关闭错误经 `errors.Join` 聚合进返回值；
 - redis 的 `GracefulClose` 会级联关闭 `AddPrefix` 派生的全部子连接池；
-- 但上述级联仅对实现了 `interface{ Close() }`（无返回值）的内部依赖生效；例如 redis 包客户端的签名是 `Close() error`，类型断言失败后该依赖被**静默跳过**——cache 并不会替你关掉一个 redis 客户端。
+- 历史事实（已修复）：旧版 cache 的级联断言是 `interface{ Close() }`（无返回值），签名不兼容的 `Close() error` 依赖会被**静默跳过**（例如 redis 包客户端）；cache 升级为 `io.Closer` 后该不兼容已消除。
 
-结论：需要被关闭的底层依赖（redis 客户端等）**一律独立 `Register`**，不要指望容器组件代为关闭。若容器与内部依赖同时注册形成双路径关闭，本包不检测也不去重，由 Component 幂等契约兜底（实害为零，只是多一次调用）。
+结论：需要被关闭的底层依赖（redis 客户端等）**仍一律独立 `Register`**，不要指望容器组件代为关闭（级联只是纵深防御的兜底，并非所有容器都实现）。若容器与内部依赖同时注册形成双路径关闭，本包不检测也不去重，由 Component 幂等契约兜底（实害为零，只是多一次调用）。
 
 ## 注册顺序要点
 
