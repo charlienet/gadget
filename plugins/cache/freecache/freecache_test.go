@@ -100,7 +100,7 @@ func BenchmarkFreecache(b *testing.B) {
 	if err := c.Put(context.Background(), key, val, 0); err != nil {
 		b.Fatal(err)
 	}
-	b.Cleanup(c.Close)
+	b.Cleanup(func() { c.Close() })
 
 	b.Run("GetHit", func(b *testing.B) {
 		for range b.N {

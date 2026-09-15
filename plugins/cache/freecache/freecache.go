@@ -21,6 +21,7 @@ import (
 	"github.com/coocood/freecache"
 )
 
+// 本 store 无后台资源、无关闭语义，不实现 io.Closer，Cache.Close 级联时自然跳过。
 type freecache_store struct {
 	cache *freecache.Cache
 }
