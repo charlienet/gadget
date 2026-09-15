@@ -32,6 +32,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"sync"
 	"sync/atomic"
@@ -51,6 +52,8 @@ const (
 	// listenerCloseTimeout 是关闭 Listener 的等待上限，须 ≥ 自家 pubsub 最坏退出窗
 	// （~6s）/ stream（~2s）。防止违约第三方实现的无界 Close 永久挂死 cache.Close
 	// （watcherWG.Wait 押在 startWatcher 活性上）：超时后 Warn 并放弃等待，不 panic、不重试。
+	// 注意上界范围：本值只约束 watcher 对 listener 的关闭等待；Close 级联调用
+	// store 的 io.Closer 不设超时，store 关闭的有界性由调用方选型时自行保证。
 	listenerCloseTimeout = 8 * time.Second
 	// flushRetryInterval 是常规（非降级恢复转换点）flush 重试的最小间隔，防止失败后网络风暴。
 	flushRetryInterval = 5 * time.Second
@@ -81,7 +84,16 @@ type Cache interface {
 	Getfn(ctx context.Context, key string, v any, fn LoadFn, expireSeconds int) error
 	Put(ctx context.Context, key string, v any, expireSecond int) error
 	Delete(ctx context.Context, keys ...string)
-	Close()
+	// Close 停止全部后台协程（清理 janitor、健康探测、版本同步、watcher、延时
+	// 二次删除 timer）并级联关闭实现了 io.Closer 的 localStore / remoteStore。
+	//
+	// 幂等契约：关闭主体仅执行一次（sync.Once），首次调用的结果（含 error）被
+	// 持久化，后续所有调用返回同一结果——不存在"失败后重试"语义，第二次调用
+	// 不会重新执行关闭、也不会重新调用 store 的 Close。
+	//
+	// 错误聚合：各 store 的关闭错误逐条包装（"cache: <store名> store close: …"）
+	// 后经 errors.Join 聚合返回；无错误或无 store 可关时返回 nil。
+	Close() error
 }
 
 type cache struct {
@@ -132,10 +144,14 @@ type cache struct {
 	versionCursor       string // LRU 采样游标：上一批最后一个 key（空串=从头开始）
 	versionStop         chan struct{}
 
-	// Close 幂等保护
-	closeOnce sync.Once
-	watcherWG sync.WaitGroup // 等待 startWatcher 退出
-	closed    atomic.Bool    // Close 后置位，阻止 noticeRemoved 发布
+	// Close 幂等保护：closeOnce 保证关闭主体单次执行；closeErr 持久化首次
+	// 结果（含 error），后续 Close 调用返回同一值。closeErrMu 为并发第二次
+	// 调用者读 closeErr 提供竞态防护（go test -race）。
+	closeOnce  sync.Once
+	watcherWG  sync.WaitGroup // 等待 startWatcher 退出
+	closed     atomic.Bool    // Close 后置位，阻止 noticeRemoved 发布
+	closeErrMu sync.Mutex
+	closeErr   error
 }
 
 // pendingWrite 记录降级期间被跳过的 remote 写入，恢复后补偿写回 remote。
@@ -772,39 +788,63 @@ func (c *cache) Stats() Stats {
 	return c.stats.Snapshot()
 }
 
-func (c *cache) Close() {
+// Close 停止全部后台协程并级联关闭 store。幂等契约与错误聚合语义见 [Cache]
+// 接口注释：关闭主体单次执行，首次结果（含 error）持久化，后续调用返回同一
+// 结果。其中 watcher 对 listener 的关闭等待受 listenerCloseTimeout（8s）上界
+// 约束（超时即放弃，不再阻塞本方法）；对 store 的 io.Closer 级联调用不设超时，
+// 该段的有界性取决于 store 实现自身。
+func (c *cache) Close() error {
 	c.closeOnce.Do(func() {
-		c.closed.Store(true)
-		close(c.stopChan)
-		c.watcherWG.Wait()
-
-		// 停止全部 pending 延时二次删除 timer 并清空：closed 已置位，即使个别回调
-		// 已进入执行也会在入口 closed.Load() 处直接返回（双保险）。
-		c.delayedMu.Lock()
-		for _, dd := range c.delayedTimers {
-			dd.timer.Stop()
-		}
-		c.delayedTimers = nil
-		c.delayedMu.Unlock()
-
-		if c.degradeStopRecov != nil {
-			close(c.degradeStopRecov)
-		}
-		if c.versionStop != nil {
-			close(c.versionStop)
-		}
-
-		if c.localStore != nil {
-			if closer, ok := c.localStore.(interface{ Close() }); ok {
-				closer.Close()
-			}
-		}
-		if c.remoteStore != nil {
-			if closer, ok := c.remoteStore.(interface{ Close() }); ok {
-				closer.Close()
-			}
-		}
+		c.closeErrMu.Lock()
+		c.closeErr = c.closeAll()
+		c.closeErrMu.Unlock()
 	})
+
+	c.closeErrMu.Lock()
+	defer c.closeErrMu.Unlock()
+	return c.closeErr
+}
+
+// closeAll 是 Close 的一次性关闭主体：置位 closed、停后台协程、清延时删除
+// timer、级联关闭实现了 io.Closer 的 store 并聚合其错误。
+func (c *cache) closeAll() error {
+	c.closed.Store(true)
+	close(c.stopChan)
+	c.watcherWG.Wait()
+
+	// 停止全部 pending 延时二次删除 timer 并清空：closed 已置位，即使个别回调
+	// 已进入执行也会在入口 closed.Load() 处直接返回（双保险）。
+	c.delayedMu.Lock()
+	for _, dd := range c.delayedTimers {
+		dd.timer.Stop()
+	}
+	c.delayedTimers = nil
+	c.delayedMu.Unlock()
+
+	if c.degradeStopRecov != nil {
+		close(c.degradeStopRecov)
+	}
+	if c.versionStop != nil {
+		close(c.versionStop)
+	}
+
+	var errs []error
+	if c.localStore != nil {
+		if closer, ok := c.localStore.(io.Closer); ok {
+			if err := closer.Close(); err != nil {
+				errs = append(errs, fmt.Errorf("cache: %s store close: %w", c.localStore.Name(), err))
+			}
+		}
+	}
+	if c.remoteStore != nil {
+		if closer, ok := c.remoteStore.(io.Closer); ok {
+			if err := closer.Close(); err != nil {
+				errs = append(errs, fmt.Errorf("cache: %s store close: %w", c.remoteStore.Name(), err))
+			}
+		}
+	}
+
+	return errors.Join(errs...)
 }
 
 // shouldVerify returns true if the key's local cache should be checked against

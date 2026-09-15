@@ -6,7 +6,9 @@ import "context"
 //
 // 实现必须并发安全：cache 包的 healthLoop 会在后台并发调用 Get/Put/Delete，
 // 用户的 Get/Put/Delete 请求也会并发执行。
-// Close 与 Get/Put/Delete 等数据操作须并发安全。
+//
+// Store 接口本身不含 Close 方法：关闭是可选能力，store 若实现 io.Closer，
+// 将在 Cache.Close 时被级联关闭，其错误聚合进 Cache.Close 的返回值。
 type Store interface {
 
 	// Get gets a cached value by key.

@@ -59,7 +59,7 @@ c = cache.New(
 | `Stats()` | 返回命中/未命中/回源等统计只读快照 |
 | `GetMulti(ctx, keys...)` | 批量获取 |
 | `SetMulti(ctx, items, expire)` | 批量写入 |
-| `Close()` | 关闭缓存（停止后台 goroutine） |
+| `Close() error` | 关闭缓存（停止后台 goroutine，级联关闭实现了 io.Closer 的 store 并用 errors.Join 聚合其错误）。幂等：关闭主体仅执行一次，后续调用返回首次的同一结果（含 error），无失败重试语义 |
 
 ## 数据加载流程
 

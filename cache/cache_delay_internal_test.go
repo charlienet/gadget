@@ -92,7 +92,7 @@ func newDelayCache(t *testing.T, delay time.Duration, remote *testRemoteStore, e
 	}
 	opts = append(opts, extra...)
 	c := New(opts...)
-	t.Cleanup(c.Close)
+	t.Cleanup(func() { _ = c.Close() })
 	return c
 }
 

@@ -1626,19 +1626,46 @@ func TestMemStoreGetMulti(t *testing.T) {
 
 // --- Close 幂等 ---
 
-func TestCloseIdempotent(t *testing.T) {
-	lis := newMockListener()
-	c := cache.New(
-		cache.WithMemStore(),
-		cache.WithListener(lis),
-		cache.WithDegradeThreshold(1),
-		cache.WithDegradeRecoveryInterval(50*time.Millisecond),
-	)
+// errFakeCloserStore 是 failingCloserStore 的固定关闭错误 sentinel。
+var errFakeCloserStore = errors.New("failing closer store boom")
 
-	// 多次 Close 不得 panic（stopChan/降级探测/版本同步/store 均为单次关闭）
-	assert.NotPanics(t, func() { c.Close() })
-	assert.NotPanics(t, func() { c.Close() })
-	assert.NotPanics(t, func() { c.Close() })
+// failingCloserStore 在 mockStore 之上实现 io.Closer：Close 恒返回错误。
+type failingCloserStore struct{ *mockStore }
+
+func (*failingCloserStore) Close() error { return errFakeCloserStore }
+
+func TestCloseIdempotent(t *testing.T) {
+	t.Run("无错误路径：多次 Close 不 panic 且结果一致(nil)", func(t *testing.T) {
+		lis := newMockListener()
+		c := cache.New(
+			cache.WithMemStore(),
+			cache.WithListener(lis),
+			cache.WithDegradeThreshold(1),
+			cache.WithDegradeRecoveryInterval(50*time.Millisecond),
+		)
+
+		// 多次 Close 不得 panic（stopChan/降级探测/版本同步/store 均为单次关闭）
+		assert.NotPanics(t, func() { c.Close() })
+		err2 := c.Close()
+		assert.NoError(t, err2)
+		assert.NotPanics(t, func() { _ = c.Close() })
+	})
+
+	t.Run("错误路径：第二次调用返回与第一次相同的结果(非 nil)", func(t *testing.T) {
+		failing := &failingCloserStore{mockStore: newMockStore("failing", true)}
+		c := cache.New(
+			cache.WithMemStore(),
+			func(o *cache.Options) { o.WithStore(failing) },
+		)
+
+		err1 := c.Close()
+		assert.Error(t, err1)
+		assert.ErrorIs(t, err1, errFakeCloserStore)
+
+		err2 := c.Close()
+		assert.Equal(t, err1, err2, "首次结果（含 error）须持久化，后续调用返回同一结果")
+		assert.ErrorIs(t, err2, errFakeCloserStore)
+	})
 }
 
 // --- expireSecond=0 语义：永不过期 ---
