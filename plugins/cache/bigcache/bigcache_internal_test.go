@@ -18,7 +18,7 @@ func newTestStore(t *testing.T, configs ...ConfigFunc) *bigcache_store {
 	t.Helper()
 	s, err := NewBigCache(configs...)
 	require.NoError(t, err)
-	t.Cleanup(s.Close)
+	t.Cleanup(func() { _ = s.Close() })
 	return s
 }
 
@@ -97,9 +97,12 @@ func TestInitializeLinksGlobalTTL(t *testing.T) {
 }
 
 // TestCacheCloseInvokesStoreClose verifies that the cache package's Close()
-// reaches the bigcache store through its no-return-value Close() probe
-// (interface{ Close() }, see cache/cache.go). A Close() error signature would
-// fail that type assertion and leak the store's cleanup goroutines.
+// reaches the bigcache store through its io.Closer cascade assertion.
+// (Historical note: the store deliberately exposed a no-return Close() to
+// match cache's old interface{ Close() } probe; the cascade now asserts
+// io.Closer, so this store's Close() error is reached and its cleanup
+// goroutines stopped. Run with the workspace (post-io.Closer-upgrade)
+// cache module — published cache v0.5.0 and earlier would skip this store.)
 func TestCacheCloseInvokesStoreClose(t *testing.T) {
 	// Note: no t.Cleanup(s.Close) here — cache.Close() below already closes the
 	// store (the underlying library's Close is not idempotent), and the store

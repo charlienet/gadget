@@ -21,7 +21,7 @@ func TestCache(t *testing.T) {
 			t.Fatal(err)
 		}
 		c := cache.New(o)
-		t.Cleanup(c.Close)
+		t.Cleanup(func() { c.Close() })
 
 		if err := c.Get(ctx, key, nil); err == nil {
 			t.Error("expected to get no value from cache")
@@ -39,7 +39,7 @@ func TestCache(t *testing.T) {
 			t.Fatal(err)
 		}
 		c := cache.New(o)
-		t.Cleanup(c.Close)
+		t.Cleanup(func() { c.Close() })
 
 		if err := c.Put(ctx, key, val, 0); err != nil {
 			t.Error(err)
@@ -69,7 +69,7 @@ func TestCache(t *testing.T) {
 			t.Fatal(err)
 		}
 		c := cache.New(o)
-		t.Cleanup(c.Close)
+		t.Cleanup(func() { c.Close() })
 
 		if err := c.Put(ctx, key, val, 0); err != nil {
 			t.Error(err)
@@ -96,7 +96,7 @@ func BenchmarkBigcache(b *testing.B) {
 	if err := c.Put(context.Background(), key, val, 0); err != nil {
 		b.Fatal(err)
 	}
-	b.Cleanup(c.Close)
+	b.Cleanup(func() { c.Close() })
 
 	b.Run("GetHit", func(b *testing.B) {
 		for range b.N {

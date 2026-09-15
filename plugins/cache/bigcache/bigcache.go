@@ -224,14 +224,14 @@ func (f *bigcache_store) Delete(ctx context.Context, key ...string) error {
 	return firstErr
 }
 
-// Close releases the underlying bigcache resources (cleanup goroutines). It
-// intentionally has no return value so it matches the cache package's Close
-// detection (cache.cache.Close type-asserts interface{ Close() }); a
-// Close() error signature would fail that assertion and the cleanup
-// goroutines would never be stopped.
-func (f *bigcache_store) Close() {
+// Close releases the underlying bigcache resources (cleanup goroutines) and
+// returns the library's Close error. cache.Cache.Close cascades to stores via
+// io.Closer and aggregates this error into its own return value. (Historical
+// debt removed: the old cascade asserted interface{ Close() } and this method
+// deliberately swallowed the error to match it; io.Closer is the contract now.)
+func (f *bigcache_store) Close() error {
 	f.closed = true
-	_ = f.cache.Close()
+	return f.cache.Close()
 }
 
 func (*bigcache_store) Name() string { return "bigcache" }
