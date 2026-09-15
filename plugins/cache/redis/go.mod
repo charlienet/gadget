@@ -4,7 +4,7 @@ go 1.26
 
 require (
 	github.com/alicebob/miniredis v2.5.0+incompatible
-	github.com/charlienet/gadget/cache v0.5.0
+	github.com/charlienet/gadget/cache v0.6.0
 	github.com/charlienet/gadget/redis v0.8.0
 	github.com/charlienet/gadget/retry v0.1.0
 	github.com/redis/go-redis/v9 v9.22.0

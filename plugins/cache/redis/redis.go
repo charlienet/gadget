@@ -245,3 +245,8 @@ func (r *redis_store) DeletePattern(ctx context.Context, pattern string) error {
 func (*redis_store) Name() string { return "Redis" }
 
 func (*redis_store) IsRemote() bool { return true }
+
+// Close 关闭底层 redis 连接池，实现 io.Closer，供 cache.Cache.Close 级联调用
+// （错误聚合进其返回值）。幂等性与 AddPrefix 派生子连接池的级联关闭由
+// gadget/redis Client.Close（统一 GracefulClose 语义）保证，重复调用无额外副作用。
+func (r *redis_store) Close() error { return r.rdb.Close() }
