@@ -5,7 +5,7 @@ go 1.26
 require (
 	github.com/alicebob/miniredis v2.5.0+incompatible
 	github.com/charlienet/gadget/cache v0.5.0
-	github.com/charlienet/gadget/redis v0.4.2
+	github.com/charlienet/gadget/redis v0.8.0
 	github.com/charlienet/gadget/retry v0.1.0
 	github.com/redis/go-redis/v9 v9.22.0
 	github.com/stretchr/testify v1.11.1
@@ -27,6 +27,7 @@ require (
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
 	github.com/twitchyliquid64/golang-asm v0.15.1 // indirect
 	github.com/yuin/gopher-lua v1.1.2 // indirect
+	github.com/zeebo/xxh3 v1.1.0 // indirect
 	go.uber.org/atomic v1.11.0 // indirect
 	golang.org/x/arch v0.0.0-20210923205945-b76863e36670 // indirect
 	golang.org/x/sync v0.22.0 // indirect

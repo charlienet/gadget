@@ -18,8 +18,8 @@ github.com/charlienet/gadget/breaker v0.1.0 h1:/2zFJpwbY7+zNugexawBj30zTZppniEpr
 github.com/charlienet/gadget/breaker v0.1.0/go.mod h1:6DKOASfM8BAunRwXK3H/Z7dNAYQQMafFT6jbpE3CBNU=
 github.com/charlienet/gadget/cache v0.5.0 h1:qcVL3LLcvJ2Qzxw1kFGzOBimKprcF8v26wU9LffEimE=
 github.com/charlienet/gadget/cache v0.5.0/go.mod h1:LWGCwtKgKzIM7NBaSUAvzcnoMn5mCx3fL/gir/uzcHw=
-github.com/charlienet/gadget/redis v0.4.2 h1:17xwUXLSlRXwA3U9Dy2nC8t74sg3WzD3+uXW/Q74k4c=
-github.com/charlienet/gadget/redis v0.4.2/go.mod h1:rShqHv/5n5e7k5hUZhxFkn4zvyA7Xq7TVBrUIsMIuY4=
+github.com/charlienet/gadget/redis v0.8.0 h1:pBjASgGUgkUEV4MTxd6+FXAJ04o62LqHc0ciqxEVPdM=
+github.com/charlienet/gadget/redis v0.8.0/go.mod h1:x4x4saIVZR1VnFHlNwG9+iDtr5WGXJ8weoHZWGWtKv0=
 github.com/charlienet/gadget/retry v0.1.0 h1:G89ADCZ/3kyjiDbJ5/pizNbxjM7KuJ4O2JTIJZP/dWw=
 github.com/charlienet/gadget/retry v0.1.0/go.mod h1:waIa0yYJ5tJkdfPEBUiNsBQe8QxKRe7th7A1n5E+Dd4=
 github.com/cloudwego/base64x v0.1.6 h1:t11wG9AECkCDk5fMSoxmufanudBtJ+/HemLstXDLI2M=
@@ -60,6 +60,8 @@ github.com/twitchyliquid64/golang-asm v0.15.1 h1:SU5vSMR7hnwNxj24w34ZyCi/FmDZTkS
 github.com/twitchyliquid64/golang-asm v0.15.1/go.mod h1:a1lVb/DtPvCB8fslRZhAngC2+aY1QWCk3Cedj/Gdt08=
 github.com/yuin/gopher-lua v1.1.2 h1:yF/FjE3hD65tBbt0VXLE13HWS9h34fdzJmrWRXwobGA=
 github.com/yuin/gopher-lua v1.1.2/go.mod h1:7aRmXIWl37SqRf0koeyylBEzJ+aPt8A+mmkQ4f1ntR8=
+github.com/zeebo/assert v1.3.0 h1:g7C04CbJuIDKNPFHmsk4hwZDO5O+kntRxzaUoNXj+IQ=
+github.com/zeebo/assert v1.3.0/go.mod h1:Pq9JiuJQpG8JLJdtkwrJESF0Foym2/D9XMU5ciN/wJ0=
 github.com/zeebo/xxh3 v1.1.0 h1:s7DLGDK45Dyfg7++yxI0khrfwq9661w9EN78eP/UZVs=
 github.com/zeebo/xxh3 v1.1.0/go.mod h1:IisAie1LELR4xhVinxWS5+zf1lA4p0MW4T+w+W07F5s=
 go.uber.org/atomic v1.11.0 h1:ZvwS0R+56ePWxUNi+Atn9dWONBPp/AUETXlHW0DxSjE=
