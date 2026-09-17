@@ -13,6 +13,11 @@ import (
 // 通过 Client.Constraint/MustConstraint 执行，可自定义扩展。
 type Constraint func(Client) error
 
+// Ping 实例约束：启动期校验连通性。
+//
+// Background 豁免：约束在实例接入业务流量前执行，此刻不存在调用方请求
+// 上下文可传递；探测被固定 3s deadline 收窄、不向下游传播。本库"无 ctx
+// 公开 API 内刻意使用 Background"的决策记录见 README v0.9.0 节。
 func Ping() Constraint {
 	return func(rc Client) error {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second*3)
@@ -22,6 +27,10 @@ func Ping() Constraint {
 	}
 }
 
+// Version 实例约束：校验服务器版本满足给定约束表达式（如 ">=7.0"，
+// hashicorp/go-version 语法）。版本读自 Capability 缓存（ServerVersion），
+// 未显式 Capability().Probe(ctx) 时为空串、约束判为失败；版本不可解析时
+// 返回解析错误。
 func Version(expended string) Constraint {
 	return func(rc Client) error {
 		v := rc.ServerVersion()

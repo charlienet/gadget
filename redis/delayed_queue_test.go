@@ -1,7 +1,6 @@
 package redis_test
 
 import (
-	"context"
 	"fmt"
 	"testing"
 	"time"
@@ -15,7 +14,7 @@ import (
 // TestDelayedQueue 验证延迟队列（ZSET + Lua 原子取出）。
 func TestDelayedQueue(t *testing.T) {
 	mini.Run(t, func(rdb redis.Client) {
-		ctx := context.Background()
+		ctx := t.Context()
 		q := rdb.NewDelayedQueue("dq:1")
 
 		t.Run("未到期不可取", func(t *testing.T) {

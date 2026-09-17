@@ -5,6 +5,7 @@ import "github.com/redis/go-redis/v9"
 // Mode 表示 Redis 服务的运行模式。
 type Mode string
 
+// Redis 服务运行模式取值（Mode 的合法值）。
 const (
 	ModeStandalone Mode = "standalone" // 单机模式
 	ModeCluster    Mode = "cluster"    // 集群模式（Redis Cluster / failover cluster）

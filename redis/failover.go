@@ -73,8 +73,7 @@ func IsUnavailable(err error) bool {
 	}
 
 	// 读写超时（服务端未响应）；ctx 超时已在前面排除
-	var netErr net.Error
-	if errors.As(err, &netErr) && netErr.Timeout() {
+	if netErr, ok := errors.AsType[net.Error](err); ok && netErr.Timeout() {
 		return true
 	}
 

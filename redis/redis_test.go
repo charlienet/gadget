@@ -69,16 +69,16 @@ func TestNewWithClient(t *testing.T) {
 	rdb, err := redis.NewWithClient(uc1, redis.WithPrefix("app"))
 	assert.NoError(t, err)
 
-	assert.NoError(t, rdb.Set(context.Background(), "k", "v", time.Hour).Err())
+	assert.NoError(t, rdb.Set(t.Context(), "k", "v", time.Hour).Err())
 	val, err := mr1.Get("app:k")
 	assert.NoError(t, err)
 	assert.Equal(t, "v", val)
 
 	// GracefulClose 只级联关闭派生池，不关闭外部 uc：关闭后 uc 仍可用
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 	assert.NoError(t, rdb.GracefulClose(ctx))
-	assert.NoError(t, uc1.Ping(context.Background()).Err())
+	assert.NoError(t, uc1.Ping(t.Context()).Err())
 
 	// 无前缀包装：直通，不加前缀
 	mr2, err := miniredis.Run()
@@ -92,7 +92,7 @@ func TestNewWithClient(t *testing.T) {
 
 	plain, err := redis.NewWithClient(uc2)
 	assert.NoError(t, err)
-	assert.NoError(t, plain.Set(context.Background(), "pk", "pv", time.Hour).Err())
+	assert.NoError(t, plain.Set(t.Context(), "pk", "pv", time.Hour).Err())
 	val, err = mr2.Get("pk")
 	assert.NoError(t, err)
 	assert.Equal(t, "pv", val)
@@ -121,7 +121,7 @@ func TestVersion(t *testing.T) {
 func TestPrefix(t *testing.T) {
 	test.RunOnRedis(t, func(rdb redis.Client) {
 		r1 := rdb.AddPrefix("h2")
-		r1.Set(context.Background(), "abc", "abc", time.Hour)
+		r1.Set(t.Context(), "abc", "abc", time.Hour)
 	})
 }
 
@@ -133,10 +133,10 @@ func TestAddPrefixCascadeClose(t *testing.T) {
 		child1 := rdb.AddPrefix("h1")
 		child2 := child1.AddPrefix("h2")
 
-		assert.NoError(t, child1.Set(context.Background(), "k1", "v1", time.Hour).Err())
-		assert.NoError(t, child2.Set(context.Background(), "k2", "v2", time.Hour).Err())
+		assert.NoError(t, child1.Set(t.Context(), "k1", "v1", time.Hour).Err())
+		assert.NoError(t, child2.Set(t.Context(), "k2", "v2", time.Hour).Err())
 
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 		defer cancel()
 
 		// 关闭父连接池，应级联关闭所有派生连接池
@@ -343,7 +343,7 @@ func TestNewWithClientAddPrefixUsesUcConfig(t *testing.T) {
 
 	// 子连接池应连到 uc 的地址（mr），写入落到 app:h1:k
 	child := rdb.AddPrefix("h1")
-	assert.NoError(t, child.Set(context.Background(), "k", "v", time.Hour).Err())
+	assert.NoError(t, child.Set(t.Context(), "k", "v", time.Hour).Err())
 	val, err := mr.Get("app:h1:k")
 	assert.NoError(t, err)
 	assert.Equal(t, "v", val)
@@ -369,10 +369,10 @@ func TestNewWithClientCloseKeepsUc(t *testing.T) {
 	assert.NoError(t, rdb.Close()) // 重写的 Close：只关子池与自身状态
 
 	// 外部 uc 未被关闭，仍可正常使用
-	assert.NoError(t, uc.Ping(context.Background()).Err())
+	assert.NoError(t, uc.Ping(t.Context()).Err())
 
 	// 子连接池已随父关闭，其写入不应再成功（连接已关闭）
-	err = child.Set(context.Background(), "k", "v", time.Hour).Err()
+	err = child.Set(t.Context(), "k", "v", time.Hour).Err()
 	assert.Error(t, err, "子连接池应已随父 Close 级联关闭")
 }
 
@@ -388,7 +388,7 @@ func TestPipelinePrefix(t *testing.T) {
 	rdb := redis.New(redis.WithAddr(mr.Addr()), redis.WithPrefix("app"))
 	defer func() { _ = rdb.GracefulClose(context.Background()) }()
 
-	ctx := context.Background()
+	ctx := t.Context()
 	pipe := rdb.Pipeline()
 	pipe.Set(ctx, "k1", "v1", 0)
 	pipe.Set(ctx, "k2", "v2", 0)
@@ -432,8 +432,8 @@ func TestSubscribeWithPrefix(t *testing.T) {
 	defer func() { _ = uc.Close() }()
 	uc.AddHook(redis.PrefixHook("app", ":"))
 
-	ctx := context.Background()
-	sub := redis.SubscribeWithPrefix(uc, "app", ":", "chan1")
+	ctx := t.Context()
+	sub := redis.SubscribeWithPrefix(ctx, uc, "app", ":", "chan1")
 	defer func() { _ = sub.Close() }()
 
 	// 订阅建立是异步的：循环发布+接收直到成功，避免竞态。
@@ -456,8 +456,11 @@ func TestSubscribeWithPrefix(t *testing.T) {
 // NewBloomFilterWithEstimate 已加入 Client 接口，miniredis 走 bitmap 实现。
 func TestNewBloomFilterWithEstimateViaInterface(t *testing.T) {
 	mini.Run(t, func(rdb redis.Client) {
-		bf := rdb.NewBloomFilterWithEstimate("bfkey", 1000, 0.01)
-		ctx := context.Background()
+		bf, cerr459 := rdb.NewBloomFilterWithEstimate(t.Context(), "bfkey", 1000, 0.01)
+		if cerr459 != nil {
+			t.Fatalf("构造过滤器：%v", cerr459)
+		}
+		ctx := t.Context()
 
 		added, err := bf.Add(ctx, "item1")
 		assert.NoError(t, err)
@@ -473,33 +476,36 @@ func TestNewBloomFilterWithEstimateViaInterface(t *testing.T) {
 // miniredis 不加载任何模块，因此各 HasXXX 判定均应返回 false。
 func TestCapabilityModules(t *testing.T) {
 	mini.Run(t, func(rdb redis.Client) {
-		cap := rdb.Capability()
-		assert.False(t, cap.HasBloom(), "miniredis 不应具备 Bloom 模块")
-		assert.False(t, cap.HasCMS(), "miniredis 不应具备 CMS 模块")
-		assert.False(t, cap.HasCuckoo(), "miniredis 不应具备 Cuckoo 模块")
-		assert.False(t, cap.HasJSON(), "miniredis 不应具备 ReJSON 模块")
-		assert.False(t, cap.HasSearch(), "miniredis 不应具备 Search 模块")
-		assert.False(t, cap.HasTimeSeries(), "miniredis 不应具备 TimeSeries 模块")
-		assert.False(t, cap.HasTopK(), "miniredis 不应具备 TopK 模块")
-		assert.False(t, cap.HasTDigest(), "miniredis 不应具备 TDigest 模块")
-		assert.False(t, cap.HasGraph(), "miniredis 不应具备 Graph 模块")
-		assert.False(t, cap.HasModule("bf"), "HasModule 不应命中未加载模块")
+		capability := rdb.Capability()
+		// 查询为纯内存读：显式探测（miniredis 不支持带 section 的 INFO，
+		// 失败静默、缓存保持保守态——断言口径不变）
+		_ = capability.Probe(t.Context())
+		assert.False(t, capability.HasBloom(), "miniredis 不应具备 Bloom 模块")
+		assert.False(t, capability.HasCMS(), "miniredis 不应具备 CMS 模块")
+		assert.False(t, capability.HasCuckoo(), "miniredis 不应具备 Cuckoo 模块")
+		assert.False(t, capability.HasJSON(), "miniredis 不应具备 ReJSON 模块")
+		assert.False(t, capability.HasSearch(), "miniredis 不应具备 Search 模块")
+		assert.False(t, capability.HasTimeSeries(), "miniredis 不应具备 TimeSeries 模块")
+		assert.False(t, capability.HasTopK(), "miniredis 不应具备 TopK 模块")
+		assert.False(t, capability.HasTDigest(), "miniredis 不应具备 TDigest 模块")
+		assert.False(t, capability.HasGraph(), "miniredis 不应具备 Graph 模块")
+		assert.False(t, capability.HasModule("bf"), "HasModule 不应命中未加载模块")
 	})
 }
 
 func TestBf(t *testing.T) {
 	test.RunOnRedis(t, func(rdb redis.Client) {
 		key := "ffff"
-		rdb.Del(context.Background(), key)
+		rdb.Del(t.Context(), key)
 
-		rdb.CFReserve(context.Background(), "ccc", 1000000)
+		rdb.CFReserve(t.Context(), "ccc", 1000000)
 
-		if err := rdb.BFReserve(context.Background(), "ffff", 0.01, 1000000).Err(); err != nil {
+		if err := rdb.BFReserve(t.Context(), "ffff", 0.01, 1000000).Err(); err != nil {
 			t.Fatal(err)
 		}
 
 		for i := range 10000 {
-			rdb.BFAdd(context.Background(), "ffff", i)
+			rdb.BFAdd(t.Context(), "ffff", i)
 		}
 	})
 }
@@ -512,7 +518,7 @@ func BenchmarkBF(b *testing.B) {
 		ctx := context.Background()
 
 		b.Run("bf", func(b *testing.B) {
-			for i := 0; i < b.N; i++ {
+			for b.Loop() {
 				rdb.BFExists(ctx, key, randomHex(1))
 			}
 		})
@@ -521,14 +527,14 @@ func BenchmarkBF(b *testing.B) {
 }
 func TestRateLimiter(t *testing.T) {
 	mini.Run(t, func(rdb redis.Client) {
-		if err := rdb.FlushDB(context.Background()).Err(); err != nil {
+		if err := rdb.FlushDB(t.Context()).Err(); err != nil {
 			panic(err)
 		}
 
 		// 通过 Client 接口调用 NewRateLimiter（空名称：不隔离，行为与旧版一致）
 		limiter := rdb.NewRateLimiter("")
 		for range 3 {
-			res, err := limiter.Allow(context.Background(), "project:123", 10)
+			res, err := limiter.Allow(t.Context(), "project:123", 10)
 			if err != nil {
 				panic(err)
 			}
@@ -544,7 +550,7 @@ func TestRateLimiter(t *testing.T) {
 // 不同 name 的限流器对相同业务 key 互不影响（各自独立配额）。
 func TestRateLimiterNameIsolation(t *testing.T) {
 	mini.Run(t, func(rdb redis.Client) {
-		ctx := context.Background()
+		ctx := t.Context()
 		require.NoError(t, rdb.FlushDB(ctx).Err(), "清空限流相关 key")
 
 		la := rdb.NewRateLimiter("a")
@@ -582,7 +588,7 @@ func TestRateLimiterKeyNamespace(t *testing.T) {
 
 	rdb := redis.New(redis.WithAddr(mr.Addr()))
 	defer func() { _ = rdb.GracefulClose(context.Background()) }()
-	ctx := context.Background()
+	ctx := t.Context()
 
 	la := rdb.NewRateLimiter("a")
 	lb := rdb.NewRateLimiter("b")
@@ -602,8 +608,11 @@ func TestRateLimiterKeyNamespace(t *testing.T) {
 // miniredis 无 bf 模块，走 bitmap 回退实现，验证接口动态分派正确。
 func TestNewBloomFilterViaInterface(t *testing.T) {
 	mini.Run(t, func(rdb redis.Client) {
-		bf := rdb.NewBloomFilter("bfkey")
-		ctx := context.Background()
+		bf, cerr608 := rdb.NewBloomFilter(t.Context(), "bfkey")
+		if cerr608 != nil {
+			t.Fatalf("构造过滤器：%v", cerr608)
+		}
+		ctx := t.Context()
 
 		added, err := bf.Add(ctx, "item1")
 		assert.NoError(t, err)
@@ -624,8 +633,11 @@ func TestNewBloomFilterViaInterface(t *testing.T) {
 // 返回值顺序与入参严格对应（对齐 BF.MADD 语义），以及空入参早返回。
 func TestBloomBitmapMultiViaInterface(t *testing.T) {
 	mini.Run(t, func(rdb redis.Client) {
-		ctx := context.Background()
-		bf := rdb.NewBloomFilterWithEstimate("bfmulti", 10000, 0.01)
+		ctx := t.Context()
+		bf, cerr631 := rdb.NewBloomFilterWithEstimate(t.Context(), "bfmulti", 10000, 0.01)
+		if cerr631 != nil {
+			t.Fatalf("构造过滤器：%v", cerr631)
+		}
 
 		// 空入参：返回空结果、无错误。
 		// （BF.* 与 bitmap 两路径均已统一早返回 nil——assert.Empty 对
@@ -659,10 +671,13 @@ func TestBloomBitmapMultiViaInterface(t *testing.T) {
 // NumFilters/Expansion 仅 BF.* 路径有意义，bitmap 路径保持零值。
 func TestBloomBitmapInfo(t *testing.T) {
 	mini.Run(t, func(rdb redis.Client) {
-		ctx := context.Background()
+		ctx := t.Context()
 		const inserted = 1000
 
-		bf := rdb.NewBloomFilterWithEstimate("bfinfo", 10000, 0.01)
+		bf, cerr668 := rdb.NewBloomFilterWithEstimate(t.Context(), "bfinfo", 10000, 0.01)
+		if cerr668 != nil {
+			t.Fatalf("构造过滤器：%v", cerr668)
+		}
 		items := make([]any, 0, inserted)
 		for i := range inserted {
 			items = append(items, fmt.Sprintf("info-%d", i))
@@ -690,6 +705,8 @@ func TestBloomBitmapInfo(t *testing.T) {
 // 严禁 FLUSHDB/FLUSHALL。REDIS_URL 未设置时跳过。
 func TestBloomNativeBFViaRealRedis(t *testing.T) {
 	test.RunOnRedis(t, func(rdb redis.Client) {
+		// 查询为纯内存读：guard 前显式 Probe（探测失败 HasBloom=false → skip）
+		_ = rdb.Capability().Probe(t.Context())
 		if !rdb.Capability().HasBloom() {
 			t.Skip("服务器未加载 bf 模块，跳过 BF.* 原生路径测试")
 		}
@@ -698,7 +715,10 @@ func TestBloomNativeBFViaRealRedis(t *testing.T) {
 		key := fmt.Sprintf("bloomtest:%s:native", randomHex(12))
 		defer func() { _ = rdb.Del(ctx, key).Err() }()
 
-		bf := rdb.NewBloomFilterWithEstimate(key, 10000, 0.01)
+		bf, cerr706 := rdb.NewBloomFilterWithEstimate(t.Context(), key, 10000, 0.01)
+		if cerr706 != nil {
+			t.Fatalf("构造过滤器：%v", cerr706)
+		}
 
 		added, err := bf.Add(ctx, "n1")
 		require.NoError(t, err)
@@ -746,10 +766,15 @@ func TestBloomNativeBFViaRealRedis(t *testing.T) {
 func TestBloomClusterSingleKey(t *testing.T) {
 	test.RunOnRedisCluster(t, func(rdb redis.Client) {
 		ctx := context.Background()
+		// 工厂分派读能力缓存：先显式 Probe，令日志与路径反映真实能力
+		_ = rdb.Capability().Probe(ctx)
 		key := fmt.Sprintf("bloomtest:%s:cluster", randomHex(12))
 		defer func() { _ = rdb.Del(ctx, key).Err() }()
 
-		bf := rdb.NewBloomFilterWithEstimate(key, 10000, 0.01)
+		bf, cerr759 := rdb.NewBloomFilterWithEstimate(t.Context(), key, 10000, 0.01)
+		if cerr759 != nil {
+			t.Fatalf("构造过滤器：%v", cerr759)
+		}
 		t.Logf("HasBloom=%v：true 走 BF.* 原生路径，false 走 bitmap+Lua 回退路径",
 			rdb.Capability().HasBloom())
 
@@ -788,12 +813,18 @@ func TestBloomClusterSingleKey(t *testing.T) {
 // 的吞吐基线；命名对齐现有 BenchmarkBF。
 func BenchmarkBitmapAdd(b *testing.B) {
 	mini.Run(b, func(rdb redis.Client) {
-		bf := rdb.NewBloomFilterWithEstimate("bench:bitmap:add", 1000000, 0.01)
+		// benchmark 环境：testing.B 无 Context()，构造与写路径均用 Background
 		ctx := context.Background()
+		bf, berr := rdb.NewBloomFilterWithEstimate(ctx, "bench:bitmap:add", 1000000, 0.01)
+		if berr != nil {
+			b.Fatalf("构造过滤器：%v", berr)
+		}
 
 		b.ResetTimer()
-		for i := 0; i < b.N; i++ {
-			_, _ = bf.Add(ctx, fmt.Sprintf("item-%d", i))
+		var n int // 唯一 item 计数器（与 i 等价）
+		for b.Loop() {
+			_, _ = bf.Add(ctx, fmt.Sprintf("item-%d", n))
+			n++
 		}
 	})
 }
@@ -805,16 +836,21 @@ func BenchmarkBitmapMulti(b *testing.B) {
 	const batchSize = 64
 
 	mini.Run(b, func(rdb redis.Client) {
-		bf := rdb.NewBloomFilterWithEstimate("bench:bitmap:multi", 1000000, 0.01)
-		ctx := context.Background()
+		ctx := context.Background() // bench：testing.B 无 Context()
+		bf, berr := rdb.NewBloomFilterWithEstimate(ctx, "bench:bitmap:multi", 1000000, 0.01)
+		if berr != nil {
+			b.Fatalf("构造过滤器：%v", berr)
+		}
 
 		batch := make([]any, batchSize)
 		b.ResetTimer()
-		for i := 0; i < b.N; i++ {
+		var n int // 批次唯一性计数器（与 i 等价）
+		for b.Loop() {
 			for j := range batch {
-				batch[j] = fmt.Sprintf("item-%d-%d", i, j)
+				batch[j] = fmt.Sprintf("item-%d-%d", n, j)
 			}
 			_, _ = bf.AddMulti(ctx, batch...)
+			n++
 		}
 	})
 }

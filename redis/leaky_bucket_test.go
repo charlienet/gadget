@@ -17,7 +17,7 @@ import (
 // 因此断言采用"前 n 次全放行 + 之后必定出现拒绝"的容差形式。
 func TestLeakyBucket(t *testing.T) {
 	mini.Run(t, func(rdb redis.Client) {
-		ctx := context.Background()
+		ctx := t.Context()
 		require.NoError(t, rdb.FlushDB(ctx).Err(), "清空漏桶状态 key")
 
 		t.Run("恒定速率：rate=10/s burst 内全放行超容量后拒绝", func(t *testing.T) {
@@ -132,7 +132,7 @@ func TestLeakyBucket(t *testing.T) {
 // ≥2 次放行（next 领先 ≥2 间隔），保证后续 Wait 必先被拒。
 func TestLeakyBucketWait(t *testing.T) {
 	mini.Run(t, func(rdb redis.Client) {
-		ctx := context.Background()
+		ctx := t.Context()
 		require.NoError(t, rdb.FlushDB(ctx).Err())
 
 		// ensureQueue 循环 Allow 直到至少放行 2 次，制造确定的排队。
@@ -178,7 +178,7 @@ func TestLeakyBucketWait(t *testing.T) {
 // TestRateLimiterWait 验证令牌桶的阻塞等待模式。
 func TestRateLimiterWait(t *testing.T) {
 	mini.Run(t, func(rdb redis.Client) {
-		ctx := context.Background()
+		ctx := t.Context()
 		require.NoError(t, rdb.FlushDB(ctx).Err())
 
 		t.Run("Wait 等待后放行", func(t *testing.T) {

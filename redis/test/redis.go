@@ -68,9 +68,9 @@ func runOnRedis(t testing.TB, fn func(rdb redis.Client), url string, opts ...red
 
 // newClientFromURL 从 URL 创建本库 Client。
 // 逗号分隔的多地址（Redis Cluster 种子列表）已由本库 ParseURL 原生支持，
-// 直接透传 NewWithUrl 即可（见 redis/redis.go 的 ParseURL/parseMultiAddrURL）。
+// 直接透传 NewWithURL 即可（见 redis/redis.go 的 ParseURL/parseMultiAddrURL）。
 func newClientFromURL(url string, opts ...redis.Option) (redis.Client, error) {
-	return redis.NewWithUrl(url, opts...)
+	return redis.NewWithURL(url, opts...)
 }
 
 func run(t testing.TB, fn func(rdb redis.Client), cn func() (r redis.Client, clean func(), err error)) {

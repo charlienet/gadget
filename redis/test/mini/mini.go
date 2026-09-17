@@ -7,6 +7,7 @@
 package mini
 
 import (
+	"context"
 	"log"
 	"testing"
 	"time"
@@ -37,17 +38,9 @@ func createMiniRedis() (r redis.Client, clean func(), err error) {
 	rdb := redis.New(redis.WithAddr(addr))
 
 	return rdb, func() {
-		ch := make(chan struct{})
-
-		go func() {
-			_ = rdb.Close()
-			mr.Close()
-			close(ch)
-		}()
-
-		select {
-		case <-ch:
-		case <-time.After(time.Second * 5):
-		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = rdb.GracefulClose(ctx)
+		mr.Close()
 	}, nil
 }

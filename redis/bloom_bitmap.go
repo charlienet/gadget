@@ -16,14 +16,15 @@ type bitmapImpl struct {
 	k             uint   // number of hash functions
 	capacity      int64  // 每分片容量（m/k 布局依据，estimateNumItems 钳制上界；非分片时即总容量）
 	totalCapacity int64
+	falsePositive float64    // 目标误判率（m/k 布局依据之一，错误信息回显用）
 	policy        FailPolicy // 失效兜底策略（默认 FailOpen）
 }
 
 // newBitmapImpl 构造 bitmap 路径实现。集群模式显式开启分片
 // （WithShardCount(n>1)）时：位图参数 m/k 按**每分片容量**
 // ceil(总容量/effectiveN) 计算（路由/分组/键名共享层见 bloom_shard.go）；
-// 关闭分片（默认、非集群或未显式请求）时不分片、每分片容量即总容量，
-// 行为与键名同分片化之前完全一致。
+// 关闭分片（默认、非集群或未显式请求）时不分片、每分片容量即总容量、
+// 单键直达。
 func newBitmapImpl(client *redisClient, key string, cfg bloomConfig) *bitmapImpl {
 	// client 为 nil 是内部纯计算模拟（仅调 hashs/m/k 等不触网方法，见
 	// bloom_internal_test.go 的 newSimBitmap）：无模式可判，按非分片处理。
@@ -58,6 +59,7 @@ func newBitmapImpl(client *redisClient, key string, cfg bloomConfig) *bitmapImpl
 		k:             k,
 		capacity:      perShard,
 		totalCapacity: cfg.capacity,
+		falsePositive: cfg.falsePositive,
 		policy:        cfg.policy,
 	}
 }
@@ -97,7 +99,7 @@ func (b *bitmapImpl) hashs(item any) ([]uint64, error) {
 	h2 := sum.Lo | 1 // 步长强制奇：见上方注释
 
 	positions := make([]uint64, b.k)
-	for i := uint(0); i < b.k; i++ {
+	for i := range b.k {
 		positions[i] = (h1 + uint64(i)*h2) % b.m
 	}
 	return positions, nil
@@ -249,6 +251,116 @@ func (b *bitmapImpl) runBitmapScript(ctx context.Context, key string, s *goredis
 	default: // luaVerdictDataError
 		return cmd, scriptError
 	}
+}
+
+// bitmapConnectScript 建键/校验（服务端原子，三态返回）：
+//   - STRLEN==0 → SETBIT (m-1) 0 把字符串一次性全额增长至 ⌈m/8⌉ 字节，
+//     返回 1（新建）；
+//   - STRLEN==⌈m/8⌉ → 返回 0（同布局既有键，复用）；
+//   - 其他 → 返回 -1（异布局：短 string、半截键等，交由客户端报
+//     layout mismatch，键不被触碰）。
+//
+// SETBIT 置 0 位对滤波语义与 BITCOUNT 零影响；单往返内完成校验+建立，
+// 无 check-then-set 竞态。ARGV = {期望字节数, 末位偏移 m-1}。
+var bitmapConnectScript = goredis.NewScript(`
+	local len = redis.call('STRLEN', KEYS[1])
+	local want = tonumber(ARGV[1])
+	if len == 0 then
+		redis.call('SETBIT', KEYS[1], ARGV[2], 0)
+		return 1
+	end
+	if len == want then
+		return 0
+	end
+	return -1
+`)
+
+// connectKeyLen 本实现期望的物理键字节数 ⌈m/8⌉（SETBIT 末位 m-1 的全额
+// 分配结果；m 恒奇）。
+func (b *bitmapImpl) connectKeyLen() int64 { return int64((b.m + 7) / 8) }
+
+// connectKey 对单个物理键执行建键/校验，三态结果：脚本返回 1=按当前
+// 布局新建；0=同布局既有键复用（长度等值即布局一致——m/k 由 cfg 导出、
+// 长度相同即同参数键）；-1=异布局（含短 string 占位键），报数据类
+// layout mismatch、键不被触碰。对非 string 类型键（hash/set 等），
+// STRLEN/SETBIT 直接 WRONGTYPE 数据类错误上抛。falsePositive/m 的浮点
+// 布局口径由服务端长度等值承载，无额外可核验面。
+func (b *bitmapImpl) connectKey(ctx context.Context, key string) error {
+	wantLen := b.connectKeyLen()
+	cmd, outcome := b.runBitmapScript(ctx, key, bitmapConnectScript, []any{wantLen, int64(b.m - 1)})
+	switch outcome {
+	case scriptOK:
+		r, err := cmd.Int()
+		if err != nil {
+			return err
+		}
+		if r == -1 {
+			serverLen, lerr := b.client.StrLen(ctx, key).Result()
+			if lerr != nil {
+				return lerr
+			}
+			return b.mismatchErr(key, serverLen, wantLen)
+		}
+		return nil // 1=新建 / 0=复用
+	case scriptUnavailable:
+		return cmd.Err() // 交由 connectAll 统一分哨兵
+	case scriptError:
+		return cmd.Err() // 数据类（WRONGTYPE 等）原样上抛、键未触碰
+	default: // scriptFallback：服务器不支持 Lua，降级非原子直命令（构造/重置期竞态窗口可接受）
+		serverLen, err := b.client.StrLen(ctx, key).Result()
+		if err != nil {
+			return err
+		}
+		switch serverLen {
+		case 0:
+			return b.client.SetBit(ctx, key, int64(b.m-1), 0).Err()
+		case wantLen:
+			return nil
+		default:
+			return b.mismatchErr(key, serverLen, wantLen)
+		}
+	}
+}
+
+// mismatchErr 是布局不符的数据类错误：携带键名、服务端/期望长度与布局
+// 参数，修复手段为 Reset（清键重建）或换键。
+func (b *bitmapImpl) mismatchErr(key string, serverLen, wantLen int64) error {
+	return fmt.Errorf("redis: bloom bitmap %s: layout mismatch: server length %d, want %d (capacity=%d, p=%v)；Reset 或换键",
+		key, serverLen, wantLen, b.capacity, b.falsePositive)
+}
+
+// connectAll 同步连接全部物理键（多分片经单个 Pipeline 一批 inline EVAL，
+// 逐键三态分流）。错误分类：Unavailable 包 ErrRedisUnavailable 哨兵、
+// 数据类（layout mismatch/WRONGTYPE）附键名原样上抛；不随 FailPolicy
+// 兜底——构造/重置的失败必须可见。
+func (b *bitmapImpl) connectAll(ctx context.Context) error {
+	if !b.sharder.enabled || b.sharder.n == 1 {
+		key := b.sharder.shardKey(0)
+		if err := b.connectKey(ctx, key); err != nil {
+			return b.classifyConnectErr(err)
+		}
+		return nil
+	}
+	// 分片形态逐键执行（connectKey 内含 EVAL 记忆分派与降级路径，
+	// 键间无原子性承诺——失败即中止，已建成分片保留，重试幂等）。
+	for idx := range b.sharder.n {
+		key := b.sharder.shardKey(idx)
+		if err := b.connectKey(ctx, key); err != nil {
+			if e := b.classifyConnectErr(err); e != nil {
+				return e
+			}
+		}
+	}
+	return nil
+}
+
+// classifyConnectErr 统一 connectKey 错误的哨兵分流（数据类错误已自含
+// 键名与上下文，直接透传）。
+func (b *bitmapImpl) classifyConnectErr(err error) error {
+	if IsUnavailable(err) {
+		return fallbackErr(err)
+	}
+	return err
 }
 
 func (b *bitmapImpl) add(ctx context.Context, item any) (bool, error) {
@@ -435,15 +547,15 @@ func (b *bitmapImpl) ExistsMulti(ctx context.Context, items ...any) ([]bool, err
 }
 
 // multiViaScript 单物理键批量脚本路径（runBitmapScript 三态分派 + 逐条
-// 降级），standalone 行为与分片化之前逐语句一致（key 为 base；集群退化态
-// 为 base#0，除键名外语义不变）。
+// 降级），key 为 base（集群退化态为 base#0），两形态除键名外语义一致。
 func (b *bitmapImpl) multiViaScript(ctx context.Context, key string, script *goredis.Script, items []any, isAdd bool) ([]bool, error) {
 	op := "ExistsMulti"
 	if isAdd {
 		op = "AddMulti"
 	}
 
-	// 参数组装即完成全量编码校验：任一 item 失败返回数据类错误、不发命令。
+	// 参数组装即完成全量编码校验：任一 item 失败返回数据类错误、不发命令
+	// （校验先于预热，不支持类型不触发任何写命令）。
 	args, err := b.multiPositionsArgs(items)
 	if err != nil {
 		return nil, err
@@ -563,7 +675,7 @@ func (b *bitmapImpl) multiSharded(ctx context.Context, script *goredis.Script, i
 	return result, nil
 }
 
-// addMultiLoop 逐条走单条 add；任一条错误即返回（与历史逐条实现语义一致）。
+// addMultiLoop 逐条走单条 add；任一条错误即返回。
 func (b *bitmapImpl) addMultiLoop(ctx context.Context, items []any) ([]bool, error) {
 	result := make([]bool, len(items))
 	for i, item := range items {
@@ -576,7 +688,7 @@ func (b *bitmapImpl) addMultiLoop(ctx context.Context, items []any) ([]bool, err
 	return result, nil
 }
 
-// existsMultiLoop 逐条走单条 exists；任一条错误即返回（与历史实现一致）。
+// existsMultiLoop 逐条走单条 exists；任一条错误即返回。
 func (b *bitmapImpl) existsMultiLoop(ctx context.Context, items []any) ([]bool, error) {
 	result := make([]bool, len(items))
 	for i, item := range items {
@@ -592,6 +704,9 @@ func (b *bitmapImpl) existsMultiLoop(ctx context.Context, items []any) ([]bool, 
 // Info 返回 bitmap 路径的元数据估算：NumItems 由 BITCOUNT 置位数反推。
 // 注意 BITCOUNT 为 O(bytes) 全量扫描（每分片位图上限 512MB），属重命令，
 // 仅适合低频运维查询，勿在热路径调用。
+// 物理键经构造期/Reset 同步建立（connectAll）后 Size 恒 ⌈m/8⌉ 字节全额
+// 分配；仅 Exists 触碰过的只读键可能尚不存在（StrLen/BITCOUNT 天然 0，
+// 只读路径不建立）。
 func (b *bitmapImpl) Info(ctx context.Context) (*BloomInfo, error) {
 	agg := &BloomInfo{Capacity: b.totalCapacity}
 	for _, key := range b.sharder.allKeys() {
@@ -639,13 +754,16 @@ func (b *bitmapImpl) Card(ctx context.Context) (int64, error) {
 	return sum, nil
 }
 
-// Reset 清空 bitmap 路径的全部物理键（DEL，共享层见 resetBloomKeys）：
-// 不做逐位归零，直接删键——位图不存在时 SETBIT 天然从空串重建，m/k
-// 布局是实例构造期常量、Reset 不触碰（语义与限制见 BloomFilter.Reset
-// 接口注释）。Info 口径下位图键不存在时 StrLen/BITCOUNT 天然返回 0
-// （非 not-found 错误），NumItems 归零。
+// Reset 删除 bitmap 路径全部物理键（DEL，共享层见 resetBloomKeys）后立即
+// 经 connectAll 按当前 m/k 布局同步重建（SETBIT 末位全额分配）——返回
+// 成功即键已就绪；失败如实返回，重试 Reset 幂等（DEL 与 connect 三态皆
+// 幂等）。m/k 布局为构造期常量、不改动。语义与限制见 BloomFilter.Reset
+// 接口注释。
 func (b *bitmapImpl) Reset(ctx context.Context) error {
-	return resetBloomKeys(ctx, b.client, b.sharder)
+	if err := resetBloomKeys(ctx, b.client, b.sharder); err != nil {
+		return err
+	}
+	return b.connectAll(ctx)
 }
 
 // estimateNumItems 由置位数反推已插入元素数（标准 Bloom filter 估计量）：

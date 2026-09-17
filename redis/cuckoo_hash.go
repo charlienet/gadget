@@ -649,6 +649,25 @@ func (h *hashImpl) Info(ctx context.Context) (*CuckooInfo, error) {
 	}, nil
 }
 
+// connect 校验键类型：TYPE ∈ {none, hash} 即通过（none=键不存在，空 Hash
+// 与不存在对全部读写命令等价；后续 HSET 天然从空串建键）。**不建键**——
+// 占位写入会污染 Info 的占用桶统计，且回退版无服务端预建参数可比对。
+// 其他类型（string 等）→ 数据类 type mismatch、键未被修改，Reset 或换键
+// 解决；Unavailable 包 ErrRedisUnavailable 哨兵。
+func (h *hashImpl) connect(ctx context.Context) error {
+	typ, err := h.client.Type(ctx, h.key).Result()
+	if err != nil {
+		if IsUnavailable(err) {
+			return fallbackErr(err)
+		}
+		return err
+	}
+	if typ == "none" || typ == "hash" {
+		return nil
+	}
+	return fmt.Errorf("redis: cuckoo hash %s: type mismatch: server type %q, want hash or none；Reset 或换键", h.key, typ)
+}
+
 // Reset 删除整个 Hash key 即完成清空：hashImpl 的全部状态位于该 Hash
 // （field = 桶索引、value = 指纹字节），无辅助 field、无 victim 暂存槽
 // （驱逐在单条 Lua 内完成）、结构体字段均为构造期冻结的不可变配置，

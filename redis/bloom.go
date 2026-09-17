@@ -1,3 +1,7 @@
+// Package redis 封装 go-redis 客户端，提供服务能力探测（版本/模块，见
+// Capability）与一批基于 Redis 的数据结构组件：布隆过滤器、布谷鸟过滤器、
+// 限流器（令牌桶/漏桶/AtMost）、延迟队列，并统一处理键前缀、熔断、失效
+// 兜底策略。所有命令入口以 context.Context 为首参。
 package redis
 
 import (
@@ -12,15 +16,20 @@ import (
 
 // BloomFilter 是 Redis 支撑的布隆过滤器：服务器加载 RedisBloom 模块时
 // 使用原生 BF.* 命令，否则回退到 bitmap（GETBIT/SETBIT + Lua）实现，
-// 应用层无需检查 HasBloom()。
+// 路径分派自动进行；需要模块实现的部署须在构造前显式
+// Capability().Probe(ctx)（查询为纯内存读，未探测时按保守态回退 bitmap）。
 //
 // 容量契约（bitmap 路径）：容量在创建时固定，位图不会扩容。插入量超过
 // 预估容量后误判率单调恶化且不可恢复（布隆无删除语义），属应用端容量
-// 规划责任；对策为预留充足容量、周期性重建（新实例换新键，或 Reset 就地
-// 清空复用同一实例），或部署 RedisBloom 模块（BF.* 路径支持自动扩容）。
+// 规划责任；对策为预留充足容量、周期性重建（换新 key，或 Reset 就地清空
+// 复用同一实例），或部署 RedisBloom 模块（BF.* 路径支持自动扩容）。
 // Reset 在集群分片下非原子（见 Reset 方法注释）。本库不封装 BF.INSERT：
-// 预分配一律经 WithCapacity/WithEstimate 惰性 RESERVE；bitmap 回退路径
-// 首写天然 autocreate。
+// 工厂 NewBloomFilter 构造即连接——BF.* 对每个物理键执行 BF.RESERVE、
+// bitmap 对每个物理键以 SETBIT 末位一次性全额分配 ⌈m/8⌉ 字节（经服务端
+// 原子脚本建键并校验布局），构造失败不交付实例；对已存在键仅校验复用、
+// 不改写其参数（BF.* 的 falsePositive 无法服务端核验，见工厂 godoc），
+// 布局不符（bitmap 长度 mismatch）报数据类错误，Reset 或换键解决。
+// 键生命周期由库管辖：绕开 Reset 手工 DEL 后复用实例不自愈。
 //
 // 集群分片（Redis Cluster）：默认关闭。经 NewBloomFilter 显式组合
 // WithShardCount(n>1)、且 Mode()==ModeCluster 时，把过滤器打散为多个
@@ -93,14 +102,16 @@ type BloomFilter interface {
 	// 不随 FailPolicy 分叉——观测类方法无"放行"概念。
 	Card(ctx context.Context) (int64, error)
 
-	// Reset 清空过滤器的全部物理键，计数归零，实例约束（容量/FPR）不变；
-	// bfCmdImpl 分片模式下后续首次写入会重新惰性执行 BF.RESERVE。
+	// Reset 清空过滤器的全部物理键并立即按当前配置同步重建（BF.* 逐键
+	// BF.RESERVE；bitmap 逐键 SETBIT 预热全额分配），返回成功即键已就绪。
+	// 失败时如实返回（键可能处于已清空未重建态）——重试 Reset 幂等
+	// （DEL 与重建皆幂等）。
 	//
 	// 语义与限制：
 	//   - 单键形态（未分片）：DEL <base>，Redis 单命令原子。
 	//   - 集群分片：逐分片 DEL <base>#<idx>——跨 slot 无法原子，返回错误时
 	//     可能只清空部分分片；DEL 幂等，可安全重试直至成功。
-	//   - 幂等：分片键不存在时返回 nil（对齐 Redis DEL 语义）。
+	//   - 幂等：分片键不存在时 DEL 返回 0、无错误，天然幂等。
 	//   - 并发：与 Add/Exists 无全序保证，读者可能观察到旧存在性或中间态；
 	//     需要强一致清空的场景请改用全新键 + 指针原子替换。
 	//   - 失败恒返回错误（errors.Is(ErrRedisUnavailable) 可感知），
@@ -138,16 +149,20 @@ type BloomConfig = bloomConfig
 func defaultBloomConfig() bloomConfig {
 	return bloomConfig{
 		capacity:      1000000,
-		falsePositive: 0.01,
+		falsePositive: 0.0001, // 默认 0.01%
 		shardCount:    defaultBloomShardCount,
 	}
 }
 
 // WithCapacity sets the expected number of items.
 // 非法值（n <= 0）静默忽略、保留默认 1000000。
+// 所有形态首条写入前恒预建（BF.* 恒 BF.RESERVE、bitmap 恒 SETBIT 预热建
+// 结构）；未显式传本 Option 时按默认 1000000/0.0001（0.01%）执行，
+// 见 BloomFilter.Reserve。
 // 位图容量创建时固定、不会扩容，上限 2^32-1 bit（Redis 字符串大小限制），
-// p=0.01 时 capacity 超过约 4.5 亿将 fail-fast panic；超容后误判率单调
-// 恶化且不可恢复，请预估充足容量或部署 RedisBloom。
+// p=0.01 时 capacity 超过约 4.5 亿、默认 p=0.0001 时超过约 2.24 亿将
+// fail-fast panic；超容后误判率单调恶化且不可恢复，请预估充足容量或部署
+// RedisBloom。
 // 集群分片模式下 n 是全局总容量，均摊到各分片键（每分片容量下限 1000，
 // 不足则分片数收缩，见 bloom_shard.go）。
 func WithCapacity(n int64) BloomOption {
@@ -159,6 +174,9 @@ func WithCapacity(n int64) BloomOption {
 }
 
 // WithFalsePositive sets the desired false positive rate (0 < rate < 1).
+// 非法值静默忽略、保留默认 0.0001（0.01%）。
+// 所有形态首条写入前恒预建（BF.* 恒 BF.RESERVE、bitmap 恒 SETBIT 预热建
+// 结构）；未显式传本 Option 时按默认值执行，见 BloomFilter.Reserve。
 func WithFalsePositive(rate float64) BloomOption {
 	return func(c *bloomConfig) {
 		if rate > 0 && rate < 1 {
@@ -193,9 +211,18 @@ func WithShardCount(n int) BloomOption {
 // 失效兜底策略默认 FailOpen（服务不可用时放行业务）；可用 WithFailPolicy
 // 显式改为 FailClosed。
 // 集群分片默认关闭；Mode()==ModeCluster 且显式 WithShardCount(n>1) 时打散
-// 为多个 <base>#<idx> 物理键（见 WithShardCount、bloom_shard.go）；其余
-// 情况键名与行为完全不变。
-func (rdb *redisClient) NewBloomFilter(key string, opts ...BloomOption) BloomFilter {
+// 为多个 <base>#<idx> 物理键（见 WithShardCount、bloom_shard.go）。
+//
+// 构造即连接：对每个物理键同步执行建键/校验（BF.* 为 BF.RESERVE <fp>
+// <每分片容量>；bitmap 为服务端原子脚本——空键 SETBIT 末位全额分配
+// ⌈m/8⌉ 字节、同布局键复用、异布局报 mismatch），全部成功后才返回实例；
+// 失败返回 (nil, err)，不交付半初始化实例。已存在键仅复用、不改写其
+// 参数；BF.* 路径的 falsePositive 无法从服务端回读核验（BF.INFO 不回该
+// 字段），复用既有键时 fp 一致性属界外。bitmap 布局不符或键类型不符报
+// 数据类错误（含键名与期望长度，Reset 或换键解决）；服务不可用类错误包
+// ErrRedisUnavailable 哨兵（errors.Is 可感知）。构造失败不随 FailPolicy
+// 兜底——工厂返回的就是错误本身。
+func (rdb *redisClient) NewBloomFilter(ctx context.Context, key string, opts ...BloomOption) (BloomFilter, error) {
 	cfg := defaultBloomConfig()
 	cfg.policy = FailOpen // 过滤器默认 FailOpen：宁可放行不阻塞业务
 	for _, o := range opts {
@@ -203,24 +230,28 @@ func (rdb *redisClient) NewBloomFilter(key string, opts ...BloomOption) BloomFil
 	}
 
 	if rdb.cap.HasBloom() {
-		return rdb.newBFImpl(key, cfg)
+		bf := rdb.newBFImpl(key, cfg)
+		if err := bf.connectAll(ctx); err != nil {
+			return nil, err
+		}
+		return bf, nil
 	}
-	return newBitmapImpl(rdb, key, cfg)
+	b := newBitmapImpl(rdb, key, cfg)
+	if err := b.connectAll(ctx); err != nil {
+		return nil, err
+	}
+	return b, nil
 }
 
 // NewBloomFilterWithEstimate creates a BloomFilter with explicit capacity and
 // false positive probability. 等价于
-// NewBloomFilter(key, WithCapacity(capacity), WithFalsePositive(falsePositive))。
-//
-// BF.* 路径的预分配语义：仅集群分片模式下、每个分片键首次写入前惰性
-// 执行一次 BF.RESERVE <base>#<idx> <falsePositive> <每分片容量>（见
-// bfCmdImpl.reserveShard），使两参数真正生效；其余场景首条 BF.ADD 按
-// RedisBloom 服务端默认容量自动创建，capacity/falsePositive 仅影响
-// bitmap 路径的 m/k 布局。
+// NewBloomFilter(ctx, key, WithCapacity(capacity), WithFalsePositive(falsePositive))，
+// 构造即连接、失败返回错误（语义与限制同 NewBloomFilter，含 BF.* fp
+// 不可服务端核验的边界）。
 //
 // 需要分片数、兜底策略等选项时，直接走 NewBloomFilter 组合对应 Option。
-func (rdb *redisClient) NewBloomFilterWithEstimate(key string, capacity int64, falsePositive float64) BloomFilter {
-	return rdb.NewBloomFilter(key,
+func (rdb *redisClient) NewBloomFilterWithEstimate(ctx context.Context, key string, capacity int64, falsePositive float64) (BloomFilter, error) {
+	return rdb.NewBloomFilter(ctx, key,
 		WithCapacity(capacity),
 		WithFalsePositive(falsePositive),
 	)

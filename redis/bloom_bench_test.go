@@ -68,15 +68,16 @@ func benchStandaloneClient(b *testing.B) (*redisClient, bool) {
 	if url == "" {
 		b.Skip("REDIS_URL 未设置：跳过真单机 bench")
 	}
-	rdb, err := NewWithUrl(url)
+	rdb, err := NewWithURL(url)
 	if err != nil {
-		b.Fatalf("NewWithUrl: %v", err)
+		b.Fatalf("NewWithURL: %v", err)
 	}
 	rc, ok := rdb.(*redisClient)
 	if !ok {
 		b.Fatalf("unexpected client type %T", rdb)
 	}
 	b.Cleanup(func() { _ = rc.GracefulClose(context.Background()) })
+	_ = rdb.Capability().Probe(context.Background()) // 查询为纯内存读：先显式探测
 	return rc, rdb.Capability().HasModule("bf")
 }
 
@@ -86,15 +87,16 @@ func benchClusterClient(b *testing.B) (*redisClient, bool) {
 	if raw == "" {
 		b.Skip("REDIS_CLUSTER 未设置：跳过真集群 bench")
 	}
-	rdb, err := NewWithUrl(raw)
+	rdb, err := NewWithURL(raw)
 	if err != nil {
-		b.Fatalf("NewWithUrl: %v", err)
+		b.Fatalf("NewWithURL: %v", err)
 	}
 	rc, ok := rdb.(*redisClient)
 	if !ok {
 		b.Fatalf("unexpected client type %T", rdb)
 	}
 	b.Cleanup(func() { _ = rc.GracefulClose(context.Background()) })
+	_ = rdb.Capability().Probe(context.Background()) // 查询为纯内存读：先显式探测
 	return rc, rdb.Capability().HasModule("bf")
 }
 
@@ -145,6 +147,7 @@ func benchNewFilter(rc *redisClient, path, key string) BloomFilter {
 // benchPathMatrix 为一个（环境 × 路径）组合注册全部操作叶子。
 // 每叶子独立物理键（benchKey 随机 base），互踩不可能发生。
 func benchPathMatrix(b *testing.B, rc *redisClient, path string) {
+	// benchmark 无 test context（testing.B 无 Context()），主体与清理均用 Background
 	ctx := context.Background()
 	mk := func(suffix string) BloomFilter {
 		return benchNewFilter(rc, path, benchKey(path+"-"+suffix))
@@ -152,11 +155,11 @@ func benchPathMatrix(b *testing.B, rc *redisClient, path string) {
 
 	b.Run("Add", func(b *testing.B) {
 		f := mk("add")
-		benchCleanupKeys(b, rc, f)
+		benchCleanupKeys(b, rc, f) //nolint:contextcheck // bench 清理闭包：testing.B 无 Context()，删除须脱离计时/上下文取消
 		seq := &benchSeq{tag: benchKey("item")}
 		b.ReportAllocs()
 		b.ResetTimer()
-		for i := 0; i < b.N; i++ {
+		for b.Loop() {
 			if _, err := f.Add(ctx, seq.next()); err != nil {
 				b.Fatalf("Add: %v", err)
 			}
@@ -165,7 +168,7 @@ func benchPathMatrix(b *testing.B, rc *redisClient, path string) {
 
 	b.Run("Exists", func(b *testing.B) {
 		f := mk("exists")
-		benchCleanupKeys(b, rc, f)
+		benchCleanupKeys(b, rc, f) //nolint:contextcheck // bench 清理闭包：testing.B 无 Context()，删除须脱离计时/上下文取消
 		pool := (&benchSeq{tag: benchKey("pool")}).batch(1000)
 		b.StopTimer()
 		if _, err := f.AddMulti(ctx, pool...); err != nil {
@@ -173,22 +176,23 @@ func benchPathMatrix(b *testing.B, rc *redisClient, path string) {
 		}
 		b.StartTimer()
 		b.ReportAllocs()
-		for i := 0; i < b.N; i++ {
-			if _, err := f.Exists(ctx, pool[i%len(pool)]); err != nil {
+		var j int // pool 轮转下标（迭代间与 i%len(pool) 等价）
+		for b.Loop() {
+			if _, err := f.Exists(ctx, pool[j%len(pool)]); err != nil {
 				b.Fatalf("Exists: %v", err)
 			}
+			j++
 		}
 	})
 
 	for _, size := range []int{100, 1000, 10000} {
-		size := size
 		b.Run(fmt.Sprintf("AddMulti/%d", size), func(b *testing.B) {
 			f := mk(fmt.Sprintf("am%d", size))
-			benchCleanupKeys(b, rc, f)
+			benchCleanupKeys(b, rc, f) //nolint:contextcheck // bench 清理闭包：testing.B 无 Context()，删除须脱离计时/上下文取消
 			seq := &benchSeq{tag: benchKey("am")}
 			b.ReportAllocs()
 			b.ResetTimer()
-			for i := 0; i < b.N; i++ {
+			for b.Loop() {
 				if _, err := f.AddMulti(ctx, seq.batch(size)...); err != nil {
 					b.Fatalf("AddMulti(%d): %v", size, err)
 				}
@@ -197,7 +201,7 @@ func benchPathMatrix(b *testing.B, rc *redisClient, path string) {
 
 		b.Run(fmt.Sprintf("ExistsMulti/%d", size), func(b *testing.B) {
 			f := mk(fmt.Sprintf("em%d", size))
-			benchCleanupKeys(b, rc, f)
+			benchCleanupKeys(b, rc, f) //nolint:contextcheck // bench 清理闭包：testing.B 无 Context()，删除须脱离计时/上下文取消
 			pool := (&benchSeq{tag: benchKey("em")}).batch(size)
 			b.StopTimer()
 			if _, err := f.AddMulti(ctx, pool...); err != nil {
@@ -205,7 +209,7 @@ func benchPathMatrix(b *testing.B, rc *redisClient, path string) {
 			}
 			b.StartTimer()
 			b.ReportAllocs()
-			for i := 0; i < b.N; i++ {
+			for b.Loop() {
 				if _, err := f.ExistsMulti(ctx, pool...); err != nil {
 					b.Fatalf("ExistsMulti(%d): %v", size, err)
 				}
@@ -214,10 +218,10 @@ func benchPathMatrix(b *testing.B, rc *redisClient, path string) {
 
 		b.Run(fmt.Sprintf("Reset/%d", size), func(b *testing.B) {
 			f := mk(fmt.Sprintf("rst%d", size))
-			benchCleanupKeys(b, rc, f)
+			benchCleanupKeys(b, rc, f) //nolint:contextcheck // bench 清理闭包：testing.B 无 Context()，删除须脱离计时/上下文取消
 			seq := &benchSeq{tag: benchKey("rst")}
 			b.ReportAllocs()
-			for i := 0; i < b.N; i++ {
+			for b.Loop() {
 				// 前置写入不计入计时：每迭代重灌 size 个唯一 item，
 				// 度量"满负荷键 → Reset"的真实清空成本
 				b.StopTimer()
@@ -234,14 +238,14 @@ func benchPathMatrix(b *testing.B, rc *redisClient, path string) {
 
 	b.Run("Card", func(b *testing.B) {
 		f := mk("card")
-		benchCleanupKeys(b, rc, f)
+		benchCleanupKeys(b, rc, f) //nolint:contextcheck // bench 清理闭包：testing.B 无 Context()，删除须脱离计时/上下文取消
 		b.StopTimer()
 		if _, err := f.AddMulti(ctx, (&benchSeq{tag: benchKey("card")}).batch(1000)...); err != nil {
 			b.Fatalf("预灌入 AddMulti: %v", err)
 		}
 		b.StartTimer()
 		b.ReportAllocs()
-		for i := 0; i < b.N; i++ {
+		for b.Loop() {
 			if _, err := f.Card(ctx); err != nil {
 				b.Fatalf("Card: %v", err)
 			}
@@ -250,14 +254,14 @@ func benchPathMatrix(b *testing.B, rc *redisClient, path string) {
 
 	b.Run("Info", func(b *testing.B) {
 		f := mk("info")
-		benchCleanupKeys(b, rc, f)
+		benchCleanupKeys(b, rc, f) //nolint:contextcheck // bench 清理闭包：testing.B 无 Context()，删除须脱离计时/上下文取消
 		b.StopTimer()
 		if _, err := f.AddMulti(ctx, (&benchSeq{tag: benchKey("info")}).batch(1000)...); err != nil {
 			b.Fatalf("预灌入 AddMulti: %v", err)
 		}
 		b.StartTimer()
 		b.ReportAllocs()
-		for i := 0; i < b.N; i++ {
+		for b.Loop() {
 			if _, err := f.Info(ctx); err != nil {
 				b.Fatalf("Info: %v", err)
 			}
@@ -311,6 +315,8 @@ func BenchmarkBloomMini(b *testing.B) {
 		b.Fatalf("unexpected client type %T", rdb)
 	}
 
+	// benchmark 主体：testing.B 无 Context()，使用 Background
+
 	ctx := context.Background()
 	newF := func() *bitmapImpl {
 		cfg := defaultBloomConfig()
@@ -328,15 +334,16 @@ func BenchmarkBloomMini(b *testing.B) {
 			b.Fatal(err)
 		}
 		b.StartTimer()
-		for i := 0; i < b.N; i++ {
-			if _, err := f.Exists(ctx, pool[i%len(pool)]); err != nil {
+		var j int // pool 轮转下标（与 i%len(pool) 等价）
+		for b.Loop() {
+			if _, err := f.Exists(ctx, pool[j%len(pool)]); err != nil {
 				b.Fatal(err)
 			}
+			j++
 		}
 	})
 
 	for _, size := range []int{100, 1000} {
-		size := size
 		b.Run(fmt.Sprintf("ExistsMulti/%d", size), func(b *testing.B) {
 			f := newF()
 			pool := (&benchSeq{tag: "bmn-em"}).batch(size)
@@ -345,7 +352,7 @@ func BenchmarkBloomMini(b *testing.B) {
 				b.Fatal(err)
 			}
 			b.StartTimer()
-			for i := 0; i < b.N; i++ {
+			for b.Loop() {
 				if _, err := f.ExistsMulti(ctx, pool...); err != nil {
 					b.Fatal(err)
 				}
@@ -355,7 +362,7 @@ func BenchmarkBloomMini(b *testing.B) {
 		b.Run(fmt.Sprintf("Reset/%d", size), func(b *testing.B) {
 			f := newF()
 			seq := &benchSeq{tag: "bmn-rst"}
-			for i := 0; i < b.N; i++ {
+			for b.Loop() {
 				b.StopTimer()
 				if _, err := f.AddMulti(ctx, seq.batch(size)...); err != nil {
 					b.Fatal(err)
@@ -375,7 +382,7 @@ func BenchmarkBloomMini(b *testing.B) {
 			b.Fatal(err)
 		}
 		b.StartTimer()
-		for i := 0; i < b.N; i++ {
+		for b.Loop() {
 			if _, err := f.Card(ctx); err != nil {
 				b.Fatal(err)
 			}
@@ -389,7 +396,7 @@ func BenchmarkBloomMini(b *testing.B) {
 			b.Fatal(err)
 		}
 		b.StartTimer()
-		for i := 0; i < b.N; i++ {
+		for b.Loop() {
 			if _, err := f.Info(ctx); err != nil {
 				b.Fatal(err)
 			}

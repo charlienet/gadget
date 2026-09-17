@@ -1,7 +1,6 @@
 package redis_test
 
 import (
-	"context"
 	"fmt"
 	"sync"
 	"testing"
@@ -45,8 +44,11 @@ func cuckooFingerprintInAnyBucket(buckets map[string]string, fp int64) bool {
 // 覆盖：Add/Exists/Del/Info、幂等语义、驱逐路径与模块版行为对齐。
 func TestCuckooHashImpl(t *testing.T) {
 	mini.Run(t, func(rdb redis.Client) {
-		ctx := context.Background()
-		cf := rdb.NewCuckooFilter("cfh:1", redis.WithCuckooCapacity(1000))
+		ctx := t.Context()
+		cf, cerr48 := rdb.NewCuckooFilter(t.Context(), "cfh:1", redis.WithCuckooCapacity(1000))
+		if cerr48 != nil {
+			t.Fatalf("构造过滤器：%v", cerr48)
+		}
 		require.NoError(t, rdb.Del(ctx, "cfh:1").Err())
 
 		t.Run("Add 与 Exists 命中与未命中", func(t *testing.T) {
@@ -86,7 +88,10 @@ func TestCuckooHashImpl(t *testing.T) {
 		})
 
 		t.Run("驱逐路径：小容量批量插入", func(t *testing.T) {
-			small := rdb.NewCuckooFilter("cfh:2", redis.WithCuckooCapacity(100))
+			small, cerr88 := rdb.NewCuckooFilter(ctx, "cfh:2", redis.WithCuckooCapacity(100))
+			if cerr88 != nil {
+				t.Fatalf("构造过滤器：%v", cerr88)
+			}
 			require.NoError(t, rdb.Del(ctx, "cfh:2").Err())
 
 			// capacity=100, bucketSize=4 → 25 桶 × 4 槽 = 100 槽位；
@@ -135,7 +140,10 @@ func TestCuckooHashImpl(t *testing.T) {
 
 		t.Run("驱逐路径中插入成功的元素保持可命中", func(t *testing.T) {
 			// 用低负载验证插入成功元素的可命中性（无驱逐干扰）
-			fresh := rdb.NewCuckooFilter("cfh:3", redis.WithCuckooCapacity(200))
+			fresh, cerr137 := rdb.NewCuckooFilter(ctx, "cfh:3", redis.WithCuckooCapacity(200))
+			if cerr137 != nil {
+				t.Fatalf("构造过滤器：%v", cerr137)
+			}
 			require.NoError(t, rdb.Del(ctx, "cfh:3").Err())
 
 			for i := range 50 {
@@ -164,7 +172,10 @@ func TestCuckooHashImpl(t *testing.T) {
 		})
 
 		t.Run("默认参数（无 Option）", func(t *testing.T) {
-			def := rdb.NewCuckooFilter("cfh:4")
+			def, cerr166 := rdb.NewCuckooFilter(ctx, "cfh:4")
+			if cerr166 != nil {
+				t.Fatalf("构造过滤器：%v", cerr166)
+			}
 			require.NoError(t, rdb.Del(ctx, "cfh:4").Err())
 
 			added, err := def.Add(ctx, "d1")
@@ -177,6 +188,9 @@ func TestCuckooHashImpl(t *testing.T) {
 
 			info, err := def.Info(ctx)
 			require.NoError(t, err)
+			// 默认桶大小 4；默认容量 10000 是存量 Hash 键布局的兼容约束
+			// （numBuckets=2500，冻结锚见内部测试 TestHashImplDefaultLayoutFreeze），
+			// 与 CF.* 路径默认预建容量 1000000 属不同机制。
 			assert.Equal(t, int64(4), info.BucketSize, "默认桶大小应为 4")
 			assert.Equal(t, int64(1), info.NumItems)
 		})
@@ -188,11 +202,14 @@ func TestCuckooHashImpl(t *testing.T) {
 // 且 Reset 后可继续正常使用（Add 重新建桶）。
 func TestCuckooHashReset(t *testing.T) {
 	mini.Run(t, func(rdb redis.Client) {
-		ctx := context.Background()
+		ctx := t.Context()
 		key := "cfh:reset"
 		require.NoError(t, rdb.Del(ctx, key).Err())
 
-		cf := rdb.NewCuckooFilter(key, redis.WithCuckooCapacity(1000))
+		cf, cerr197 := rdb.NewCuckooFilter(t.Context(), key, redis.WithCuckooCapacity(1000))
+		if cerr197 != nil {
+			t.Fatalf("构造过滤器：%v", cerr197)
+		}
 		for i := range 5 {
 			added, err := cf.Add(ctx, fmt.Sprintf("r-%d", i))
 			require.NoError(t, err)
@@ -238,9 +255,12 @@ func TestCuckooHashReset(t *testing.T) {
 // （DEL 对不存在键返回 0 而非错误），可安全重复调用/失败重试。
 func TestCuckooHashResetIdempotent(t *testing.T) {
 	mini.Run(t, func(rdb redis.Client) {
-		ctx := context.Background()
+		ctx := t.Context()
 
-		cf := rdb.NewCuckooFilter("cfh:reset-idem")
+		cf, cerr245 := rdb.NewCuckooFilter(t.Context(), "cfh:reset-idem")
+		if cerr245 != nil {
+			t.Fatalf("构造过滤器：%v", cerr245)
+		}
 		require.NoError(t, rdb.Del(ctx, "cfh:reset-idem").Err())
 
 		// 键不存在时 Reset 无错
@@ -254,23 +274,22 @@ func TestCuckooHashResetIdempotent(t *testing.T) {
 	})
 }
 
-// TestCuckooHashResetFailure 验证失败语义：服务不可用时 Reset 恒返回错误，
-// FailOpen 也不放行（"没清掉却假装清了"会让会话隔离静默失效）；错误经
-// fallbackErr 包装，errors.Is(ErrRedisUnavailable) 可感知。
+// TestCuckooHashConnectFailure 验证构造即连接的失败可见性：服务不可用时
+// 工厂在连接（hash 路径为 TYPE 校验）阶段返回错误，errors.Is
+// (ErrRedisUnavailable) 可感知，且不交付实例；与 FailPolicy 取值无关。
+// （Reset 阶段的不可用哨兵语义由 bloom 侧 TestBloomResetUnavailable 覆盖。）
 // 复用 failover_test.go 的 newFailedClient（同包测试辅助）。
-func TestCuckooHashResetFailure(t *testing.T) {
-	ctx := context.Background()
+func TestCuckooHashConnectFailure(t *testing.T) {
 	rdb := newFailedClient(t)
 
-	// 默认 FailOpen：仍返回错误
-	cf := rdb.NewCuckooFilter("cfh:reset-fail")
-	require.ErrorIs(t, cf.Reset(ctx), redis.ErrRedisUnavailable,
-		"FailOpen 下 Reset 失败也必须返回错误（不走兜底放行）")
+	cf, err := rdb.NewCuckooFilter(t.Context(), "cfh:connect-fail")
+	require.ErrorIs(t, err, redis.ErrRedisUnavailable, "服务不可用时构造应返回哨兵错误")
+	require.Nil(t, cf, "连接失败不交付实例")
 
-	// 显式 FailClosed：同样返回错误
-	cfClosed := rdb.NewCuckooFilter("cfh:reset-fail2",
+	cfClosed, err2 := rdb.NewCuckooFilter(t.Context(), "cfh:connect-fail2",
 		redis.WithFailPolicy[*redis.CuckooConfig](redis.FailClosed))
-	require.ErrorIs(t, cfClosed.Reset(ctx), redis.ErrRedisUnavailable)
+	require.ErrorIs(t, err2, redis.ErrRedisUnavailable, "FailClosed 下构造失败同样返回错误")
+	require.Nil(t, cfClosed)
 }
 
 // TestCuckooHashResetConcurrent 并发冒烟（-race 下跑）：Reset×Add×Exists
@@ -278,11 +297,14 @@ func TestCuckooHashResetFailure(t *testing.T) {
 // 故只容忍错误、不断言结果。
 func TestCuckooHashResetConcurrent(t *testing.T) {
 	mini.Run(t, func(rdb redis.Client) {
-		ctx := context.Background()
+		ctx := t.Context()
 		key := "cfh:reset-race"
 		require.NoError(t, rdb.Del(ctx, key).Err())
 
-		cf := rdb.NewCuckooFilter(key, redis.WithCuckooCapacity(500))
+		cf, cerr287 := rdb.NewCuckooFilter(t.Context(), key, redis.WithCuckooCapacity(500))
+		if cerr287 != nil {
+			t.Fatalf("构造过滤器：%v", cerr287)
+		}
 
 		var wg sync.WaitGroup
 		start := make(chan struct{})
@@ -318,11 +340,14 @@ func TestCuckooHashResetConcurrent(t *testing.T) {
 // 整体数据类错误且不发命令（键内容不变）。
 func TestCuckooHashExistsMulti(t *testing.T) {
 	mini.Run(t, func(rdb redis.Client) {
-		ctx := context.Background()
+		ctx := t.Context()
 		key := "cfh:mexists"
 		require.NoError(t, rdb.Del(ctx, key).Err())
 
-		cf := rdb.NewCuckooFilter(key, redis.WithCuckooCapacity(1000))
+		cf, cerr327 := rdb.NewCuckooFilter(t.Context(), key, redis.WithCuckooCapacity(1000))
+		if cerr327 != nil {
+			t.Fatalf("构造过滤器：%v", cerr327)
+		}
 		for _, it := range []string{"m-0", "m-1", "m-2"} {
 			_, err := cf.Add(ctx, it)
 			require.NoError(t, err)
@@ -364,11 +389,14 @@ func TestCuckooHashExistsMulti(t *testing.T) {
 // （去重语义、重复 Add 不增计数）、Del 后归 0。
 func TestCuckooHashCount(t *testing.T) {
 	mini.Run(t, func(rdb redis.Client) {
-		ctx := context.Background()
+		ctx := t.Context()
 		key := "cfh:count"
 		require.NoError(t, rdb.Del(ctx, key).Err())
 
-		cf := rdb.NewCuckooFilter(key, redis.WithCuckooCapacity(1000))
+		cf, cerr373 := rdb.NewCuckooFilter(t.Context(), key, redis.WithCuckooCapacity(1000))
+		if cerr373 != nil {
+			t.Fatalf("构造过滤器：%v", cerr373)
+		}
 
 		n, err := cf.Count(ctx, "c-1")
 		require.NoError(t, err)
@@ -401,11 +429,14 @@ func TestCuckooHashCount(t *testing.T) {
 // 只走 AddNX，同一序列逐项返回值恒相同。
 func TestCuckooHashAddNX(t *testing.T) {
 	mini.Run(t, func(rdb redis.Client) {
-		ctx := context.Background()
+		ctx := t.Context()
 		kAdd, kNX := "cfh:nx-add", "cfh:nx-only"
 		require.NoError(t, rdb.Del(ctx, kAdd, kNX).Err())
 
-		cfNX := rdb.NewCuckooFilter(kNX, redis.WithCuckooCapacity(1000))
+		cfNX, cerr410 := rdb.NewCuckooFilter(t.Context(), kNX, redis.WithCuckooCapacity(1000))
+		if cerr410 != nil {
+			t.Fatalf("构造过滤器：%v", cerr410)
+		}
 		added, err := cfNX.AddNX(ctx, "n-1")
 		require.NoError(t, err)
 		assert.True(t, added, "首次插入应成功")
@@ -416,7 +447,10 @@ func TestCuckooHashAddNX(t *testing.T) {
 
 		// 等价性锚定：回退版 Add 本就是 NX（cuckooAddScript 存在即返回 0），
 		// 两方法对同一序列恒同。
-		cfAdd := rdb.NewCuckooFilter(kAdd, redis.WithCuckooCapacity(1000))
+		cfAdd, cerr421 := rdb.NewCuckooFilter(t.Context(), kAdd, redis.WithCuckooCapacity(1000))
+		if cerr421 != nil {
+			t.Fatalf("构造过滤器：%v", cerr421)
+		}
 		seq := []string{"k-1", "k-2", "k-1", "k-3", "k-2", "k-1", "k-4"}
 		for _, s := range seq {
 			a, err := cfAdd.Add(ctx, s)
@@ -433,12 +467,15 @@ func TestCuckooHashAddNX(t *testing.T) {
 // 禁止混合结果；Count 观测类恒 (0, 哨兵)、不随策略分叉；AddNX 写布尔类
 // 与 Add 同走 fallbackBool。复用 failover_test.go 的 newFailedClient。
 func TestCuckooFilterMultiOpsFailover(t *testing.T) {
-	ctx := context.Background()
-	rdb := newFailedClient(t)
+	ctx := t.Context()
+	rdb, kill := newCloseableClient(t)
 
-	cf := rdb.NewCuckooFilter("cfh:fail-multi") // 默认 FailOpen
-	cfClosed := rdb.NewCuckooFilter("cfh:fail-multi2",
+	cf, cfe := rdb.NewCuckooFilter(ctx, "cfh:fail-multi") // 默认 FailOpen
+	require.NoError(t, cfe, "服务在场时构造应成功")
+	cfClosed, cfe2 := rdb.NewCuckooFilter(ctx, "cfh:fail-multi2",
 		redis.WithFailPolicy[*redis.CuckooConfig](redis.FailClosed))
+	require.NoError(t, cfe2)
+	kill() // 构造完成后服务失效——批量/观测路径进入兜底
 
 	t.Run("ExistsMulti 整体兜底", func(t *testing.T) {
 		res, err := cf.ExistsMulti(ctx, "a", "b", "c")
@@ -483,11 +520,14 @@ func TestCuckooFilterMultiOpsFailover(t *testing.T) {
 // （并发 Reset 世代效应）。
 func TestCuckooHashMultiOpsConcurrent(t *testing.T) {
 	mini.Run(t, func(rdb redis.Client) {
-		ctx := context.Background()
+		ctx := t.Context()
 		key := "cfh:multi-race"
 		require.NoError(t, rdb.Del(ctx, key).Err())
 
-		cf := rdb.NewCuckooFilter(key, redis.WithCuckooCapacity(500))
+		cf, cerr492 := rdb.NewCuckooFilter(t.Context(), key, redis.WithCuckooCapacity(500))
+		if cerr492 != nil {
+			t.Fatalf("构造过滤器：%v", cerr492)
+		}
 
 		var wg sync.WaitGroup
 		start := make(chan struct{})
@@ -530,14 +570,20 @@ func TestCuckooHashMultiOpsConcurrent(t *testing.T) {
 // 混入 → 整体数据类错误且不发命令（键内容不变）。
 func TestCuckooHashAddMultiConsistency(t *testing.T) {
 	mini.Run(t, func(rdb redis.Client) {
-		ctx := context.Background()
+		ctx := t.Context()
 		kSeq, kBatch := "cfh:am-seq", "cfh:am-batch"
 		require.NoError(t, rdb.Del(ctx, kSeq, kBatch).Err())
 
 		// 同构配置：capacity/bucketSize 一致 → fp/i1/i2 序列与驱逐决策一致
 		opt := redis.WithCuckooCapacity(1000)
-		cfSeq := rdb.NewCuckooFilter(kSeq, opt)
-		cfBatch := rdb.NewCuckooFilter(kBatch, opt)
+		cfSeq, cerr541 := rdb.NewCuckooFilter(t.Context(), kSeq, opt)
+		if cerr541 != nil {
+			t.Fatalf("构造过滤器：%v", cerr541)
+		}
+		cfBatch, cerr542 := rdb.NewCuckooFilter(t.Context(), kBatch, opt)
+		if cerr542 != nil {
+			t.Fatalf("构造过滤器：%v", cerr542)
+		}
 
 		// 构造含重复的确定性序列（dup 项触发 0 结果；200 项保持低负载，
 		// 避免超载驱逐使结果不确定化——两路径若都超载仍应相等，但锚定
@@ -598,12 +644,15 @@ func TestCuckooHashAddMultiConsistency(t *testing.T) {
 // 操作，真机 Redis 数量级相当、Lua 执行为主项）。
 func TestCuckooHashAddMultiSmoke1000(t *testing.T) {
 	mini.Run(t, func(rdb redis.Client) {
-		ctx := context.Background()
+		ctx := t.Context()
 		key := "cfh:am-1000"
 		require.NoError(t, rdb.Del(ctx, key).Err())
 
 		// capacity 5000 → 1250 桶 × 4 槽，1000 项约 20% 负载，无超载拒绝
-		cf := rdb.NewCuckooFilter(key, redis.WithCuckooCapacity(5000))
+		cf, cerr608 := rdb.NewCuckooFilter(t.Context(), key, redis.WithCuckooCapacity(5000))
+		if cerr608 != nil {
+			t.Fatalf("构造过滤器：%v", cerr608)
+		}
 
 		items := make([]any, 1000)
 		for i := range items {
@@ -636,10 +685,15 @@ func TestCuckooHashAddMultiSmoke1000(t *testing.T) {
 // fallbackBools（FailOpen 全 true / FailClosed 全 false）+ 哨兵错误可感知，
 // 禁止混合结果。复用 failover_test.go 的 newFailedClient。
 func TestCuckooFilterAddMultiFailover(t *testing.T) {
-	ctx := context.Background()
-	rdb := newFailedClient(t)
+	ctx := t.Context()
+	rdb, kill := newCloseableClient(t)
 
-	cf := rdb.NewCuckooFilter("cfh:am-fail") // 默认 FailOpen
+	cf, cfe := rdb.NewCuckooFilter(ctx, "cfh:am-fail") // 默认 FailOpen
+	require.NoError(t, cfe, "服务在场时构造应成功")
+	cfClosed, cfe2 := rdb.NewCuckooFilter(ctx, "cfh:am-fail2",
+		redis.WithFailPolicy[*redis.CuckooConfig](redis.FailClosed))
+	require.NoError(t, cfe2)
+	kill() // 构造完成后服务失效——批量写进入兜底
 	res, err := cf.AddMulti(ctx, "a", "b", "c")
 	require.ErrorIs(t, err, redis.ErrRedisUnavailable)
 	require.Len(t, res, 3, "兜底切片长度必须与入参一致")
@@ -647,8 +701,6 @@ func TestCuckooFilterAddMultiFailover(t *testing.T) {
 		assert.True(t, v, "FailOpen 下第 %d 项应为 true（禁止混合结果）", i)
 	}
 
-	cfClosed := rdb.NewCuckooFilter("cfh:am-fail2",
-		redis.WithFailPolicy[*redis.CuckooConfig](redis.FailClosed))
 	res, err = cfClosed.AddMulti(ctx, "a", "b")
 	require.ErrorIs(t, err, redis.ErrRedisUnavailable)
 	require.Len(t, res, 2)
@@ -662,11 +714,14 @@ func TestCuckooFilterAddMultiFailover(t *testing.T) {
 // 断言（并发 Reset 世代效应）。
 func TestCuckooHashAddMultiConcurrent(t *testing.T) {
 	mini.Run(t, func(rdb redis.Client) {
-		ctx := context.Background()
+		ctx := t.Context()
 		key := "cfh:am-race"
 		require.NoError(t, rdb.Del(ctx, key).Err())
 
-		cf := rdb.NewCuckooFilter(key, redis.WithCuckooCapacity(500))
+		cf, cerr671 := rdb.NewCuckooFilter(t.Context(), key, redis.WithCuckooCapacity(500))
+		if cerr671 != nil {
+			t.Fatalf("构造过滤器：%v", cerr671)
+		}
 
 		var wg sync.WaitGroup
 		start := make(chan struct{})

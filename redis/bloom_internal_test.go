@@ -233,8 +233,8 @@ func TestBloomOptionBounds(t *testing.T) {
 		WithFalsePositive(0)(&cfg)
 		WithFalsePositive(-1)(&cfg)
 		WithFalsePositive(1)(&cfg)
-		if cfg.falsePositive != 0.01 {
-			t.Fatalf("WithFalsePositive 非法值应保留默认 0.01，got %v", cfg.falsePositive)
+		if cfg.falsePositive != 0.0001 {
+			t.Fatalf("WithFalsePositive 非法值应保留默认 0.0001（0.01%%），got %v", cfg.falsePositive)
 		}
 		// 回落默认后构造不 panic
 		_ = newBitmapImpl(nil, "k", cfg)
@@ -329,9 +329,9 @@ func TestBitmapConcurrentAddRealRedis(t *testing.T) {
 		t.Skip("REDIS_URL not set; skip real-Redis concurrency test")
 	}
 
-	rdb, err := NewWithUrl(url)
+	rdb, err := NewWithURL(url)
 	if err != nil {
-		t.Fatalf("NewWithUrl: %v", err)
+		t.Fatalf("NewWithURL: %v", err)
 	}
 	defer func() { _ = rdb.GracefulClose(context.Background()) }()
 
@@ -437,7 +437,9 @@ func newMiniRedisClient(t *testing.T) (*redisClient, *miniredis.Miniredis) {
 	t.Cleanup(mr.Close)
 
 	rdb := New(WithAddr(mr.Addr()))
-	t.Cleanup(func() { _ = rdb.GracefulClose(context.Background()) })
+	// Close 是无 ctx 的接口兼容形态（内部 Background 级联关闭），清理阶段
+	// 不依赖测试上下文。
+	t.Cleanup(func() { _ = rdb.Close() })
 
 	rc, ok := rdb.(*redisClient)
 	if !ok {
@@ -453,7 +455,7 @@ func newMiniRedisClient(t *testing.T) (*redisClient, *miniredis.Miniredis) {
 //   - 记忆为 -1 → 入口跳过 EVAL，由 addFallback（pipeline 兜底）完成操作，
 //     记忆保持 -1（慢路径不得"复活"记忆）。
 func TestLuaSupportStateTransition(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 
 	t.Run("成功后记忆置 1", func(t *testing.T) {
 		rc, _ := newMiniRedisClient(t)
@@ -548,7 +550,7 @@ func TestLuaSupportStateTransition(t *testing.T) {
 //     任一侧语义回退都会立即失败。
 func TestBitmapFallbackConsistency(t *testing.T) {
 	rc, mr := newMiniRedisClient(t)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	cfg := defaultBloomConfig()
 	cfg.capacity = 10000
@@ -596,7 +598,8 @@ func TestBitmapFallbackConsistency(t *testing.T) {
 		}
 	}
 
-	// 位图最终状态逐字节一致
+	// 位图最终状态逐字节一致；合法的长度差只允许是预热补齐的全零尾部
+	// （add 路径经恒预热、白盒直调 addFallback 不经），前缀必须逐字节相等。
 	bmLua, err := mr.Get("cons:lua")
 	if err != nil {
 		t.Fatal(err)
@@ -606,7 +609,18 @@ func TestBitmapFallbackConsistency(t *testing.T) {
 		t.Fatal(err)
 	}
 	if bmLua != bmFb {
-		t.Fatalf("两路径位图最终状态不一致：len %d vs %d", len(bmLua), len(bmFb))
+		shorter, longer := bmFb, bmLua
+		if len(bmLua) < len(bmFb) {
+			shorter, longer = bmLua, bmFb
+		}
+		if len(longer) != int((bLua.m+7)/8) || shorter != longer[:len(shorter)] {
+			t.Fatalf("两路径位图不一致且差异非预热补零：len %d vs %d", len(bmLua), len(bmFb))
+		}
+		for i, x := range longer[len(shorter):] {
+			if x != 0 {
+				t.Fatalf("预热 padding 尾部第 %d 字节非零：%d", i, x)
+			}
+		}
 	}
 }
 
@@ -673,7 +687,7 @@ func TestBitmapAddSemanticsHighFill(t *testing.T) {
 // 批量脚本（bitmapAddMultiScript）与单条脚本同构修改，同场景一并覆盖。
 func TestBitmapAddDenseViaLua(t *testing.T) {
 	rc, _ := newMiniRedisClient(t)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	cfg := defaultBloomConfig()
 	cfg.capacity = 10000
@@ -773,7 +787,7 @@ func TestBitmapClusterFallbackRouting(t *testing.T) {
 	if raw == "" {
 		t.Skip("REDIS_CLUSTER not set; skip cluster test")
 	}
-	rdb, err := NewWithUrl(raw)
+	rdb, err := NewWithURL(raw)
 	if err != nil {
 		t.Fatalf("REDIS_CLUSTER URL 解析失败：%v", err)
 	}
@@ -855,7 +869,7 @@ func TestBitmapClusterFallbackRouting(t *testing.T) {
 // （含顺序对应性）与最终位图必须完全一致——批量化的正确性回归。
 func TestBitmapMultiVsLoopConsistency(t *testing.T) {
 	rc, mr := newMiniRedisClient(t)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	cfg := defaultBloomConfig()
 	cfg.capacity = 10000
@@ -1256,7 +1270,7 @@ func newShardedBitmapForTest(t *testing.T, key string, policy FailPolicy) (*bitm
 // shardN=4）：键名格式与散布、k 位落对分片、AddMulti/ExistsMulti 跨分片
 // 结果顺序回填（与单条路径逐位一致）。
 func TestBitmapShardedMiniredis(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 	const nShards = 4
 
 	items := make([]any, 200)
@@ -1406,7 +1420,7 @@ func TestBitmapShardedMiniredis(t *testing.T) {
 // EVAL）的结果序列与每分片位图内容完全一致（规格 10a）。两侧用独立
 // miniredis 实例（luaSupport 为 client 级记忆，共享会互相污染）。
 func TestBitmapShardedLoopVsBatchConsistency(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 	items := make([]any, 120)
 	for i := range items {
 		items[i] = fmt.Sprintf("lbc-%d", i)
@@ -1492,7 +1506,7 @@ func TestBitmapShardedLoopVsBatchConsistency(t *testing.T) {
 // 的"整体失败"定义（规格 8）：任一分片组服务不可用 → 全部 items 按
 // policy 兜底 + ErrRedisUnavailable 哨兵错误，禁止部分真实部分兜底。
 func TestBloomShardedUnavailableWholeFallback(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 	items := make([]any, 50)
 	for i := range items {
 		items[i] = fmt.Sprintf("uf-%d", i)
@@ -1599,12 +1613,13 @@ func TestBloomABRealRedis(t *testing.T) {
 	if url == "" {
 		t.Skip("REDIS_URL not set; skip real-Redis A/B test")
 	}
-	rdb, err := NewWithUrl(url)
+	rdb, err := NewWithURL(url)
 	if err != nil {
-		t.Fatalf("NewWithUrl: %v", err)
+		t.Fatalf("NewWithURL: %v", err)
 	}
 	defer func() { _ = rdb.GracefulClose(context.Background()) }()
 
+	_ = rdb.Capability().Probe(t.Context()) // 查询为纯内存读：guard 前显式探测
 	if !rdb.Capability().HasModule("bf") {
 		t.Skip("服务器未加载 bf 模块（RedisBloom / Redis 8.x community），跳过 A/B 对照")
 	}
@@ -1626,10 +1641,7 @@ func TestBloomABRealRedis(t *testing.T) {
 		t.Helper()
 		// "自洽"判据 = 写入必可读（布隆无假阴性是硬保证）。
 		// **不断言全新元素 Add/AddMulti 必返回 true**：返回 false 只表示
-		// 服务端判"可能已存在"（正常假阳性事件，位仍已写入）。BF
-		// standalone 路径不预分配（见 NewBloomFilterWithEstimate 注释），
-		// 1000 元素灌进 RedisBloom 默认 capacity=100 的子过滤器扩容链时，
-		// 新增判定的假阳性率达百分位——属两条路径既有容量语义差异，非缺陷。
+		// 服务端判"可能已存在"（正常假阳性事件，位仍已写入）。
 		for i := range n / 2 {
 			if _, err := f.Add(ctx, items[i]); err != nil {
 				t.Fatalf("%s Add(%s)：%v", name, items[i], err)
@@ -1682,9 +1694,7 @@ func TestBloomABRealRedis(t *testing.T) {
 
 	// Info 合理性（不做跨路径严格对比）：NumItems 在 1000 ±10% 内、
 	// Size/Capacity 为正。BF 路径 ItemsInserted 为精确计数，bitmap 路径
-	// 是置位数估计——两者都应在宽松区间内；BF standalone 无预分配
-	// （见 NewBloomFilterWithEstimate 注释），Capacity 为扩容后的子过滤器
-	// 容量和，仅断言 >0。
+	// 是置位数估计——两者都应在宽松区间内；Capacity 仅断言 >0。
 	checkInfo := func(name string, f BloomFilter) {
 		t.Helper()
 		info, err := f.Info(ctx)
@@ -1703,25 +1713,15 @@ func TestBloomABRealRedis(t *testing.T) {
 	checkInfo("bitmap", bmp)
 }
 
-// --- Reset（清空物理键 + 惰性 RESERVE 闸门复位） ---
-
-// bfGatePtrs 抓取 bfCmdImpl 各分片闸门当前指向的 *sync.Once，用于断言
-// Reset 前后指针换代（白盒验证闸门复位）。
-func bfGatePtrs(bf *bfCmdImpl) []*sync.Once {
-	ptrs := make([]*sync.Once, len(bf.reserves))
-	for i := range bf.reserves {
-		ptrs[i] = bf.reserves[i].Load()
-	}
-	return ptrs
-}
+// --- Reset（清空物理键 + 同步重建） ---
 
 // newShardedBFOnMini 在 miniredis 上手工构造分片形态（enabled，n=4）的
 // bfCmdImpl——本库包测试环境无 RedisBloom 模块（miniredis 不支持 BF.*），
 // 也不具备真实集群；本构造专供白盒验证 Reset 中**不依赖 BF.* 的部分**：
-// DEL 清空、atomic.Pointer 闸门的换代与重新武装（reserveShard 会真实
-// 发出 BF.RESERVE 并收到 unknown command 错误——错误形态恰是可观测信号）。
-// 端到端的 RESERVE 参数正确性（Capacity==perShard）见
-// TestBloomResetBFCapacityRealRedisBloom（需真实环境，守卫跳过）。
+// DEL 清空、重建期 BF.RESERVE 的发出形态（unknown command 错误恰是
+// "命令真实发出"的可观测信号）。端到端的 RESERVE 参数正确性
+// （Capacity==perShard）见 TestBloomResetBFCapacityRealRedisBloom
+// （需真实环境，守卫跳过）。
 func newShardedBFOnMini(t *testing.T, key string, policy FailPolicy) (*bfCmdImpl, *redisClient, *miniredis.Miniredis) {
 	t.Helper()
 	rc, mr := newMiniRedisClient(t)
@@ -1734,10 +1734,6 @@ func newShardedBFOnMini(t *testing.T, key string, policy FailPolicy) (*bfCmdImpl
 		sharder:  newBloomSharder(key, true, 4),
 		perShard: 1000,
 	}
-	bf.reserves = make([]atomic.Pointer[sync.Once], 4)
-	for i := range bf.reserves {
-		bf.reserves[i].Store(new(sync.Once))
-	}
 	return bf, rc, mr
 }
 
@@ -1747,7 +1743,7 @@ func newShardedBFOnMini(t *testing.T, key string, policy FailPolicy) (*bfCmdImpl
 // Info 对已删键返回零值（StrLen/BITCOUNT 天然 0，非 not-found 错误——
 // 既有行为不变）。
 func TestBloomResetBitmapStandalone(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 	rc, mr := newMiniRedisClient(t)
 	cfg := defaultBloomConfig()
 	cfg.capacity = 10000
@@ -1779,17 +1775,16 @@ func TestBloomResetBitmapStandalone(t *testing.T) {
 	if err := b.Reset(ctx); err != nil {
 		t.Fatalf("单键 Reset：%v", err)
 	}
-	if mr.Exists("rst:solo") {
-		t.Fatal("Reset 后物理键仍存在（DEL 未生效）")
+	// Reset 同步重建：DEL 之后立即按构造期 m/k 建立全额位图，键在。
+	if !mr.Exists("rst:solo") {
+		t.Fatal("Reset 后物理键应已同步重建存在")
 	}
-	// Info 对不存在键零值不报错（standalone 既有 not-found 行为不变）——
-	// 必须在重写之前断言，否则新置位会污染计数。
 	info, err := b.Info(ctx)
 	if err != nil {
-		t.Fatalf("standalone 空过滤器 Info 不应报错：%v", err)
+		t.Fatalf("Reset 后 Info：%v", err)
 	}
-	if info.NumItems != 0 || info.Size != 0 {
-		t.Fatalf("Reset 后 Info 计数应归零：got %+v", info)
+	if info.NumItems != 0 || info.Size != int64((b.m+7)/8) {
+		t.Fatalf("Reset 后应为空过滤器且 Size 为全额分配：got %+v want Size=%d", info, (b.m+7)/8)
 	}
 	for _, item := range items {
 		ok, err := b.Exists(ctx, item)
@@ -1800,7 +1795,7 @@ func TestBloomResetBitmapStandalone(t *testing.T) {
 			t.Fatalf("Reset 后 Exists(%v) 必须为 false（清空语义破坏）", item)
 		}
 	}
-	// 重写判新增（键已被删除，等价全新过滤器）
+	// 重写判新增（重建后的空过滤器，全新 item 判新增）
 	added, err := b.Add(ctx, "a")
 	if err != nil || !added {
 		t.Fatalf("Reset 后 Add(%v) 应判新增：added=%v err=%v", "a", added, err)
@@ -1816,8 +1811,22 @@ func TestBloomResetBitmapStandalone(t *testing.T) {
 // 不变）；分片态 Info 归零（空分片键 StrLen/BITCOUNT 天然 0，聚合不
 // 报错）。
 func TestBloomResetBitmapSharded(t *testing.T) {
-	ctx := context.Background()
-	b, _, mr := newShardedBitmapForTest(t, "rst:shard", FailOpen)
+	ctx := t.Context()
+	b, rc, mr := newShardedBitmapForTest(t, "rst:shard", FailOpen)
+
+	// 工厂构造期连接例程（直构实例显式调用）：分片形态逐物理键全建——
+	// 每键存在且 STRLEN 为全额 ⌈m/8⌉
+	if err := b.connectAll(ctx); err != nil {
+		t.Fatalf("分片 connectAll（构造期例程）：%v", err)
+	}
+	for _, k := range b.sharder.allKeys() {
+		if !mr.Exists(k) {
+			t.Fatalf("分片构造后键 %s 不存在（未全建？）", k)
+		}
+		if n, err := rc.StrLen(ctx, k).Result(); err != nil || n != int64((b.m+7)/8) {
+			t.Fatalf("分片键 %s STRLEN got %d err=%v want %d", k, n, err, (b.m+7)/8)
+		}
+	}
 
 	items := make([]any, 200)
 	for i := range items {
@@ -1834,8 +1843,9 @@ func TestBloomResetBitmapSharded(t *testing.T) {
 	if err := b.Reset(ctx); err != nil {
 		t.Fatalf("分片 Reset：%v", err)
 	}
-	if ks := mr.Keys(); len(ks) != 0 {
-		t.Fatalf("Reset 后仍残留键 %v（分片未清干净）", ks)
+	// Reset 同步重建：DEL 全分片后逐分片重新建立，键集合与重建前一致
+	if ks := mr.Keys(); len(ks) != b.sharder.n {
+		t.Fatalf("Reset 后键集合 %v（期望 %d 个分片键已同步重建）", ks, b.sharder.n)
 	}
 	for _, item := range items[:50] {
 		ok, err := b.Exists(ctx, item)
@@ -1871,38 +1881,42 @@ func TestBloomResetBitmapSharded(t *testing.T) {
 	}
 }
 
-// TestBloomResetBFGateRearm 用 miniredis 白盒验证 bfCmdImpl.Reset 的
-// 客户端逻辑：DEL 清空（单键与分片 pipeline 两形态）、闸门 Once 换代、
-// 重新武装后 reserveShard 再次实际执行（BF.RESERVE 重发以 unknown
-// command 错误为可观测信号——once 未换代则 Do 不再执行 f、错误消失）。
-// BF.* 端到端参数正确性另见真环境守卫用例。
-func TestBloomResetBFGateRearm(t *testing.T) {
-	ctx := context.Background()
+// TestBloomResetRecreate 白盒验证 bfCmdImpl.Reset 的"DEL + 同步重建"
+// 两拍：miniredis 无 BF 模块，重建期 BF.RESERVE 报 unknown command
+// （数据类、非哨兵）且命令真实发出；DEL 先于重建执行、键已清空；
+// 二次 Reset 行为与错误形态一致（DEL 幂等、重建确定性失败）。
+func TestBloomResetRecreate(t *testing.T) {
+	ctx := t.Context()
 
-	t.Run("非分片闸门为 nil 且 Reset 仅删键", func(t *testing.T) {
+	t.Run("单键 Reset 后重建 RESERVE 发出", func(t *testing.T) {
 		rc, mr := newMiniRedisClient(t)
 		cfg := defaultBloomConfig()
 		cfg.policy = FailOpen
 		bf := rc.newBFImpl("rst:bfsolo", cfg) // miniredis standalone → enabled=false
-		if bf.sharder.enabled || len(bf.reserves) != 0 {
-			t.Fatal("standalone 不应启用分片/分配闸门")
+		if bf.sharder.enabled {
+			t.Fatal("standalone 不应启用分片")
 		}
 		if err := rc.Set(ctx, "rst:bfsolo", "x", 0).Err(); err != nil {
 			t.Fatal(err)
 		}
-		if err := bf.Reset(ctx); err != nil {
-			t.Fatalf("单键 Reset：%v", err)
+		err1 := bf.Reset(ctx)
+		if !errContainsCmd(err1, "BF.RESERVE") {
+			t.Fatalf("Reset 应先 DEL 再实发 BF.RESERVE（unknown command 即发出信号），got %v", err1)
+		}
+		if errors.Is(err1, ErrRedisUnavailable) {
+			t.Fatalf("unknown command 是数据类错误，不得包哨兵：%v", err1)
 		}
 		if mr.Exists("rst:bfsolo") {
-			t.Fatal("单键 Reset 后键残留")
+			t.Fatal("Reset 的 DEL 未生效（键残留）")
 		}
-		// 闸门为 nil slice：复位循环空转，reserveShard 短路返回 nil
-		if err := bf.reserveShard(ctx, 0); err != nil {
-			t.Fatalf("非分片 reserveShard 应短路 nil，got %v", err)
+		// 二次 Reset 幂等：DEL 无键成功、重建确定性再报同一形态错误
+		err2 := bf.Reset(ctx)
+		if !errContainsCmd(err2, "BF.RESERVE") || errors.Is(err2, ErrRedisUnavailable) {
+			t.Fatalf("二次 Reset 错误形态应与首次一致（幂等重试），got %v", err2)
 		}
 	})
 
-	t.Run("分片 DEL 清空与闸门换代重新武装", func(t *testing.T) {
+	t.Run("分片 DEL 清空与逐键重建发出", func(t *testing.T) {
 		bf, rc, mr := newShardedBFOnMini(t, "rst:bfshard", FailOpen)
 		keys := bf.sharder.allKeys()
 		if fmt.Sprint(keys) != "[rst:bfshard#0 rst:bfshard#1 rst:bfshard#2 rst:bfshard#3]" {
@@ -1913,53 +1927,25 @@ func TestBloomResetBFGateRearm(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-
-		// 先把闸门"烧掉"：miniredis 无 BF 模块，reserveShard 真实发出
-		// BF.RESERVE 收到 unknown command（数据类错误、不命中 already
-		// exists 吞错分支），once 燃尽且错误原样返回。
-		for i := range keys {
-			err := bf.reserveShard(ctx, i)
-			if err == nil {
-				t.Fatalf("无 bf 模块环境 reserveShard(%d) 应报 unknown command", i)
-			}
-			if errors.Is(err, ErrRedisUnavailable) {
-				t.Fatalf("unknown command 是数据类错误，不得走兜底哨兵：%v", err)
-			}
-		}
-		before := bfGatePtrs(bf)
-
-		if err := bf.Reset(ctx); err != nil {
-			t.Fatalf("分片 Reset：%v", err)
+		err := bf.Reset(ctx)
+		if !errContainsCmd(err, "BF.RESERVE") {
+			t.Fatalf("分片 Reset 重建应实发 BF.RESERVE，got %v", err)
 		}
 		for _, k := range keys {
 			if mr.Exists(k) {
-				t.Fatalf("Reset 后分片键 %s 残留（pipeline DEL 未生效）", k)
+				t.Fatalf("Reset 后分片键 %s 残留（DEL 先于重建执行）", k)
 			}
 		}
-		after := bfGatePtrs(bf)
-		for i := range after {
-			if after[i] == nil {
-				t.Fatalf("复位后闸门 %d 为 nil（atomic.Pointer 零值陷阱）", i)
-			}
-			if after[i] == before[i] {
-				t.Fatalf("闸门 %d 未换代（Reset 未重新武装 BF.RESERVE 闸门）", i)
-			}
-		}
-
-		// 重新武装验证：换代后 reserveShard 必须再次实际执行 BF.RESERVE
-		// （若闸门未换代，Do 因 once 燃尽直接跳过 f、返回 nil——错误
-		// 重现即证明命令真实重发）。
-		if err := bf.reserveShard(ctx, 0); err == nil {
-			t.Fatal("Reset 后 reserveShard 未重新执行 BF.RESERVE（闸门复位失效）")
+		// 分片 connectAll 用 pipeline 批量发出：逐键错误附各自键名分类，
+		// 首个不符键的错误应指向该分片物理键
+		if !strings.Contains(err.Error(), "rst:bfshard#") {
+			t.Fatalf("错误未指向分片物理键名：%v", err)
 		}
 	})
 }
 
-// TestBloomResetIdempotent 验证 Reset 幂等语义（对齐 Redis DEL）：对从未
-// 写入的键 Reset 成功；连续两次 Reset 均 nil。bitmap 与 bf 两路径、单键与
-// 分片形态都覆盖。
 func TestBloomResetIdempotent(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 
 	rc, _ := newMiniRedisClient(t)
 	cfg := defaultBloomConfig()
@@ -1983,12 +1969,17 @@ func TestBloomResetIdempotent(t *testing.T) {
 		t.Fatalf("双 Reset 后写入应正常：%v", err)
 	}
 
+	// bf 形态 miniredis 无 BF 模块：Reset 的 DEL 幂等执行，同步重建的
+	// BF.RESERVE 恒报 unknown command（数据类）——连发两次错误形态一致
+	// 即幂等（DEL 侧无残留失败）。
 	bf, _, _ := newShardedBFOnMini(t, "rst:idem-bf", FailOpen)
-	if err := bf.Reset(ctx); err != nil {
-		t.Fatalf("bf 从未写入的分片 Reset：%v", err)
+	errBf1 := bf.Reset(ctx)
+	errBf2 := bf.Reset(ctx)
+	if !errContainsCmd(errBf1, "BF.RESERVE") || !errContainsCmd(errBf2, "BF.RESERVE") {
+		t.Fatalf("bf Reset 应实发 BF.RESERVE 并报 unknown command：got %v / %v", errBf1, errBf2)
 	}
-	if err := bf.Reset(ctx); err != nil {
-		t.Fatalf("bf 分片连续第二次 Reset：%v", err)
+	if errors.Is(errBf1, ErrRedisUnavailable) || errors.Is(errBf2, ErrRedisUnavailable) {
+		t.Fatalf("unknown command 属数据类，不得包哨兵：%v / %v", errBf1, errBf2)
 	}
 }
 
@@ -1997,7 +1988,7 @@ func TestBloomResetIdempotent(t *testing.T) {
 // 取值无关——FailOpen 同样返回错误（不走放行兜底）。bitmap 分片（pipeline
 // DEL）与 bf 分片两形态都覆盖。
 func TestBloomResetUnavailable(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 
 	for _, policy := range []FailPolicy{FailOpen, FailClosed} {
 		b, _, mr := newShardedBitmapForTest(t, "rst:uf-bmp", policy)
@@ -2017,13 +2008,12 @@ func TestBloomResetUnavailable(t *testing.T) {
 	}
 }
 
-// TestBloomResetRaceSmoke -race 冒烟：Reset 与 Add / reserveShard 并发轰炸。
-// bitmap 侧压 DEL 与 Lua 置位的交错；bf 侧压新代码路径——reserveShard 的
-// atomic.Pointer Load 与 Reset 的 Store、以及 sync.Once Do 与换代并发。
-// miniredis 无 BF 模块，bfCmdImpl 侧命令报错属预期，只断言无 panic、
-// 无数据竞争、错误不越界（nil 或 ErrRedisUnavailable）。
+// TestBloomResetRaceSmoke -race 冒烟：Reset（DEL+同步重建）与 Add 并发
+// 轰炸。bitmap 侧压 DEL、重建 SETBIT 与 Lua 置位的交错；bf 侧压 BF.ADD
+// 与 Reset 重建的 RESERVE 交错。miniredis 无 BF 模块，bf 侧命令报错属
+// 预期；bitmap 侧并发窗口允许 layout mismatch——断言无 panic、无数据竞争。
 func TestBloomResetRaceSmoke(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 
 	t.Run("bitmap 单键 Reset×Add", func(t *testing.T) {
 		rc, _ := newMiniRedisClient(t)
@@ -2047,25 +2037,24 @@ func TestBloomResetRaceSmoke(t *testing.T) {
 		for range 4 {
 			wg.Go(func() {
 				for range 8 {
-					if err := b.Reset(ctx); err != nil && !errors.Is(err, ErrRedisUnavailable) {
-						t.Errorf("并发 Reset：%v", err)
-						return
-					}
+					// 并发窗口：Reset 的 DEL 与 Add 置位交错时，重建校验
+					// 可能观察到半增长键并报 layout mismatch（数据类，
+					// 属"无全序保证"范畴）；错误不限，-race 干净即通过。
+					_ = b.Reset(ctx)
 				}
 			})
 		}
 		wg.Wait()
 	})
 
-	t.Run("bf 分片 Reset×reserveShard 闸门并发", func(t *testing.T) {
+	t.Run("bf 分片 Reset×Add 并发", func(t *testing.T) {
 		bf, _, _ := newShardedBFOnMini(t, "rst:race-bf", FailOpen)
 		var wg sync.WaitGroup
 		for i := range 16 {
 			wg.Go(func() {
 				for j := range 12 {
-					// miniredis 无 BF 模块，bfCmdImpl.Add 报 unknown command
-					// （数据类、预期内）；本冒烟只压闸门 Load/Store/Do 与
-					// DEL 的并发安全——断言无 panic，-race 干净即可。
+					// miniredis 无 BF 模块，命令报 unknown command（数据类、
+					// 预期内）；本冒烟断言无 panic、无数据竞争。
 					_, _ = bf.Add(ctx, fmt.Sprintf("r-%d-%d", i, j))
 				}
 			})
@@ -2073,10 +2062,8 @@ func TestBloomResetRaceSmoke(t *testing.T) {
 		for range 4 {
 			wg.Go(func() {
 				for range 8 {
-					if err := bf.Reset(ctx); err != nil && !errors.Is(err, ErrRedisUnavailable) {
-						t.Errorf("并发 bf.Reset：%v", err)
-						return
-					}
+					// Reset 的同步重建同样报数据类错误，错误不限
+					_ = bf.Reset(ctx)
 				}
 			})
 		}
@@ -2084,41 +2071,39 @@ func TestBloomResetRaceSmoke(t *testing.T) {
 	})
 }
 
-// TestBloomResetBFCapacityRealRedisBloom 真 RedisBloom 环境下的 BF 路径
-// 端到端回归（规格测试 3 关键项）：分片态 Reset 后再 Add，惰性闸门必须
-// 以 perShard 容量重新 BF.RESERVE——断言分片键 BF.INFO 的 Capacity ==
-// perShard 而非 RedisBloom 默认 100；并验证第二、三次 Add 不重复 RESERVE
-// （闸门 Once 指针换代后保持稳定，同一把 Once 只消耗一次）。
-//
+// TestBloomResetBFCapacityRealRedisBloom 真 RedisBloom 环境 BF 路径端到端
+// 回归：工厂构造即连接（逐分片 BF.RESERVE perShard 容量）——构造返回后
+// 分片键即存在且 BF.INFO Capacity==perShard、无需写触发；Reset 同步重建
+// ——返回后键已按 perShard 重建、为空过滤器；后续 Add 不改容量。配套
+// 锚：standalone 直构（不连接）从未初始化的键 Info 报 not-found，Reset
+// （DEL + 建立）后即可用。
 // 环境需求：REDIS_CLUSTER（真实 Redis Cluster 且节点加载 bf 模块）——
-// 分片 enabled 仅 ModeCluster 生效，standalone 无法构造 RESERVE 闸门链路；
-// 本包既有测试体系（miniredis）不支持 RedisBloom 模块，无法驱动该路径，
-// 故本用例在缺少环境时 skip（不引入新环境依赖，与 cluster_integration_test.go
-// 同一环境约定，但不改那个文件）。
+// 分片 enabled 仅 ModeCluster 生效；缺环境 skip。
 func TestBloomResetBFCapacityRealRedisBloom(t *testing.T) {
 	raw := os.Getenv("REDIS_CLUSTER")
 	if raw == "" {
-		t.Skip("REDIS_CLUSTER 未设置：BF 闸门复位回归需真实 Redis Cluster + RedisBloom 模块")
+		t.Skip("REDIS_CLUSTER 未设置：BF 构造连接回归需真实 Redis Cluster + RedisBloom 模块")
 	}
-	rdb, err := NewWithUrl(raw)
+	rdb, err := NewWithURL(raw)
 	if err != nil {
-		t.Fatalf("NewWithUrl: %v", err)
+		t.Fatalf("NewWithURL: %v", err)
 	}
 	defer func() { _ = rdb.GracefulClose(context.Background()) }()
+	_ = rdb.Capability().Probe(t.Context()) // 查询为纯内存读：guard 前显式探测
 	if !rdb.Capability().HasModule("bf") {
-		t.Skip("集群未加载 bf 模块（RedisBloom），跳过 BF 闸门复位回归")
+		t.Skip("集群未加载 bf 模块（RedisBloom），跳过 BF 构造连接回归")
 	}
 	rc, ok := rdb.(*redisClient)
 	if !ok {
 		t.Fatalf("unexpected client type %T", rdb)
 	}
 
-	ctx := context.Background()
+	ctx := t.Context()
 	const (
 		totalCap = 10000
 		shardN   = 4
 	)
-	perShard := int64(totalCap / shardN) // 2500（须 ≥ minShardCapacity 才不被收缩）
+	perShard := int64(totalCap / shardN) // 2500（须 >= minShardCapacity 才不被收缩）
 	keyBF := bloomTestKey("bfreset-cluster")
 	keySolo := bloomTestKey("bfreset-solo")
 	defer func() {
@@ -2128,12 +2113,15 @@ func TestBloomResetBFCapacityRealRedisBloom(t *testing.T) {
 		_ = rc.Del(ctx, keySolo).Err()
 	}()
 
-	bfCfg := defaultBloomConfig()
-	WithCapacity(totalCap)(&bfCfg)
-	WithFalsePositive(0.01)(&bfCfg)
-	WithShardCount(shardN)(&bfCfg)
-	bfCfg.policy = FailOpen // 工厂原默认赋值，直构需显式补
-	bf := rc.newBFImpl(keyBF, bfCfg)
+	bfFilter, err := rc.NewBloomFilter(ctx, keyBF,
+		WithCapacity(totalCap), WithFalsePositive(0.01), WithShardCount(shardN))
+	if err != nil {
+		t.Fatalf("工厂构造（构造即连接）：%v", err)
+	}
+	bf, ok := bfFilter.(*bfCmdImpl)
+	if !ok {
+		t.Fatalf("分派异常：%T（期望 *bfCmdImpl）", bfFilter)
+	}
 	if !bf.sharder.enabled || bf.sharder.n != shardN {
 		t.Fatalf("集群环境分片未激活：enabled=%v n=%d（检查 REDIS_CLUSTER 是否为真集群）",
 			bf.sharder.enabled, bf.sharder.n)
@@ -2168,79 +2156,60 @@ func TestBloomResetBFCapacityRealRedisBloom(t *testing.T) {
 		return nil
 	}
 
-	// 全分片灌入并确认聚合容量。
-	items := make([]any, 400)
-	for i := range items {
-		items[i] = fmt.Sprintf("bfr-%d", i)
+	// 构造即连接：分片 0 键已存在且 Capacity==perShard（无需写触发）；
+	// autocreate（默认 capacity=100）形态在构造连接下不可能出现。
+	if got := shard0Info("构造后").Capacity; got != perShard {
+		t.Fatalf("构造后分片 0 Capacity got %d want %d（RESERVE 未在构造期兑现？）", got, perShard)
 	}
-	if _, err := bf.AddMulti(ctx, items...); err != nil {
-		t.Fatalf("分片 AddMulti：%v", err)
+	probe := probeItem("rst")
+	if ok, err := bf.Exists(ctx, probe); err != nil || ok {
+		t.Fatalf("构造后空过滤器 Exists(%v)：ok=%v err=%v", probe, ok, err)
 	}
-	if got := shard0Info("首灌").Capacity; got != perShard {
-		t.Fatalf("首灌后分片 0 Capacity got %d want %d（RESERVE 未生效？）", got, perShard)
+	if _, err := bf.Add(ctx, probe); err != nil {
+		t.Fatalf("Add：%v", err)
 	}
-	gateBefore := bf.reserves[0].Load()
+	if ok, err := bf.Exists(ctx, probe); err != nil || !ok {
+		t.Fatalf("写入后 Exists(%v)：ok=%v err=%v", probe, ok, err)
+	}
+	if got := shard0Info("写入后").Capacity; got != perShard {
+		t.Fatalf("写入后分片 0 Capacity got %d want %d", got, perShard)
+	}
 
-	// Reset 清空并确认物理键删除。
+	// Reset 同步重建：返回成功即键已按 perShard 重建且为空。
 	if err := bf.Reset(ctx); err != nil {
 		t.Fatalf("集群分片 Reset：%v", err)
 	}
-	if n, err := rc.Exists(ctx, bf.sharder.shardKey(0)).Result(); err != nil || n != 0 {
-		t.Fatalf("Reset 后分片 0 键仍存在：n=%d err=%v", n, err)
+	if got := shard0Info("Reset 后").Capacity; got != perShard {
+		t.Fatalf("Reset 后分片 0 Capacity got %d want %d（同步重建未生效？）", got, perShard)
 	}
-
-	// 复位验证第一步：Reset 后只读不重发 RESERVE（惰性维持）。
-	probe := probeItem("rst")
 	if ok, err := bf.Exists(ctx, probe); err != nil || ok {
-		t.Fatalf("Reset 后 Exists(%v)：ok=%v err=%v（键应不存在）", probe, ok, err)
+		t.Fatalf("Reset 后应为空过滤器：ok=%v err=%v", ok, err)
 	}
-	if _, err := rc.BFInfo(ctx, bf.sharder.shardKey(0)).Result(); err == nil {
-		t.Fatal("Exists 路径不得重新 RESERVE（BF.INFO 应报键不存在）")
-	}
-
-	// 复位验证第二步：再 Add 必须以 perShard 重新 RESERVE。若闸门复位
-	// 缺失（回归目标），键会被 RedisBloom 以默认 capacity=100 自动重建。
 	if _, err := bf.Add(ctx, probe); err != nil {
 		t.Fatalf("Reset 后 Add：%v", err)
-	}
-	gateRewarm := bf.reserves[0].Load()
-	if gateRewarm == gateBefore {
-		t.Fatal("Reset 后闸门 Once 未换代（复位未生效）")
-	}
-	if got := shard0Info("Reset 后重写").Capacity; got != perShard {
-		t.Fatalf("Reset 后分片 0 Capacity got %d want %d（疑似默认 100 重建，闸门复位失效）", got, perShard)
-	}
-
-	// 复位验证第三步：第二、三次 Add 不重复 RESERVE——同一把换代后的
-	// Once 只消耗一次，后续 Add 走直通路径（指针不变即闸门未再武装、
-	// 也未再发 RESERVE；若错误地每次都 RESERVE，对已存在键会命中
-	// "already exists" 吞错，行为无痕，指针换代是唯一白盒信号）。
-	for _, item := range []any{probe, probeItem("rst2")} {
-		if _, err := bf.Add(ctx, item); err != nil {
-			t.Fatalf("后续 Add(%v)：%v", item, err)
-		}
-	}
-	if p := bf.reserves[0].Load(); p != gateRewarm {
-		t.Fatalf("第二三次 Add 不应重新武装闸门：%p != %p", p, gateRewarm)
-	}
-	if got := shard0Info("终检").Capacity; got != perShard {
-		t.Fatalf("终检分片 0 Capacity got %d want %d", got, perShard)
 	}
 	info, err := bf.Info(ctx)
 	if err != nil || info.NumItems < 1 {
 		t.Fatalf("Reset 后重写 Info 异常：got %+v err=%v", info, err)
 	}
+	if got := shard0Info("终检").Capacity; got != perShard {
+		t.Fatalf("终检分片 0 Capacity got %d want %d", got, perShard)
+	}
 
-	// 配套（规格测试 4 standalone 半句）：standalone BF 空键 Info 维持
-	// 历史报错行为（emptyShardOK=false），Reset 不改动该路径。
+	// 配套：standalone 直构（不经工厂、不连接）从未初始化的键 Info 报
+	// not-found（emptyShardOK=false 的能力面锚）；Reset（DEL 0 幂等 +
+	// 同步建立默认 1e6）后即存在可用。
 	soloCfg := defaultBloomConfig()
 	soloCfg.policy = FailOpen
 	solo := rc.newBFImpl(keySolo, soloCfg)
-	if err := solo.Reset(ctx); err != nil {
-		t.Fatalf("standalone BF 对未写入键 Reset：%v", err)
-	}
 	if _, err := solo.Info(ctx); err == nil {
-		t.Fatal("standalone 空过滤器 Info 应报 not found（既有行为不得回归）")
+		t.Fatal("未初始化的 standalone 键 Info 应报 not-found")
+	}
+	if err := solo.Reset(ctx); err != nil {
+		t.Fatalf("未写入键 Reset（DEL + 建立）：%v", err)
+	}
+	if got, err := rc.BFInfo(ctx, keySolo).Result(); err != nil || got.Capacity != 1000000 {
+		t.Fatalf("Reset 同步建键后 Info 应可用且为默认容量：got %+v err=%v", got, err)
 	}
 }
 
@@ -2251,7 +2220,7 @@ func TestBloomResetBFCapacityRealRedisBloom(t *testing.T) {
 // ——去重口径锚（位图状态不变则估计不变；对照 BF.* 路径 NumItems 的
 // 插入口径会持续增长）。
 func TestBloomCardBitmapStandalone(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 	rc, _ := newMiniRedisClient(t)
 	cfg := defaultBloomConfig()
 	cfg.capacity = 10000
@@ -2296,7 +2265,7 @@ func TestBloomCardBitmapStandalone(t *testing.T) {
 // 与逐分片独立估算之和一致（禁止合并 bitsSet 再估算的实现回归锚——每分片
 // 单独 BITCOUNT + estimateNumItems），Reset 后归零。
 func TestBloomCardBitmapSharded(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 	b, rc, _ := newShardedBitmapForTest(t, "card:shard", FailOpen)
 
 	items := make([]any, 120)
@@ -2339,7 +2308,7 @@ func TestBloomCardBitmapSharded(t *testing.T) {
 // FailOpen 同样返回 (0, err)，观测类方法无"放行"概念。bitmap 分片与 bf
 // 分片两路径都覆盖。
 func TestBloomCardUnavailable(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 
 	for _, policy := range []FailPolicy{FailOpen, FailClosed} {
 		b, _, mr := newShardedBitmapForTest(t, "card:uf-bmp", policy)
@@ -2356,55 +2325,41 @@ func TestBloomCardUnavailable(t *testing.T) {
 	}
 }
 
-// TestBloomReserveGateDisarm 回归闸门失败解除武装（reserveShard 修复）：
-// BF.RESERVE 报非 "exists" 类错误（miniredis 无 BF 模块，unknown command
-// 即天然的失败注入）后，闸门必须**立即换代**（sync.Once 不辨成败，Do 返回
-// 即燃尽——不显式 Store 新 Once 则服务恢复后永不再试，分片被默认
-// capacity=100 隐式创建，容量契约静默作废）；下一次 reserveShard 必须
-// 再次真实执行 BF.RESERVE（以"错误再现"为可观测信号：修复前 once 燃尽、
-// Do 跳过闭包、返回 nil）。
-//
-// "exists" 类吞错分支（武装保持）无法在 miniredis 注入（需要真实 BF 响应），
-// 由真 RedisBloom 环境的 TestBloomResetBFCapacityRealRedisBloom 覆盖：首灌
-// RESERVE 成功后闸门 once 正常消耗、后续 Add 不再重发 RESERVE（指针稳定），
-// 即"成功不解除武装"的同一不变量。
-func TestBloomReserveGateDisarm(t *testing.T) {
-	ctx := context.Background()
-	bf, _, _ := newShardedBFOnMini(t, "gate:disarm", FailOpen)
+// --- standalone 恒惰性 RESERVE 与 Reserve() API（miniredis 白盒） ---
 
-	for round := range 3 {
-		before := bf.reserves[0].Load()
-		err := bf.reserveShard(ctx, 0)
-		if err == nil {
-			t.Fatalf("第 %d 轮：无 BF 模块环境 reserveShard 应报 unknown command", round+1)
-		}
-		if errors.Is(err, ErrRedisUnavailable) {
-			t.Fatalf("第 %d 轮：unknown command 是数据类错误，不得走兜底哨兵：%v", round+1, err)
-		}
-		after := bf.reserves[0].Load()
-		if after == before {
-			t.Fatalf("第 %d 轮：RESERVE 真实失败后闸门未解除武装（Once 不辨成败，须显式 Store 新 Once）", round+1)
-		}
-		if after == nil {
-			t.Fatalf("第 %d 轮：解除武装后的闸门为 nil（atomic.Pointer 零值陷阱）", round+1)
-		}
-	}
+// errContainsCmd 判断错误文本（大小写不敏感）含指定命令名——miniredis 对
+// 未知命令回显命令名，作为"命令确实发出"的观测信号。
+func errContainsCmd(err error, cmdUpper string) bool {
+	return err != nil && strings.Contains(strings.ToUpper(err.Error()), cmdUpper)
+}
 
-	// Add 路径联动：闸门每次失败后换代，bf.Add 反复尝试 RESERVE——
-	// 错误持续可见即"服务恢复后即可自愈"的行为面（miniredis 永远无
-	// BF 模块，修复前第二次 Add 会跳过 RESERVE 直发 BF.ADD 同样报错，
-	// 无法区分；指针断言与 reserveShard 循环已覆盖判据）。
-	for i := range 3 {
-		if _, err := bf.Add(ctx, fmt.Sprintf("disarm-%d", i)); err == nil {
-			t.Fatal("无 BF 模块环境 bf.Add 应报错")
-		}
+// --- bitmap 连接建立（connectAll，miniredis 白盒） ---
+
+// TestBloomDefaultFalsePositive 断言默认配置为 1000000/0.0001（0.01%），
+// 对应位图 bloomBitCount(1e6, 0.0001)≈19.2M bit、k=⌈ln2·m/n⌉=14。
+func TestBloomDefaultFalsePositive(t *testing.T) {
+	cfg := defaultBloomConfig()
+	if cfg.falsePositive != 0.0001 {
+		t.Fatalf("默认 falsePositive got %v want 0.0001", cfg.falsePositive)
 	}
+	if cfg.capacity != 1000000 {
+		t.Fatalf("默认 capacity got %d want 1000000", cfg.capacity)
+	}
+	m := bloomBitCount(1_000_000, 0.0001)
+	// m = ⌈-n·ln(p)/(ln2)²⌉ = ⌈1e6 × 19.170117…⌉ ≈ 19,170,117
+	if m < 19_000_000 || m > 19_400_000 {
+		t.Fatalf("bloomBitCount(1e6, 0.0001) got %d，应在 [19.0M, 19.4M]（≈19.2M bit）", m)
+	}
+	if k := bloomHashCount(1_000_000, m|1); k != 14 {
+		t.Fatalf("默认档 k got %d want 14（ceil(ln2·m/n)）", k)
+	}
+	t.Logf("默认档：m=%d bit（≈%.1f MB），k=%d", m, float64(m)/8/1e6, bloomHashCount(1_000_000, m|1))
 }
 
 // TestBloomCardResetCoexist Card 与 Reset 共存冒烟（bitmap 路径，miniredis
 // 全环境可执行）：Add → Card>0 → Reset → Card==0；重写后 Card 回升。
 func TestBloomCardResetCoexist(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 	rc, _ := newMiniRedisClient(t)
 	cfg := defaultBloomConfig()
 	cfg.capacity = 5000
@@ -2447,11 +2402,12 @@ func TestBloomCardBFRealRedisBloom(t *testing.T) {
 		if url == "" {
 			t.Skip("REDIS_URL 未设置：跳过 BF.* Card standalone 回归（需 RedisBloom 环境）")
 		}
-		rdb, err := NewWithUrl(url)
+		rdb, err := NewWithURL(url)
 		if err != nil {
-			t.Fatalf("NewWithUrl: %v", err)
+			t.Fatalf("NewWithURL: %v", err)
 		}
-		defer func() { _ = rdb.GracefulClose(context.Background()) }()
+		defer func() { _ = rdb.GracefulClose(context.Background()) }() //nolint:contextcheck // 清理阶段 t.Context 已取消，关闭须脱离测试上下文
+		_ = rdb.Capability().Probe(ctx)                                // 查询为纯内存读：guard 前显式探测
 		if !rdb.Capability().HasModule("bf") {
 			t.Skip("服务器未加载 bf 模块，跳过 BF.* Card standalone 回归")
 		}
@@ -2496,11 +2452,12 @@ func TestBloomCardBFRealRedisBloom(t *testing.T) {
 		if raw == "" {
 			t.Skip("REDIS_CLUSTER 未设置：跳过 BF.* Card 分片聚合回归（需 RedisBloom 集群）")
 		}
-		rdb, err := NewWithUrl(raw)
+		rdb, err := NewWithURL(raw)
 		if err != nil {
-			t.Fatalf("NewWithUrl: %v", err)
+			t.Fatalf("NewWithURL: %v", err)
 		}
-		defer func() { _ = rdb.GracefulClose(context.Background()) }()
+		defer func() { _ = rdb.GracefulClose(context.Background()) }() //nolint:contextcheck // 清理阶段 t.Context 已取消，关闭须脱离测试上下文
+		_ = rdb.Capability().Probe(ctx)                                // 查询为纯内存读：guard 前显式探测
 		if !rdb.Capability().HasModule("bf") {
 			t.Skip("集群未加载 bf 模块，跳过 BF.* Card 分片聚合回归")
 		}
@@ -2567,7 +2524,7 @@ func TestBloomCardBFRealRedisBloom(t *testing.T) {
 // （newBitmapImpl 不经工厂，带 bf 模块的环境上也恒走 bitmap 回退路径）。
 
 // realStandaloneClient 自建真单机守卫：internal 测试不能 import
-// redis/test 包（循环依赖），沿用 os.Getenv + NewWithUrl 既有手法
+// redis/test 包（循环依赖），沿用 os.Getenv + NewWithURL 既有手法
 // （TestBitmapConcurrentAddRealRedis 同型）。REDIS_URL 未设置即 skip。
 // 返回内部 client 与服务器 bf 模块可用性。
 func realStandaloneClient(t *testing.T) (*redisClient, bool) {
@@ -2576,15 +2533,16 @@ func realStandaloneClient(t *testing.T) (*redisClient, bool) {
 	if url == "" {
 		t.Skip("REDIS_URL 未设置：跳过真单机 Redis 用例")
 	}
-	rdb, err := NewWithUrl(url)
+	rdb, err := NewWithURL(url)
 	if err != nil {
-		t.Fatalf("NewWithUrl: %v", err)
+		t.Fatalf("NewWithURL: %v", err)
 	}
 	rc, ok := rdb.(*redisClient)
 	if !ok {
 		t.Fatalf("unexpected client type %T", rdb)
 	}
 	t.Cleanup(func() { _ = rc.GracefulClose(context.Background()) })
+	_ = rdb.Capability().Probe(t.Context()) // 查询为纯内存读：先显式探测
 	return rc, rdb.Capability().HasModule("bf")
 }
 
@@ -2595,23 +2553,23 @@ func realClusterClient(t *testing.T) (*redisClient, bool) {
 	if raw == "" {
 		t.Skip("REDIS_CLUSTER 未设置：跳过真集群 Redis 用例")
 	}
-	rdb, err := NewWithUrl(raw)
+	rdb, err := NewWithURL(raw)
 	if err != nil {
-		t.Fatalf("NewWithUrl: %v", err)
+		t.Fatalf("NewWithURL: %v", err)
 	}
 	rc, ok := rdb.(*redisClient)
 	if !ok {
 		t.Fatalf("unexpected client type %T", rdb)
 	}
 	t.Cleanup(func() { _ = rc.GracefulClose(context.Background()) })
+	_ = rdb.Capability().Probe(t.Context()) // 查询为纯内存读：先显式探测
 	return rc, rdb.Capability().HasModule("bf")
 }
 
-// TestBloomBFResetRealStandalone 真实单机 RedisBloom 上 BF.* 原生路径的
-// Reset 全链路（缺口 1）：经 auto 工厂分派取门面并断言落 bfCmdImpl，
-// Add→Card>0→Reset→Exists false→Card==0→重写判新增→Info 正常。
-// 单机形态 enabled=false、无惰性 RESERVE 闸门（历史既有行为）——闸门
-// 复位断言由集群用例 TestBloomResetBFCapacityRealRedisBloom 覆盖。
+// TestBloomBFResetRealStandalone 真实单机 BF.* 路径 Reset 全链路：经 auto
+// 工厂（显式传参）取门面并断言落 bfCmdImpl，Add→Card>0→Reset→Exists
+// false→Card==0→重写判新增→Info 正常。闸门复位链路见本函数与
+// TestBloomResetBFCapacityRealRedisBloom。
 // 共享实例纪律：bloomtest 随机前缀键、收尾 Del，严禁 FLUSHDB。
 func TestBloomBFResetRealStandalone(t *testing.T) {
 	rc, hasBF := realStandaloneClient(t)
@@ -2622,7 +2580,10 @@ func TestBloomBFResetRealStandalone(t *testing.T) {
 	key := bloomTestKey("bf-rst-121")
 	t.Cleanup(func() { _ = rc.Del(ctx, key).Err() })
 
-	f := rc.NewBloomFilter(key, WithCapacity(10000), WithFalsePositive(0.01))
+	f, cerr2642 := rc.NewBloomFilter(t.Context(), key, WithCapacity(10000), WithFalsePositive(0.01))
+	if cerr2642 != nil {
+		t.Fatalf("构造过滤器：%v", cerr2642)
+	}
 	bf, ok := f.(*bfCmdImpl)
 	if !ok {
 		t.Fatalf("带 bf 模块单机 auto 应分派 bfCmdImpl，got %T", f)
@@ -2648,8 +2609,9 @@ func TestBloomBFResetRealStandalone(t *testing.T) {
 	if err := bf.Reset(ctx); err != nil {
 		t.Fatalf("BF 单机 Reset：%v", err)
 	}
-	if n, err := rc.Exists(ctx, key).Result(); err != nil || n != 0 {
-		t.Fatalf("Reset 后物理键仍存在：n=%d err=%v", n, err)
+	// Reset 同步重建：返回即键已按配置重建存在（空过滤器）
+	if n, err := rc.Exists(ctx, key).Result(); err != nil || n != 1 {
+		t.Fatalf("Reset 后物理键应已同步重建：n=%d err=%v", n, err)
 	}
 	for _, item := range items {
 		ex, err := bf.Exists(ctx, item)
@@ -2664,7 +2626,7 @@ func TestBloomBFResetRealStandalone(t *testing.T) {
 		t.Fatalf("Reset 后 Card：got (%d, %v) want (0, nil)", n, err)
 	}
 
-	// 重写判新增（autocreate 路径），Info 恢复可用
+	// 重写判新增（Reset 复位闸门，重写重新按配置 RESERVE），Info 恢复可用
 	added, err := bf.Add(ctx, "bf121-a")
 	if err != nil || !added {
 		t.Fatalf("Reset 后重写 Add：added=%v err=%v", added, err)
@@ -2728,8 +2690,8 @@ func TestBloomBitmapResetCardRealStandalone(t *testing.T) {
 	if err := b.Reset(ctx); err != nil {
 		t.Fatalf("bitmap 单机二次 Reset（幂等）：%v", err)
 	}
-	if n, err := rc.Exists(ctx, key).Result(); err != nil || n != 0 {
-		t.Fatalf("Reset 后物理键仍存在：n=%d err=%v", n, err)
+	if n, err := rc.Exists(ctx, key).Result(); err != nil || n != 1 {
+		t.Fatalf("Reset 后物理键应已同步重建：n=%d err=%v", n, err)
 	}
 	if got, err := b.Card(ctx); err != nil || got != 0 {
 		t.Fatalf("Reset 后 Card：got (%d, %v) want (0, nil)", got, err)
@@ -2779,8 +2741,8 @@ func TestBloomBitmapResetCardRealCluster(t *testing.T) {
 		if err := b.Reset(ctx); err != nil {
 			t.Fatalf("集群单键 Reset：%v", err)
 		}
-		if n, err := rc.Exists(ctx, key).Result(); err != nil || n != 0 {
-			t.Fatalf("Reset 后裸 base 键仍存在：n=%d err=%v", n, err)
+		if n, err := rc.Exists(ctx, key).Result(); err != nil || n != 1 {
+			t.Fatalf("Reset 后裸 base 键应已同步重建：n=%d err=%v", n, err)
 		}
 		if got, err := b.Card(ctx); err != nil || got != 0 {
 			t.Fatalf("Reset 后 Card：got (%d, %v)", got, err)
@@ -2833,10 +2795,11 @@ func TestBloomBitmapResetCardRealCluster(t *testing.T) {
 		if err := b.Reset(ctx); err != nil {
 			t.Fatalf("分片 Reset：%v", err)
 		}
+		// Reset 同步重建：DEL 后逐分片重新建立，键集合恢复且为空
 		for _, k := range keys {
 			n, err := rc.Exists(ctx, k).Result()
-			if err != nil || n != 0 {
-				t.Fatalf("Reset 后分片键 %s 残留：n=%d err=%v", k, n, err)
+			if err != nil || n != 1 {
+				t.Fatalf("Reset 后分片键 %s 未同步重建：n=%d err=%v", k, n, err)
 			}
 		}
 		if got, err := b.Card(ctx); err != nil || got != 0 {
@@ -2939,7 +2902,10 @@ func TestBloomScaleFPRRealStandalone(t *testing.T) {
 	if hasBF {
 		// bf 路径经 auto 工厂分派（带模块即 bfCmdImpl）
 		key := bloomTestKey("scale-bf")
-		f := rc.NewBloomFilter(key, WithCapacity(capacity), WithFalsePositive(budget))
+		f, cerr2959 := rc.NewBloomFilter(t.Context(), key, WithCapacity(capacity), WithFalsePositive(budget))
+		if cerr2959 != nil {
+			t.Fatalf("构造过滤器：%v", cerr2959)
+		}
 		if _, ok := f.(*bfCmdImpl); !ok {
 			t.Fatalf("带 bf 模块 auto 应分派 bfCmdImpl，got %T", f)
 		}
@@ -2972,8 +2938,14 @@ func TestBloomBitmapConcurrentRealStandalone(t *testing.T) {
 	cfg.policy = FailOpen
 	b := newBitmapImpl(rc, key, cfg)
 
+	// 并发窗口：Reset 的 DEL 与 Add 置位交错时，重建校验可观察到半增长
+	// 键并报 layout mismatch（数据类）；属"Reset 与并发写无全序"承诺，
+	// 本冒烟断言错误只来自这两类、无 panic 无数据竞争。
 	okErr := func(err error) bool {
-		return err == nil || errors.Is(err, ErrRedisUnavailable)
+		if err == nil || errors.Is(err, ErrRedisUnavailable) {
+			return true
+		}
+		return strings.Contains(err.Error(), "layout mismatch")
 	}
 
 	var wg sync.WaitGroup
@@ -3023,143 +2995,304 @@ func TestBloomBitmapConcurrentRealStandalone(t *testing.T) {
 	}
 }
 
-// TestBloomReserveAlreadyExistsSwallowRealCluster 真集群覆盖
-// reserveShard 的 "already exists" 吞错分支（评审 P3）：同一分片 base 键
-// 上构造两个 bf 实例——实例 1 先写入完成全分片惰性 BF.RESERVE，实例 2 的
-// 每个分片首次写入触发的 BF.RESERVE 必然命中"过滤器已存在"。断言：
-//  1. 实例 2 Add 成功不报错（吞错生效；若错误措辞不匹配吞错子串，Redis
-//     报错会原样上抛，本断言即暴露）；
-//  2. 实例 2 各分片闸门 Once 指针在写入前后不变——命中 exists 类视为
-//     成功、**维持武装**（区别于真实失败路径的解除武装换代，见
-//     TestBloomReserveGateDisarm）；
-//  3. 探针：各分片 BF.INFO 的 Capacity 恒等于实例 1 的配置口径
-//     perShard（第二实例的重复 RESERVE 尝试未破坏既有预分配）；
-//  4. 双实例读写互通（同物理键）：实例 2 可读实例 1 的 seed、实例 1 可
-//     读实例 2 的 probe。
-//
-// 环境守卫：REDIS_CLUSTER + 集群 bf 模块，缺则 skip。
-func TestBloomReserveAlreadyExistsSwallowRealCluster(t *testing.T) {
-	raw := os.Getenv("REDIS_CLUSTER")
-	if raw == "" {
-		t.Skip("REDIS_CLUSTER 未设置：跳过 BF.RESERVE already-exists 吞错真机回归")
-	}
-	rdb, err := NewWithUrl(raw)
-	if err != nil {
-		t.Fatalf("NewWithUrl: %v", err)
-	}
-	defer func() { _ = rdb.GracefulClose(context.Background()) }()
-	if !rdb.Capability().HasModule("bf") {
-		t.Skip("集群未加载 bf 模块，跳过 BF.RESERVE already-exists 吞错真机回归")
-	}
-	rc, ok := rdb.(*redisClient)
-	if !ok {
-		t.Fatalf("unexpected client type %T", rdb)
-	}
+// --- 工厂构造即连接 / Reset 同步重建（miniredis 白盒） ---
 
-	ctx := context.Background()
-	const (
-		shardN   = 8
-		totalCap = 100_000
-	)
-	perShardWant := int64(totalCap / shardN) // 12500，无收缩（≥ minShardCapacity）
+// TestBloomFactoryConnect 断言 bitmap 路径工厂的构造即连接三态：空键建立
+// （全额分配、零置位）、同布局键复用、异布局键报 layout mismatch 且键
+// 不被触碰；非 string 类型键报数据类错误。
+func TestBloomFactoryConnect(t *testing.T) {
+	ctx := t.Context()
+	rc, mr := newMiniRedisClient(t)
 
-	base := bloomTestKey("bfexists-sw")
-	mk := func() *bfCmdImpl {
-		cfg := defaultBloomConfig()
-		WithCapacity(totalCap)(&cfg)
-		WithFalsePositive(0.01)(&cfg)
-		WithShardCount(shardN)(&cfg)
-		cfg.policy = FailOpen
-		return rc.newBFImpl(base, cfg)
-	}
-	bf1, bf2 := mk(), mk()
-	if !bf1.sharder.enabled || bf1.sharder.n != shardN {
-		t.Fatalf("实例 1 分片未激活：enabled=%v n=%d", bf1.sharder.enabled, bf1.sharder.n)
-	}
-	if bf1.perShard != perShardWant || bf2.perShard != perShardWant {
-		t.Fatalf("perShard got %d/%d want %d", bf1.perShard, bf2.perShard, perShardWant)
-	}
-	keys := bf1.sharder.allKeys()
-	t.Cleanup(func() {
-		for _, k := range keys { // 逐键 Del（多键跨 slot 会 CROSSSLOT）
-			_ = rc.Del(ctx, k).Err()
+	t.Run("空键建立", func(t *testing.T) {
+		f, err := rc.NewBloomFilter(ctx, "fc:new")
+		if err != nil {
+			t.Fatal(err)
+		}
+		b := f.(*bitmapImpl)
+		if !mr.Exists("fc:new") {
+			t.Fatal("构造后物理键应已建立")
+		}
+		got, gerr := mr.Get("fc:new")
+		if gerr != nil || len(got) != int((b.m+7)/8) {
+			t.Fatalf("建立键长度 got %d err=%v want %d（⌈m/8⌉）", len(got), gerr, (b.m+7)/8)
+		}
+		if n, err := rc.BitCount(ctx, "fc:new", nil).Result(); err != nil || n != 0 {
+			t.Fatalf("建立置 0 位不得污染 BITCOUNT：got %d err=%v", n, err)
+		}
+		if n, err := f.Card(ctx); err != nil || n != 0 {
+			t.Fatalf("新建空过滤器 Card：%d err=%v", n, err)
 		}
 	})
 
-	// 基线：实例 1 灌 300 项（8 分片全命中概率 ~1-(7/8)^300 ≈ 1），
-	// 各分片惰性 RESERVE 以 perShard 建键，远未触发扩容。
-	seed := make([]any, 300)
-	for i := range seed {
-		seed[i] = fmt.Sprintf("%s-seed-%d", base, i)
-	}
-	if _, err := bf1.AddMulti(ctx, seed...); err != nil {
-		t.Fatalf("实例 1 AddMulti：%v", err)
-	}
-	assertShardCapacity := func(what string) {
-		t.Helper()
-		for idx, k := range keys {
-			info, err := rc.BFInfo(ctx, k).Result()
-			if err != nil {
-				t.Fatalf("%s：分片 %d（%s）BF.INFO：%v", what, idx, k, err)
-			}
-			if info.Capacity != perShardWant {
-				t.Fatalf("%s：分片 %d Capacity got %d want %d（第二实例 RESERVE 破坏预分配？）",
-					what, idx, info.Capacity, perShardWant)
-			}
+	t.Run("同布局复用", func(t *testing.T) {
+		cfg := defaultBloomConfig()
+		cfg.capacity = 1000
+		cfg.policy = FailOpen
+		b1 := newBitmapImpl(rc, "fc:reuse", cfg)
+		if err := b1.connectAll(ctx); err != nil {
+			t.Fatalf("首次建立：%v", err)
 		}
-	}
-	assertShardCapacity("实例 1 灌入后基线")
-
-	// 每个分片挑一个路由命中的实例 2 probe item，令 8 把闸门全部经历
-	// "已存在键上的 BF.RESERVE"。
-	probes := make([]any, shardN)
-	for i := range probes {
-		for j := range 500 {
-			item := fmt.Sprintf("%s-pr-%d-%d", base, i, j)
-			data, err := marshalItem(item)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if bf2.sharder.indexOf(data) == i {
-				probes[i] = item
-				break
-			}
-		}
-		if probes[i] == nil {
-			t.Fatalf("500 次采样未命中分片 %d", i)
-		}
-	}
-
-	gatesBefore := bfGatePtrs(bf2)
-	for _, item := range probes {
-		added, err := bf2.Add(ctx, item)
+		before, _ := mr.Get("fc:reuse")
+		f2, err := rc.NewBloomFilter(ctx, "fc:reuse", WithCapacity(1000)) // 同布局
 		if err != nil {
-			t.Fatalf("实例 2 Add(%v)：RESERVE 命中 already exists 应被吞错维持成功语义，got err=%v（若为 exists 措辞漂移即生产缺陷候选）", item, err)
+			t.Fatalf("同布局构造应复用成功：%v", err)
 		}
-		_ = added // 全新 probe，新增判定 true/false 均合法（假阳性事件）
-	}
-	gatesAfter := bfGatePtrs(bf2)
-	for i := range gatesAfter {
-		if gatesAfter[i] != gatesBefore[i] {
-			t.Fatalf("分片 %d 闸门在 exists 吞错后解除武装（指针换代 %p→%p）——exists 类应视为成功、维持武装",
-				i, gatesBefore[i], gatesAfter[i])
+		if ok, err := f2.Exists(ctx, "anything"); err != nil || ok {
+			t.Fatalf("复用空过滤器 Exists：%v err=%v", ok, err)
 		}
-	}
+		after, _ := mr.Get("fc:reuse")
+		if before != after {
+			t.Fatal("复用路径键内容被修改")
+		}
+	})
 
-	// 探针复测：第二实例的 8 次 RESERVE 尝试未破坏各分片容量口径
-	assertShardCapacity("实例 2 吞错写入后")
+	t.Run("异布局mismatch键未触碰", func(t *testing.T) {
+		small := newBitmapImpl(rc, "fc:mis", func() bloomConfig {
+			c := defaultBloomConfig()
+			c.capacity = 1000
+			c.policy = FailOpen
+			return c
+		}())
+		if err := small.connectAll(ctx); err != nil {
+			t.Fatal(err)
+		}
+		before, _ := mr.Get("fc:mis")
+		_, err := rc.NewBloomFilter(ctx, "fc:mis", WithCapacity(100000)) // 大布局
+		if err == nil || !strings.Contains(err.Error(), "layout mismatch") {
+			t.Fatalf("异布局构造应报 layout mismatch，got %v", err)
+		}
+		if errors.Is(err, ErrRedisUnavailable) {
+			t.Fatalf("mismatch 是数据类错误，不得包哨兵：%v", err)
+		}
+		after, _ := mr.Get("fc:mis")
+		if before != after {
+			t.Fatal("mismatch 路径不得触碰键")
+		}
+	})
 
-	// 双实例读写互通（同物理键、不同实例对象）
-	for _, item := range seed[:50] {
-		ex, err := bf2.Exists(ctx, item)
-		if err != nil || !ex {
-			t.Fatalf("实例 2 读实例 1 的 seed(%v)：ok=%v err=%v", item, ex, err)
+	t.Run("非string类型键报数据类错误", func(t *testing.T) {
+		if err := rc.HSet(ctx, "fc:hashy", "f", "v").Err(); err != nil {
+			t.Fatal(err)
 		}
-	}
-	for _, item := range probes {
-		ex, err := bf1.Exists(ctx, item)
-		if err != nil || !ex {
-			t.Fatalf("实例 1 读实例 2 的 probe(%v)：ok=%v err=%v", item, ex, err)
+		_, err := rc.NewBloomFilter(ctx, "fc:hashy")
+		if err == nil || !strings.Contains(err.Error(), "WRONGTYPE") {
+			t.Fatalf("hash 键上构造应报 WRONGTYPE 数据类错误，got %v", err)
 		}
+		if errors.Is(err, ErrRedisUnavailable) {
+			t.Fatalf("WRONGTYPE 不得包哨兵：%v", err)
+		}
+	})
+}
+
+// TestBloomResetRecreateBitmap 断言 bitmap Reset 同步重建：返回即键存在、
+// STRLEN 为全额 ⌈m/8⌉、BITCOUNT==0（空过滤器）。
+func TestBloomResetRecreateBitmap(t *testing.T) {
+	ctx := t.Context()
+	rc, mr := newMiniRedisClient(t)
+	cfg := defaultBloomConfig()
+	cfg.capacity = 1000
+	cfg.policy = FailOpen
+	b := newBitmapImpl(rc, "rc:bitmap", cfg)
+	if err := b.connectAll(ctx); err != nil {
+		t.Fatal(err)
 	}
+	if _, err := b.Add(ctx, "seed"); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Reset(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !mr.Exists("rc:bitmap") {
+		t.Fatal("Reset 返回后键应已同步重建")
+	}
+	got, gerr := mr.Get("rc:bitmap")
+	if gerr != nil || len(got) != int((b.m+7)/8) {
+		t.Fatalf("重建键长度 got %d err=%v want %d", len(got), gerr, (b.m+7)/8)
+	}
+	if n, err := rc.BitCount(ctx, "rc:bitmap", nil).Result(); err != nil || n != 0 {
+		t.Fatalf("重建后 BITCOUNT 应为 0：got %d err=%v", n, err)
+	}
+}
+
+// countCmdHook 统计 ProcessHook 的单命令执行次数（TestAddSingleRTT 观测）。
+type countCmdHook struct{ n atomic.Int64 }
+
+func (h *countCmdHook) DialHook(next goredis.DialHook) goredis.DialHook { return next }
+func (h *countCmdHook) ProcessHook(next goredis.ProcessHook) goredis.ProcessHook {
+	return func(ctx context.Context, cmd goredis.Cmder) error {
+		h.n.Add(1)
+		return next(ctx, cmd)
+	}
+}
+func (h *countCmdHook) ProcessPipelineHook(next goredis.ProcessPipelineHook) goredis.ProcessPipelineHook {
+	return next
+}
+
+// TestAddSingleRTT 防闸门回归锚：构造完成后，单条 Add 与 Exists 的命令
+// 数恒定、不含任何额外预建动作。miniredis v2.5.0 不实现 EVALSHA，每次
+// Script.Run 恒为 EVALSHA 尝试 + EVAL 回退两条——以该基线为期望值，
+// 任何预建/闸门残留都会使计数超出基线。
+func TestAddSingleRTT(t *testing.T) {
+	ctx := t.Context()
+	rc, _ := newMiniRedisClient(t)
+	var hook countCmdHook
+	rc.AddHook(&hook)
+
+	f, err := rc.NewBloomFilter(ctx, "rtt:single")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hook.n.Store(0) // 清去构造期命令，只测写读稳态
+
+	const scriptBaseline = 2 // EVALSHA + EVAL（miniredis 无 EVALSHA 缓存）
+	if _, err := f.Add(ctx, "x1"); err != nil {
+		t.Fatal(err)
+	}
+	if n := hook.n.Swap(0); n != scriptBaseline {
+		t.Fatalf("构造后 Add 命令数 got %d want 基线 %d（多出即预建回归）", n, scriptBaseline)
+	}
+	if _, err := f.Exists(ctx, "x1"); err != nil {
+		t.Fatal(err)
+	}
+	if n := hook.n.Swap(0); n != scriptBaseline {
+		t.Fatalf("构造后 Exists 命令数 got %d want 基线 %d", n, scriptBaseline)
+	}
+}
+
+// TestBloomFactoryRealStandalone 真实单机 RedisBloom 上 BF.* 工厂"构造即
+// 连接"端到端锚：默认档/显式参数构造后即建键；三类型判定分立——真 bloom
+// 既有键复用（BF.RESERVE 报 exists，**fp 无法服务端核验**的诚实边界）、
+// string 键 WRONGTYPE、CF 键模块互撞（实录错误文本进报告）——均不触碰键；
+// Reset 按新参数同步重建。环境守卫：REDIS_URL + bf 模块，缺则 skip；键经
+// bloomTestKey 随机前缀隔离、收尾 Del。
+func TestBloomFactoryRealStandalone(t *testing.T) {
+	rc, hasBF := realStandaloneClient(t)
+	if !hasBF {
+		t.Skip("服务器未加载 bf 模块（RedisBloom），跳过 BF 工厂连接锚")
+	}
+	ctx := t.Context()
+
+	t.Run("默认档构造即建键", func(t *testing.T) {
+		key := bloomTestKey("bfc-dflt")
+		defer func() { _ = rc.Del(ctx, key).Err() }()
+		if _, err := rc.NewBloomFilter(ctx, key); err != nil {
+			t.Fatalf("默认档构造：%v", err)
+		}
+		info, err := rc.BFInfo(ctx, key).Result()
+		if err != nil {
+			t.Fatalf("构造后 BF.INFO（键应已建立、无需写触发）：%v", err)
+		}
+		if info.Capacity != 1000000 {
+			t.Fatalf("默认档 Capacity got %d want 1000000", info.Capacity)
+		}
+	})
+
+	t.Run("显式参数构造兑现", func(t *testing.T) {
+		key := bloomTestKey("bfc-exp")
+		defer func() { _ = rc.Del(ctx, key).Err() }()
+		if _, err := rc.NewBloomFilter(ctx, key, WithCapacity(10000), WithFalsePositive(0.01)); err != nil {
+			t.Fatalf("显式参数构造：%v", err)
+		}
+		info, err := rc.BFInfo(ctx, key).Result()
+		if err != nil {
+			t.Fatalf("构造后 BF.INFO：%v", err)
+		}
+		if info.Capacity != 10000 {
+			t.Fatalf("显式参数 Capacity got %d want 10000", info.Capacity)
+		}
+	})
+
+	t.Run("既有真bloom键复用_参数不改写", func(t *testing.T) {
+		key := bloomTestKey("bfc-reuse")
+		defer func() { _ = rc.Del(ctx, key).Err() }()
+		// 手工 BF.RESERVE(0.01, 100) 造既有真 bloom 键
+		if err := rc.BFReserve(ctx, key, 0.01, 100).Err(); err != nil {
+			t.Fatalf("手工造键：%v", err)
+		}
+		// 默认参数（1e6/0.0001）实例构造：RESERVE 命中 exists → 复用，
+		// 不报错、不改写参数。BF.* 的 falsePositive 无法服务端回读核验
+		// （BF.INFO 不回 error rate 字段，实测确认）——fp 一致性属边界外。
+		if _, err := rc.NewBloomFilter(ctx, key); err != nil {
+			t.Fatalf("既有真 bloom 键构造应复用成功：%v", err)
+		}
+		info, err := rc.BFInfo(ctx, key).Result()
+		if err != nil || info.Capacity != 100 {
+			t.Fatalf("复用路径参数应保持旧值：got %+v err=%v", info, err)
+		}
+		// Reset 同步重建按新参数
+		bf, err := rc.NewBloomFilter(ctx, key, WithCapacity(10000), WithFalsePositive(0.01))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := bf.Reset(ctx); err != nil {
+			t.Fatalf("Reset：%v", err)
+		}
+		if info, err = rc.BFInfo(ctx, key).Result(); err != nil || info.Capacity != 10000 {
+			t.Fatalf("Reset 后应按新参数重建：got %+v err=%v", info, err)
+		}
+	})
+
+	t.Run("string键WRONGTYPE键未触碰", func(t *testing.T) {
+		key := bloomTestKey("bfc-str")
+		defer func() { _ = rc.Del(ctx, key).Err() }()
+		if err := rc.Set(ctx, key, "payload", 0).Err(); err != nil {
+			t.Fatal(err)
+		}
+		_, err := rc.NewBloomFilter(ctx, key)
+		if err == nil || !strings.Contains(strings.ToUpper(err.Error()), "WRONGTYPE") {
+			t.Fatalf("string 键构造应报 WRONGTYPE 类错误，got %v", err)
+		}
+		if errors.Is(err, ErrRedisUnavailable) {
+			t.Fatalf("WRONGTYPE 是数据类错误，不得包哨兵：%v", err)
+		}
+		if v, gerr := rc.Get(ctx, key).Result(); gerr != nil || v != "payload" {
+			t.Fatalf("构造失败不得触碰键：got %q err=%v", v, gerr)
+		}
+	})
+
+	t.Run("Add单命令基线", func(t *testing.T) {
+		key := bloomTestKey("bfc-rtt")
+		defer func() { _ = rc.Del(ctx, key).Err() }()
+		var hook countCmdHook
+		rc.AddHook(&hook)
+		bf, err := rc.NewBloomFilter(ctx, key, WithCapacity(1000))
+		if err != nil {
+			t.Fatal(err)
+		}
+		hook.n.Store(0) // 清去构造期命令（真机 RESERVE 1 条），只测写读稳态
+		if _, err := bf.Add(ctx, "rtt-1"); err != nil {
+			t.Fatal(err)
+		}
+		if n := hook.n.Swap(0); n != 1 {
+			t.Fatalf("真环境 BF.ADD 应单命令基线=1，实发 %d", n)
+		}
+		if ok, err := bf.Exists(ctx, "rtt-1"); err != nil || !ok {
+			t.Fatalf("写后 Exists：ok=%v err=%v", ok, err)
+		}
+		if n := hook.n.Swap(0); n != 1 {
+			t.Fatalf("真环境 BF.EXISTS 应单命令基线=1，实发 %d", n)
+		}
+	})
+
+	t.Run("CF键模块互撞实录", func(t *testing.T) {
+		key := bloomTestKey("bfc-cf")
+		defer func() { _ = rc.Del(ctx, key).Err() }()
+		if err := rc.CFReserve(ctx, key, 1000).Err(); err != nil {
+			t.Fatalf("手工造 CF 键：%v", err)
+		}
+		_, err := rc.NewBloomFilter(ctx, key)
+		if err == nil {
+			t.Fatal("BF.RESERVE 落在 CF 键上必须失败（模块类型互撞）")
+		}
+		if errors.Is(err, ErrRedisUnavailable) {
+			t.Fatalf("模块互撞属数据类错误，不得包哨兵：%v", err)
+		}
+		// 实录观察：RedisBloom 对跨模块类型键的 BF.RESERVE 拒绝文本
+		t.Logf("CF 键上 BF 构造实测错误：%v", err)
+		// CF 键保持原样（可被 CF 路径继续使用）
+		if _, err := rc.CFAdd(ctx, key, "alive").Result(); err != nil {
+			t.Fatalf("CF 键应未被触碰仍可写：%v", err)
+		}
+	})
 }

@@ -12,6 +12,19 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// newCloseableClient 启动 miniredis 并返回对接它的 client 与 kill 函数：
+// 服务在场时完成工厂构造（构造即连接），kill 后命令路径进入服务不可用。
+func newCloseableClient(t *testing.T) (redis.Client, func()) {
+	t.Helper()
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rdb := redis.New(redis.WithAddr(mr.Addr()))
+	t.Cleanup(func() { _ = rdb.GracefulClose(context.Background()) })
+	return rdb, mr.Close
+}
+
 // newFailedClient 创建一个指向已关闭 miniredis 的 client（Redis 服务失效，
 // 后续操作产生 dial/网络层错误）。MaxRetries=-1 关闭 go-redis 的失败重试，
 // 加速测试（否则每次操作重试 3 次 + 退避，耗时约 1.7s）。
@@ -36,7 +49,7 @@ func newFailedClient(t *testing.T) redis.Client {
 // 兜底时返回 ErrRedisUnavailable 哨兵错误（errors.Is 可感知）。
 func TestFailoverRateLimiter(t *testing.T) {
 	rdb := newFailedClient(t)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	t.Run("FailOpen 默认：Allow 放行且返回哨兵错误", func(t *testing.T) {
 		rl := rdb.NewRateLimiter("")
@@ -77,7 +90,7 @@ func TestFailoverRateLimiter(t *testing.T) {
 // TestFailoverLeakyBucket 验证漏桶失效兜底。
 func TestFailoverLeakyBucket(t *testing.T) {
 	rdb := newFailedClient(t)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	lb := rdb.NewLeakyBucket("")
 	res, err := lb.Allow(ctx, "k", 10)
@@ -96,10 +109,15 @@ func TestFailoverLeakyBucket(t *testing.T) {
 // TestFailoverBloomFilter 验证布隆过滤器失效兜底。
 // miniredis 无 bf 模块 → 走 bitmapImpl（Hash+Lua 回退）。
 func TestFailoverBloomFilter(t *testing.T) {
-	rdb := newFailedClient(t)
-	ctx := context.Background()
+	rdb, kill := newCloseableClient(t)
+	ctx := t.Context()
 
-	bf := rdb.NewBloomFilter("bfk")
+	bf, err0 := rdb.NewBloomFilter(ctx, "bfk")
+	require.NoError(t, err0, "服务在场时构造（bitmap 连接）应成功")
+	bfClosed, err1 := rdb.NewBloomFilter(ctx, "bfk2", redis.WithFailPolicy[*redis.BloomConfig](redis.FailClosed))
+	require.NoError(t, err1)
+	kill() // 构造完成后服务失效——写读路径进入兜底
+
 	added, err := bf.Add(ctx, "x")
 	require.ErrorIs(t, err, redis.ErrRedisUnavailable)
 	assert.True(t, added, "FailOpen Add 应视为已添加")
@@ -112,7 +130,6 @@ func TestFailoverBloomFilter(t *testing.T) {
 	require.ErrorIs(t, err, redis.ErrRedisUnavailable)
 	assert.NotNil(t, info, "FailOpen Info 应返回空结构体")
 
-	bfClosed := rdb.NewBloomFilter("bfk2", redis.WithFailPolicy[*redis.BloomConfig](redis.FailClosed))
 	added, err = bfClosed.Add(ctx, "x")
 	require.ErrorIs(t, err, redis.ErrRedisUnavailable)
 	assert.False(t, added, "FailClosed Add 应返回 false")
@@ -121,10 +138,15 @@ func TestFailoverBloomFilter(t *testing.T) {
 // TestFailoverCuckooFilter 验证布谷鸟过滤器失效兜底（miniredis 无 cuckoo
 // 模块 → 走 hashImpl 回退）。
 func TestFailoverCuckooFilter(t *testing.T) {
-	rdb := newFailedClient(t)
-	ctx := context.Background()
+	rdb, kill := newCloseableClient(t)
+	ctx := t.Context()
 
-	cf := rdb.NewCuckooFilter("cfk")
+	cf, err0 := rdb.NewCuckooFilter(ctx, "cfk")
+	require.NoError(t, err0, "服务在场时构造（hash 类型校验）应成功")
+	cfClosed, err1 := rdb.NewCuckooFilter(ctx, "cfk2", redis.WithFailPolicy[*redis.CuckooConfig](redis.FailClosed))
+	require.NoError(t, err1)
+	kill() // 构造完成后服务失效——写读路径进入兜底
+
 	added, err := cf.Add(ctx, "x")
 	require.ErrorIs(t, err, redis.ErrRedisUnavailable)
 	assert.True(t, added, "FailOpen Add 应视为成功")
@@ -137,7 +159,6 @@ func TestFailoverCuckooFilter(t *testing.T) {
 	require.ErrorIs(t, err, redis.ErrRedisUnavailable)
 	assert.True(t, deleted, "FailOpen Del 应视为删除成功")
 
-	cfClosed := rdb.NewCuckooFilter("cfk2", redis.WithFailPolicy[*redis.CuckooConfig](redis.FailClosed))
 	added, err = cfClosed.Add(ctx, "x")
 	require.ErrorIs(t, err, redis.ErrRedisUnavailable)
 	assert.False(t, added, "FailClosed Add 应返回 false")
@@ -153,7 +174,7 @@ func TestFailoverCommandError(t *testing.T) {
 
 	rdb := redis.New(redis.WithAddr(mr.Addr()))
 	defer func() { _ = rdb.GracefulClose(context.Background()) }()
-	ctx := context.Background()
+	ctx := t.Context()
 
 	require.NoError(t, rdb.Set(ctx, "strk", "v", 0).Err())
 	_, err = rdb.LPush(ctx, "strk", "x").Result()

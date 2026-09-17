@@ -41,11 +41,13 @@ func TestBloomABPathsShardedCluster(t *testing.T) {
 	if raw == "" {
 		t.Skip("REDIS_CLUSTER 未设置：跳过集群双路径对照")
 	}
-	rdb, err := NewWithUrl(raw)
+	rdb, err := NewWithURL(raw)
 	if err != nil {
-		t.Fatalf("NewWithUrl: %v", err)
+		t.Fatalf("NewWithURL: %v", err)
 	}
 	defer func() { _ = rdb.GracefulClose(context.Background()) }()
+	// 查询为纯内存读：guard 前显式 Probe（探测失败 HasModule=false → skip）
+	_ = rdb.Capability().Probe(t.Context())
 	if !rdb.Capability().HasModule("bf") {
 		t.Skip("集群未加载 bf 模块，跳过双路径对照（BF 侧前提不成立）")
 	}

@@ -4,8 +4,6 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"sync"
-	"sync/atomic"
 
 	goredis "github.com/redis/go-redis/v9"
 )
@@ -18,54 +16,94 @@ type cfCmdImpl struct {
 	client *redisClient
 	key    string
 	cfg    cuckooConfig
-	// once 是惰性 CF.RESERVE 闸门（每代只执行一次）。用 atomic.Pointer 包
-	// sync.Once 以便 Reset 整键销毁后复位：DEL 之后 Store 一个新 sync.Once，
-	// 后续 Add 重新触发 CF.RESERVE，避免 once 燃尽残留导致过滤器被模块默认
-	// 参数（capacity=100、bucketSize=2、maxIterations=20）隐式重建、静默
-	// 作废 WithCuckooCapacity/WithBucketSize/WithMaxIterations/WithExpansion。
-	// 构造点必须显式 Store(new(sync.Once))——atomic.Pointer 零值 Load 返回 nil。
-	once atomic.Pointer[sync.Once]
 }
 
-// ensureReserve 在配置了容量时对过滤器执行一次 CF.RESERVE 预分配。
-// 对已存在的过滤器（CF.RESERVE 报 "item exists"/"already exists"）容错忽略
-// （维持武装，闸门视为已消费）。
-// 其他错误（网络失败、WRONGTYPE 等）时解除武装：Store 一个新 sync.Once，
-// 下次 Add 重试 CF.RESERVE。sync.Once 不辨闭包成败——若不解除武装，一次
-// 瞬态网络失败会永久燃尽闸门，过滤器随后被模块默认参数隐式重建，
-// With* 配置静默作废（与 Reset 的无条件复位同纪律的两半：一个管销毁、
-// 一个管失败）。
-func (cf *cfCmdImpl) ensureReserve(ctx context.Context) error {
-	if cf.cfg.capacity <= 0 {
-		return nil
+// defaultCFReserveCapacity 是未显式传 WithCuckooCapacity 时 CF.RESERVE 的
+// 预建容量（分配契约：键在构造期即以该容量在服务端建立）。
+const defaultCFReserveCapacity int64 = 1_000_000
+
+// connectAll 同步连接物理键：CF.RESERVE <capacity> [BUCKETSIZE
+// <bucketSize>] [MAXITERATIONS <maxIterations>] [EXPANSION <expansion>]
+// （未显式传容量时取 defaultCFReserveCapacity；bucketSize 等零值字段
+// goredis 不附带，服务端用自身默认）。三态分流：
+//   - RESERVE 成功 → 键按当前配置新建；
+//   - "item exists"/"already exists" → 既有真 CF 键：复用，并按
+//     verifyExisting 比对显式传入的参数；
+//   - 其余错误（WRONGTYPE、模块间类型互撞等）附键名上抛，不触碰键。
+//
+// Unavailable 类包 ErrRedisUnavailable 哨兵；不随 FailPolicy 兜底——
+// 构造/重置的失败必须可见。
+func (cf *cfCmdImpl) connectAll(ctx context.Context) error {
+	capacity := cf.cfg.capacity
+	if capacity <= 0 {
+		capacity = defaultCFReserveCapacity
 	}
+	opt := &goredis.CFReserveOptions{
+		Capacity:      capacity,
+		BucketSize:    cf.cfg.bucketSize,
+		MaxIterations: cf.cfg.maxIterations,
+		Expansion:     cf.cfg.expansion,
+	}
+	err := cf.client.CFReserveWithArgs(ctx, cf.key, opt).Err()
+	switch {
+	case err == nil:
+		return nil // 新建完成
+	case isCFKeyExistsErr(err):
+		return cf.verifyExisting(ctx) // 复用：按声明口径校验（见 verifyExisting）
+	case IsUnavailable(err):
+		return fallbackErr(err)
+	default:
+		// 非 CF 类型 / 模块类型互撞（如 BF 键）等：fail-loud，键未被修改
+		return fmt.Errorf("redis: cuckoo CF.RESERVE %s: %w", cf.key, err)
+	}
+}
 
-	var err error
-	cf.once.Load().Do(func() {
-		opt := &goredis.CFReserveOptions{
-			Capacity:      cf.cfg.capacity,
-			BucketSize:    cf.cfg.bucketSize,
-			MaxIterations: cf.cfg.maxIterations,
-			Expansion:     cf.cfg.expansion,
-		}
-		err = cf.client.CFReserveWithArgs(ctx, cf.key, opt).Err()
-		if err != nil && (strings.Contains(err.Error(), "item exists") || strings.Contains(err.Error(), "already exists")) {
-			err = nil // 过滤器已存在：视为已初始化
-		}
-		if err != nil {
-			cf.once.Store(new(sync.Once)) // 失败解除武装：本代闸门弃用，下次重试
-		}
-	})
+// isCFKeyExistsErr 是 CF.* 路径的"键已存在"复用判据。
+func isCFKeyExistsErr(err error) bool {
+	return strings.Contains(err.Error(), "item exists") || strings.Contains(err.Error(), "already exists")
+}
 
-	return err
+// verifyExisting 对复用的既有 CF 键按声明口径校验：capacity **恒比对**
+// ——未显式传 WithCuckooCapacity 时以默认 1000000 承载声明——以服务端
+// 总槽位（NumBuckets×BucketSize）不小于期望值判定（模块按容量推导桶数
+// 并向上取 2 的幂，等值比对必然误报）；bucketSize、maxIterations 仅在
+// 显式传入（>0）时等值比对。不符 → 数据类 layout mismatch、键未被
+// 修改，Reset 或换键解决。expansion 不比对——CF.INFO 回读的
+// ExpansionRate 与服务端版本默认值联动，非请求参数恒等回读，等值判定
+// 会误伤复用路径。
+func (cf *cfCmdImpl) verifyExisting(ctx context.Context) error {
+	capacity := cf.cfg.capacity
+	if capacity <= 0 {
+		capacity = defaultCFReserveCapacity
+	}
+	info, err := cf.client.CFInfo(ctx, cf.key).Result()
+	if err != nil {
+		if IsUnavailable(err) {
+			return fallbackErr(err)
+		}
+		return fmt.Errorf("redis: cuckoo CF.INFO %s: %w", cf.key, err)
+	}
+	var problems []string
+	if cf.cfg.bucketSize > 0 && info.BucketSize != cf.cfg.bucketSize {
+		problems = append(problems, fmt.Sprintf("bucket_size server %d, want %d", info.BucketSize, cf.cfg.bucketSize))
+	}
+	if cf.cfg.maxIterations > 0 && info.MaxIteration != cf.cfg.maxIterations {
+		problems = append(problems, fmt.Sprintf("max_iterations server %d, want %d", info.MaxIteration, cf.cfg.maxIterations))
+	}
+	// 容量口径：服务端未回 capacity 字段，总槽位=NumBuckets×BucketSize；
+	// 既有键容纳能力低于期望即不符。
+	if capacity > 0 && info.NumBuckets*info.BucketSize < capacity {
+		problems = append(problems, fmt.Sprintf("capacity server %d, want >= %d", info.NumBuckets*info.BucketSize, capacity))
+	}
+	if len(problems) > 0 {
+		return fmt.Errorf("redis: cuckoo CF %s: layout mismatch: %s；Reset 或换键", cf.key, strings.Join(problems, ", "))
+	}
+	return nil
 }
 
 // Add/Exists/Del 把原始 item 透传给 CF.* 模块命令，由 go-redis writer
 // 序列化（与回退版 marshalItem 的字节口径一致，见 marshal.go）。
 func (cf *cfCmdImpl) Add(ctx context.Context, item any) (bool, error) {
-	if err := cf.ensureReserve(ctx); err != nil {
-		return false, err
-	}
 	return cf.client.CFAdd(ctx, cf.key, item).Result()
 }
 
@@ -74,7 +112,7 @@ func (cf *cfCmdImpl) Exists(ctx context.Context, item any) (bool, error) {
 }
 
 // ExistsMulti 单条 CF.MEXISTS 批量检查，结果与入参顺序一一对应。
-// 只读路径不触发 ensureReserve（与 Exists 现状一致：真机实测
+// 只读路径不触发连接建立（与 Exists 现状一致：真机实测
 // CF.MEXISTS/CF.EXISTS 对不存在的键宽容返回全 false、无错误，预建
 // 无收益）。item 直发不做 marshalItem 预编码校验——与单条 Exists
 // 同口径（go-redis writer 对不可序列化类型 panic 属开发者错误；
@@ -90,7 +128,7 @@ func (cf *cfCmdImpl) ExistsMulti(ctx context.Context, items ...any) ([]bool, err
 	return res, nil
 }
 
-// Count 直发 CF.COUNT（只读，不触发 ensureReserve）。键不存在时
+// Count 直发 CF.COUNT（只读，不触发建立动作）。键不存在时
 // RedisBloom 返回 0 而非报错。返回值为出现次数估计，可能因指纹碰撞
 // 高估；模块版可取任意值（CF.ADD 多重集语义），见门面 Count godoc。
 func (cf *cfCmdImpl) Count(ctx context.Context, item any) (int64, error) {
@@ -99,16 +137,13 @@ func (cf *cfCmdImpl) Count(ctx context.Context, item any) (int64, error) {
 
 // AddNX 直发 CF.ADDNX：元素已存在则不插入。CF.ADDNX 返回 0/1
 // （BoolCmd，无 -1 形态——-1 是 CF.INSERTNX 的返回），true 表示实际
-// 插入。写路径先 ensureReserve（与 Add 相同）。
+// 插入。
 func (cf *cfCmdImpl) AddNX(ctx context.Context, item any) (bool, error) {
-	if err := cf.ensureReserve(ctx); err != nil {
-		return false, err
-	}
 	return cf.client.CFAddNX(ctx, cf.key, item).Result()
 }
 
 // AddMulti 批量插入走单条 CF.INSERT：options 恒置 nil——不带 CAPACITY/
-// NOCREATE，参数预分配统一经 ensureReserve 的 CF.RESERVE 通道（避免
+// NOCREATE，参数分配统一经构造期 connectAll 的 CF.RESERVE 通道（避免
 // RESERVE 与 INSERT 双通道配置语义分裂，架构定稿）。结果 1/-1 由
 // BoolSliceCmd 归一为 true/false（false=该元素插入失败，桶满/驱逐超限）。
 // item 不做 marshalItem 预编码校验、直发 writer 序列化（与单条 Add 同
@@ -116,9 +151,6 @@ func (cf *cfCmdImpl) AddNX(ctx context.Context, item any) (bool, error) {
 func (cf *cfCmdImpl) AddMulti(ctx context.Context, items ...any) ([]bool, error) {
 	if len(items) == 0 {
 		return nil, nil
-	}
-	if err := cf.ensureReserve(ctx); err != nil {
-		return nil, err
 	}
 	res, err := cf.client.CFInsert(ctx, cf.key, nil, items...).Result()
 	if err != nil {
@@ -152,13 +184,16 @@ func (cf *cfCmdImpl) Info(ctx context.Context) (*CuckooInfo, error) {
 	}, nil
 }
 
-// Reset 删除 CF.* 键并复位惰性 CF.RESERVE 闸门，后续 Add 重新按配置
-// CF.RESERVE 重建。闸门复位无条件执行（defer，不区分 DEL 成败）：DEL 实际
-// 执行但客户端收到网络错误时，"仅成功才复位"会让旧闸门燃尽残留 → 后续
-// Add 用模块默认参数隐式重建、With* 配置静默作废；双 RESERVE 竞态的代价
-// 只是 ensureReserve 吞掉的 "item exists"，无害。键不存在时 DEL 返回 0、
-// 无错误，天然幂等。
+// Reset 删除 CF.* 键（DEL）后立即经 connectAll 按当前配置同步重建——
+// 返回成功即键已就绪；失败如实返回（键可能处于已清空未重建态），重试
+// Reset 幂等（DEL 与 RESERVE/复用三态皆幂等）。键不存在时 DEL 返回 0、
+// 无错误。错误分流同构造期（connectAll）。
 func (cf *cfCmdImpl) Reset(ctx context.Context) error {
-	defer cf.once.Store(new(sync.Once))
-	return cf.client.Del(ctx, cf.key).Err()
+	if err := cf.client.Del(ctx, cf.key).Err(); err != nil {
+		if IsUnavailable(err) {
+			return fallbackErr(err)
+		}
+		return err
+	}
+	return cf.connectAll(ctx)
 }

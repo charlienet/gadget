@@ -18,11 +18,12 @@ import (
 // 服务宕机后连续失败达阈值 → Open；Open 后操作快速失败（不实际连接），
 // 单次耗时远小于首次连接失败耗时。
 func TestBreakerTriggerAndFailFast(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 
 	// 固定端口 miniredis（可复用端口做恢复验证，此处仅测触发）
 	port := 16380
-	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	var lc net.ListenConfig
+	ln, err := lc.Listen(ctx, "tcp", fmt.Sprintf("127.0.0.1:%d", port))
 	if err != nil {
 		t.Skipf("端口 %d 被占用，跳过", port)
 	}
@@ -67,10 +68,11 @@ func TestBreakerTriggerAndFailFast(t *testing.T) {
 // TestBreakerRecover 验证熔断恢复：Open 冷却后半开放行探测，
 // 服务恢复后探测成功 → Closed，正常请求放行。
 func TestBreakerRecover(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 
 	port := 16381
-	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	var lc net.ListenConfig
+	ln, err := lc.Listen(ctx, "tcp", fmt.Sprintf("127.0.0.1:%d", port))
 	if err != nil {
 		t.Skipf("端口 %d 被占用，跳过", port)
 	}
@@ -119,7 +121,7 @@ func TestBreakerCommandError(t *testing.T) {
 
 	rdb := redis.New(redis.WithAddr(mr.Addr()))
 	defer func() { _ = rdb.GracefulClose(context.Background()) }()
-	ctx := context.Background()
+	ctx := t.Context()
 
 	require.NoError(t, rdb.Set(ctx, "strk", "v", 0).Err())
 
@@ -141,10 +143,11 @@ func TestBreakerCommandError(t *testing.T) {
 // 熔断 Open 快速失败的错误（lastErr 为连接类错误）能被扩展层 IsUnavailable
 // 识别并走 FailPolicy 兜底（errors.Is(ErrRedisUnavailable) 命中）。
 func TestBreakerFailoverLink(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 
 	port := 16382
-	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	var lc net.ListenConfig
+	ln, err := lc.Listen(ctx, "tcp", fmt.Sprintf("127.0.0.1:%d", port))
 	if err != nil {
 		t.Skipf("端口 %d 被占用，跳过", port)
 	}
@@ -168,8 +171,10 @@ func TestBreakerFailoverLink(t *testing.T) {
 		"熔断拦截的错误应被识别并走兜底（哨兵错误）")
 	assert.True(t, res.Allowed, "FailOpen 限流应放行")
 
-	bf := rdb.NewBloomFilter("bf:failover", redis.WithFailPolicy[*redis.BloomConfig](redis.FailClosed))
-	added, err := bf.Add(ctx, "x")
-	require.ErrorIs(t, err, redis.ErrRedisUnavailable)
-	assert.False(t, added, "FailClosed 布隆过滤器应拒绝")
+	// 构造即连接：熔断 Open 时工厂在连接阶段失败——哨兵错误可见、不交付
+	// 实例；FailPolicy 不介入构造错误（写读路径的 FailClosed 兜底见
+	// TestFailoverBloomFilter）。
+	bf, err := rdb.NewBloomFilter(ctx, "bf:failover", redis.WithFailPolicy[*redis.BloomConfig](redis.FailClosed))
+	require.ErrorIs(t, err, redis.ErrRedisUnavailable, "熔断 Open 时构造应返回哨兵错误")
+	assert.Nil(t, bf, "连接失败不交付实例")
 }

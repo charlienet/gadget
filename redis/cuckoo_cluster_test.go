@@ -26,6 +26,7 @@ import (
 // 模块时跳过（守卫手法与 TestCuckooFilter/TestCuckooFilterMultiOps 一致）。
 func TestCuckooFilterCluster(t *testing.T) {
 	test.RunOnRedisCluster(t, func(rdb redis.Client) {
+		_ = rdb.Capability().Probe(t.Context()) // 查询为纯内存读：guard 前显式探测
 		if !rdb.Capability().HasCuckoo() {
 			t.Skip("集群节点未加载 cuckoo 模块，跳过 CF.* 集群测试（需 RedisBloom）")
 		}
@@ -36,11 +37,12 @@ func TestCuckooFilterCluster(t *testing.T) {
 
 		// WithBucketSize(3)/WithMaxIterations(20) 刻意偏离模块默认（2/20），
 		// 供闸门复位探针判据
-		cf := rdb.NewCuckooFilter(key,
+		cf, cerr := rdb.NewCuckooFilter(ctx, key,
 			redis.WithCuckooCapacity(10000),
 			redis.WithBucketSize(3),
 			redis.WithMaxIterations(20),
 		)
+		require.NoError(t, cerr, "构造即连接（CF.RESERVE）")
 
 		t.Run("全 9 方法门面级跑通", func(t *testing.T) {
 			// Add / Exists
@@ -107,7 +109,10 @@ func TestCuckooFilterCluster(t *testing.T) {
 
 			// 全新键首个写操作重走惰性 CF.RESERVE（DEL 未过 Reset，实例
 			// 闸门仍处上代消费态——用新实例确保 RESERVE 通道完整验证）
-			cf2 := rdb.NewCuckooFilter(key, redis.WithCuckooCapacity(10000))
+			cf2, cerr111 := rdb.NewCuckooFilter(ctx, key, redis.WithCuckooCapacity(10000))
+			if cerr111 != nil {
+				t.Fatalf("构造过滤器：%v", cerr111)
+			}
 			for range 3 {
 				_, err := cf2.Add(ctx, "dup")
 				require.NoError(t, err)
@@ -124,30 +129,34 @@ func TestCuckooFilterCluster(t *testing.T) {
 			assert.Equal(t, int64(2), n, "Del 一次计数减 1")
 		})
 
-		t.Run("Reset 后 Info not-found 透传与幂等", func(t *testing.T) {
+		t.Run("Reset 同步重建与库外 DEL 的 not-found 透传", func(t *testing.T) {
 			require.NoError(t, rdb.Del(ctx, key).Err())
-			cf3 := rdb.NewCuckooFilter(key, redis.WithCuckooCapacity(10000))
+			cf3, cerr130 := rdb.NewCuckooFilter(ctx, key, redis.WithCuckooCapacity(10000))
+			if cerr130 != nil {
+				t.Fatalf("构造过滤器：%v", cerr130)
+			}
 			_, err := cf3.Add(ctx, "r-1")
 			require.NoError(t, err)
 
+			// Reset：DEL + connectAll 同步重建——返回即键已按配置重建、为空
 			require.NoError(t, cf3.Reset(ctx))
-
 			exists, err := rdb.Exists(ctx, key).Result()
 			require.NoError(t, err)
-			assert.Equal(t, int64(0), exists, "Reset 后物理键应删除")
-
-			// CF.INFO 对不存在键报命令级错误（"not found"类）：门面原样
-			// 透传错误、**不得**判为 ErrRedisUnavailable（服务实际可用，
-			// 与真单机行为对齐）。
+			assert.Equal(t, int64(1), exists, "Reset 返回后键应已同步重建")
 			_, err = cf3.Info(ctx)
-			require.Error(t, err, "Reset 后 CF.INFO 应报 not-found 类命令错误")
-			assert.NotErrorIs(t, err, redis.ErrRedisUnavailable,
-				"not-found 是命令级错误，不得触发 Unavailable 判定")
-
-			// Exists 对已销毁键返回 false 无错（CF.EXISTS 缺失键宽容形态）
+			require.NoError(t, err, "重建后 CF.INFO 应可用")
 			hit, err := cf3.Exists(ctx, "r-1")
 			require.NoError(t, err)
-			assert.False(t, hit)
+			assert.False(t, hit, "重建后为空过滤器")
+
+			// 库外干预锚：手工 DEL 后写读路径不自愈（键生命周期由库管辖）；
+			// CF.INFO 对不存在键报命令级 "not found" 类错误，门面原样透传、
+			// **不得**判为 ErrRedisUnavailable（服务实际可用）。
+			require.NoError(t, rdb.Del(ctx, key).Err())
+			_, err = cf3.Info(ctx)
+			require.Error(t, err, "库外 DEL 后 CF.INFO 应报 not-found 类命令错误")
+			assert.NotErrorIs(t, err, redis.ErrRedisUnavailable,
+				"not-found 是命令级错误，不得触发 Unavailable 判定")
 
 			// ⚠️ 归一化契约锚（评审 M1）：CF.DEL 对不存在键原生报
 			// "Not found" 命令错误（缺陷候选被裁决归一），门面将其

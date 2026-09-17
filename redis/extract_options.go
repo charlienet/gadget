@@ -22,7 +22,7 @@ import "github.com/redis/go-redis/v9"
 // Options() 返回的 *redis.Options 不含 MasterName（该字段仅存在于
 // FailoverOptions/UniversalOptions），故无法从外部 uc 提取哨兵配置。
 // 包装外部 failover client 时，AddPrefix 派生子池无法继承哨兵发现能力，
-// 需显式传入 WithRedisOptions 提供哨兵配置；本库自建（New/NewWithUrl +
+// 需显式传入 WithRedisOptions 提供哨兵配置；本库自建（New/NewWithURL +
 // MasterName）的哨兵 client 的 conf 完整保留 MasterName，不受影响。
 func extractUniversalOptions(uc redis.UniversalClient) *redis.UniversalOptions {
 	switch v := uc.(type) {

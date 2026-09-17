@@ -9,6 +9,8 @@ import (
 )
 
 // createMockCmd 创建用于测试的命令对象
+// createMockCmd 构造测试用命令对象（非测试执行路径的建连操作，
+// 仅需一个已完成的 Cmd 载体，使用 Background 上下文）。
 func createMockCmd(name string, args ...any) *redis.Cmd {
 	allArgs := make([]any, len(args)+1)
 	allArgs[0] = name
@@ -339,9 +341,9 @@ func TestRenameHook_Pipeline(t *testing.T) {
 	assert.Equal(t, []any{"MGET", "key5", "key6", "key7"}, cmds[3].Args())
 
 	// 执行管道重命名
-	err := hook.ProcessPipelineHook(func(ctx context.Context, cmds []redis.Cmder) error {
+	err := hook.ProcessPipelineHook(func(_ context.Context, _ []redis.Cmder) error {
 		return nil
-	})(context.Background(), cmds)
+	})(t.Context(), cmds)
 
 	assert.NoError(t, err)
 

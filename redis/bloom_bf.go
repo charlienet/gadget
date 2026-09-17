@@ -4,37 +4,24 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"sync"
-	"sync/atomic"
 
 	goredis "github.com/redis/go-redis/v9"
 )
 
 // BF.*（RedisBloom 模块）原生命令实现——bfCmdImpl 及其专属辅助。
-// 由 bloom.go 拆分而来：接口/配置留在 bloom.go，命令实现移入本文件，
-// 并新增集群分片支持（路由/分组/惰性 RESERVE/Info 聚合）。
-// newBFImpl 构造 BF.* 路径实现（分片参数解析与 per-shard RESERVE 闸门
-// 初始化）。auto 探测单一入口，保证分片行为与 bitmap 路径完全对称。
+// 接口/配置定义在 bloom.go，集群分片共享层在 bloom_shard.go；本文件
+// 实现命令路由、分组批量、构造期连接（connectAll）与 Info 聚合。
+// newBFImpl 仅做分片参数解析与结构装配；建键/校验由工厂经 connectAll
+// 同步执行。auto 探测单一入口，保证分片行为与 bitmap 路径完全对称。
 func (rdb *redisClient) newBFImpl(key string, cfg bloomConfig) *bfCmdImpl {
 	enabled, n, perShard := resolveBloomSharding(rdb.Mode(), cfg.shardCount, cfg.capacity)
-	bf := &bfCmdImpl{
+	return &bfCmdImpl{
 		client:   rdb,
 		cfg:      cfg,
 		policy:   cfg.policy,
 		sharder:  newBloomSharder(key, enabled, n),
 		perShard: perShard,
 	}
-	if enabled {
-		// per-shard 惰性 BF.RESERVE 的一次性闸门（参照 cuckoo.go 的 once 模式）。
-		// atomic.Pointer 使 Reset 能在 DEL 后逐元素换新 Once 重新武装闸门；
-		// ⚠️ 零值 Load() 返回 nil，必须逐元素 Store(new(sync.Once))——漏 Store
-		// 会让 reserveShard 空指针 panic。
-		bf.reserves = make([]atomic.Pointer[sync.Once], n)
-		for i := range bf.reserves {
-			bf.reserves[i].Store(new(sync.Once))
-		}
-	}
-	return bf
 }
 
 // --- BF.* native implementation ---
@@ -45,47 +32,61 @@ type bfCmdImpl struct {
 	policy FailPolicy // 失效兜底策略（默认 FailOpen）
 	// sharder 分片路由共享层（与 bitmapImpl 同一套代码，保证两路径行为一致）。
 	// enabled=false（非集群或未显式开启分片）时 shardKey 恒返回 base，
-	// 行为与分片化之前完全一致。
+	// 单键直达。
 	sharder  bloomSharder
 	perShard int64 // BF.RESERVE 每分片容量（ceil(总/effectiveN)）
-	// reserves 每个分片键一把惰性 BF.RESERVE 闸门（仅 enabled 时分配）；
-	// 并发下命中 "item exists"/"already exists" 的错误视为成功（cuckoo.go ensureReserve 同模式）。
-	// 用 atomic.Pointer 承载：Reset 清空键后逐元素 Store 新 Once 重新武装
-	// 闸门，与在途 reserveShard 的 Load 并发安全。
-	reserves []atomic.Pointer[sync.Once]
 }
 
-// reserveShard 对第 idx 个分片键惰性执行一次 BF.RESERVE（并发只成功执行
-// 一轮；once 耗尽后的后续调用不再重发）。"已存在"类错误视为初始化完成；
-// 其余错误原样返回，由调用方按 Unavailable/数据类分流。
-// 闸门指针经 atomic 读取：Reset 换新 Once 后本方法自动改在新 Once 上重新
-// 武装一次 BF.RESERVE；与并发 Reset 交错时最多多发一条 RESERVE，其
-// "already exists" 错误被下方吞错逻辑消化，无害。
-func (b *bfCmdImpl) reserveShard(ctx context.Context, idx int) error {
-	if !b.sharder.enabled {
-		return nil // 非分片模式不预分配（历史既有行为，保持零回归）
+// connectKey 对单个物理键执行 BF.RESERVE <fp> <perShard>，三态结果：
+// 成功=键按当前配置新建；"item exists"/"already exists" 错误=键为既有
+// 真 bloom 过滤器、复用（exists 类错误是唯一复用判据，键类型校验随
+// RESERVE 完成）；其余错误（WRONGTYPE、模块间类型互撞等）原样返回、
+// 不触碰键。falsePositive 无法从服务端回读核验（BF.INFO 不回该字段），
+// 复用路径的 fp 一致性属能力边界外。
+func (b *bfCmdImpl) connectKey(ctx context.Context, key string) error {
+	return b.client.BFReserve(ctx, key, b.cfg.falsePositive, b.perShard).Err()
+}
+
+// classifyConnectErr 统一逐键 BF.RESERVE 结果的三态分流：新建成功与复用
+// （exists 吞错）均返回 nil；其余错误附键名上抛（数据类）或包
+// ErrRedisUnavailable 哨兵（Unavailable 类）。
+func (b *bfCmdImpl) classifyConnectErr(key string, err error) error {
+	switch {
+	case err == nil:
+		return nil // 新建：键已按当前配置建立
+	case strings.Contains(err.Error(), "item exists") || strings.Contains(err.Error(), "already exists"):
+		return nil // 复用：既有真 bloom 键（参数不改写；fp 不可核验）
+	case IsUnavailable(err):
+		return fallbackErr(err)
+	default:
+		// 非 bloom 类型 / 模块类型互撞等：fail-loud，键未被修改
+		return fmt.Errorf("redis: bloom BF.RESERVE %s: %w", key, err)
 	}
-	once := b.reserves[idx].Load() // 构造点已逐元素 Store，非 nil（见 newBFImpl）
-	var err error
-	once.Do(func() {
-		err = b.client.BFReserve(ctx, b.sharder.shardKey(idx), b.cfg.falsePositive, b.perShard).Err()
-		if err != nil && (strings.Contains(err.Error(), "item exists") || strings.Contains(err.Error(), "already exists")) {
-			err = nil // 过滤器已存在（并发/历史残留）：视为已初始化，武装保持
-			return
+}
+
+// connectAll 同步连接全部物理键（多分片经单个 Pipeline 一批提交，
+// 逐键按 classifyConnectErr 三态分流）；不随 FailPolicy 兜底——
+// 构造/重置的失败必须可见。
+func (b *bfCmdImpl) connectAll(ctx context.Context) error {
+	if !b.sharder.enabled || b.sharder.n == 1 {
+		key := b.sharder.shardKey(0)
+		return b.classifyConnectErr(key, b.connectKey(ctx, key))
+	}
+	pipe := b.client.Pipeline()
+	cmds := make([]*goredis.StatusCmd, b.sharder.n)
+	for idx := range b.sharder.n {
+		cmds[idx] = pipe.BFReserve(ctx, b.sharder.shardKey(idx), b.cfg.falsePositive, b.perShard)
+	}
+	if _, err := pipe.Exec(ctx); err != nil && IsUnavailable(err) {
+		return fallbackErr(err)
+	}
+	for idx, cmd := range cmds {
+		key := b.sharder.shardKey(idx)
+		if err := b.classifyConnectErr(key, cmd.Err()); err != nil {
+			return err
 		}
-		if err != nil {
-			// RESERVE 真实失败（网络/服务类）：sync.Once 不辨成败，Do 返回
-			// 即永久燃尽——不显式解除武装的话，服务恢复后也永不再试，分片
-			// 被 RedisBloom 以默认参数（capacity=100）隐式创建，容量契约
-			// 静默作废（与 Reset 防的是同一类腐化，触发路径不同）。换新
-			// Once 解除武装，下一次写入在本闸门上重试 RESERVE；本次调用
-			// 照常返回 err（不改变调用方的 FailPolicy 兜底行为）。闭包内
-			// Store 安全：当前 Do 持有者执行完自然结束，后续 Load 见到新
-			// 闸门；并发重试最多多发一条 RESERVE，命中 exists 吞错无害。
-			b.reserves[idx].Store(new(sync.Once))
-		}
-	})
-	return err
+	}
+	return nil
 }
 
 // fallbackBool 按策略返回布隆过滤器兜底值 + 哨兵错误：FailOpen → true
@@ -114,16 +115,8 @@ func (b *bfCmdImpl) Add(ctx context.Context, item any) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	// 集群分片：路由到 base#idx 并惰性 BF.RESERVE（standalone 恒走 base、
-	// 不 reserve，行为与分片化之前一致）。
 	idx := b.sharder.indexOf(data)
 	key := b.sharder.shardKey(idx)
-	if err := b.reserveShard(ctx, idx); err != nil {
-		if IsUnavailable(err) {
-			return b.fallbackBool(err)
-		}
-		return false, err
-	}
 
 	// 命令参数透传原始 item，由 go-redis writer 序列化——其编码与
 	// marshalItem 逐字节对齐（见 marshal.go 与 parity 测试），保证
@@ -178,9 +171,9 @@ func (b *bfCmdImpl) ExistsMulti(ctx context.Context, items ...any) ([]bool, erro
 
 // multiByShards 是 BF.* 路径批量操作的统一实现（isAdd 选 BF.MADD/BF.MEXISTS）。
 // 单物理键形态（standalone 或集群退化态 n==1）保持原有的单命令直发；
-// 多分片形态先对各组惰性 BF.RESERVE（一次性命令、无副作用不进管道），再
-// 一个 Pipeline 提交各组 BF.MADD/BF.MEXISTS——go-redis 集群 pipeline 按
-// 节点分组拆分发送，不同 slot 的键不会触发 CROSSSLOT。
+// 多分片形态按分组经**单个 Pipeline** 提交各组 BF.MADD/BF.MEXISTS——
+// go-redis 集群 pipeline 按节点分组拆分发送，不同 slot 的键不会触发
+// CROSSSLOT。
 func (b *bfCmdImpl) multiByShards(ctx context.Context, items []any, isAdd bool) ([]bool, error) {
 	op := "BF.MEXISTS"
 	if isAdd {
@@ -196,12 +189,6 @@ func (b *bfCmdImpl) multiByShards(ctx context.Context, items []any, isAdd bool) 
 			}
 		}
 		key := b.sharder.shardKey(0) // standalone 即 base；集群退化态为 base#0
-		if err := b.reserveShard(ctx, 0); err != nil {
-			if IsUnavailable(err) {
-				return b.fallbackBools(len(items), err)
-			}
-			return nil, err
-		}
 		var added []bool
 		var err error
 		if isAdd {
@@ -223,14 +210,6 @@ func (b *bfCmdImpl) multiByShards(ctx context.Context, items []any, isAdd bool) 
 	groups, err := b.sharder.group(items)
 	if err != nil {
 		return nil, err
-	}
-	for _, g := range groups {
-		if err := b.reserveShard(ctx, g.idx); err != nil {
-			if IsUnavailable(err) {
-				return b.fallbackBools(len(items), err) // 任一分片不可用 → 整体兜底
-			}
-			return nil, err
-		}
 	}
 
 	pipe := b.client.Pipeline()
@@ -271,7 +250,7 @@ func (b *bfCmdImpl) multiByShards(ctx context.Context, items []any, isAdd bool) 
 // ⚠️ 成本警告（分片后加重）：分片态对每个分片键各发一次 BF.INFO——往返
 // ×effectiveN，Info 本是重命令，放大后仅适合更低频的运维查询，严禁热路径。
 // 空分片（从未初始化）在分片态把 "not found" 归一为零值分片继续聚合，
-// 不再整体报错；standalone 维持历史报错行为（零回归）。
+// 不再整体报错；standalone 对不存在的键报错返回。
 // Capacity/Size/NumFilters/NumItems 逐分片求和（BF 路径的 ItemsInserted 是
 // 精确计数，线性可加）；ExpansionRate 是 RESERVE 配置常量、各分片一致，
 // 取第一个分片。
@@ -323,20 +302,15 @@ func (b *bfCmdImpl) Card(ctx context.Context) (int64, error) {
 	return sum, nil
 }
 
-// Reset 清空全部物理键（DEL，共享层见 resetBloomKeys）并**无条件**复位
-// 惰性 BF.RESERVE 闸门——后续首次写入重新执行 BF.RESERVE，容量契约
-// （perShard）不因重建而失效。语义与限制见 BloomFilter.Reset 接口注释。
-//
-// 闸门复位放在 defer：不区分 DEL 成败一律换新 sync.Once。若"仅 DEL 成功
-// 才复位"，DEL 实际执行成功但客户端收到网络错误的场景会让燃尽的 once
-// 残留——后续 Add 不再 RESERVE，键被 RedisBloom 以默认参数
-// （capacity=100）自动重建，容量契约静默作废；而无条件复位导致的并发
-// 双 RESERVE 会被 reserveShard 既有 "already exists" 吞错逻辑消化，无害。
+// Reset 清空全部物理键（DEL，共享层见 resetBloomKeys）后立即经 connectAll
+// 按当前配置同步重建——返回成功即键已就绪，容量契约（perShard）不因重建
+// 而失效；失败如实返回（无闸门、无惰性自愈，键可能处于已清空未重建态），
+// 重试 Reset 幂等（DEL 与 RESERVE-复用皆幂等）。错误分流同工厂：
+// Unavailable 包哨兵、数据类原样返回。语义与限制见 BloomFilter.Reset
+// 接口注释。
 func (b *bfCmdImpl) Reset(ctx context.Context) error {
-	defer func() {
-		for i := range b.reserves {
-			b.reserves[i].Store(new(sync.Once))
-		}
-	}()
-	return resetBloomKeys(ctx, b.client, b.sharder)
+	if err := resetBloomKeys(ctx, b.client, b.sharder); err != nil {
+		return err
+	}
+	return b.connectAll(ctx)
 }

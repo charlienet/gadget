@@ -102,7 +102,7 @@ func (q *DelayedQueue) Dequeue(ctx context.Context) (string, bool, error) {
 	return s, true, nil
 }
 
-// dequeueBatchScript 原子批量取出最多 max 个到期任务并一次性 ZREM。
+// dequeueBatchScript 原子批量取出最多 count 个到期任务并一次性 ZREM。
 // 无到期任务时返回空表。
 var dequeueBatchScript = goredis.NewScript(`
 	local items = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', ARGV[1], 'LIMIT', 0, ARGV[2])
@@ -113,15 +113,17 @@ var dequeueBatchScript = goredis.NewScript(`
 	return items
 `)
 
-// DequeueBatch 原子批量取出最多 max 个到期任务（按 score 升序）。
+// DequeueBatch 原子批量取出最多 count 个到期任务（按 score 升序）。
 // 无到期任务时返回空切片、err=nil。
-func (q *DelayedQueue) DequeueBatch(ctx context.Context, max int) ([]string, error) {
-	if max <= 0 {
+// count 是单次 Lua 脚本的 ZREM 参数展开规模，建议 ≤1000；
+// 更大批量用循环多次调用。
+func (q *DelayedQueue) DequeueBatch(ctx context.Context, count int) ([]string, error) {
+	if count <= 0 {
 		return nil, nil
 	}
 
 	now := time.Now().UnixMilli()
-	items, err := dequeueBatchScript.Run(ctx, q.client, []string{q.key}, now, max).StringSlice()
+	items, err := dequeueBatchScript.Run(ctx, q.client, []string{q.key}, now, count).StringSlice()
 	if err == goredis.Nil {
 		return []string{}, nil
 	}

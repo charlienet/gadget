@@ -56,13 +56,13 @@ func TestClusterIntegration(t *testing.T) {
 
 		t.Run("前缀在集群重定向下正确", func(t *testing.T) {
 			// 无前缀 client：交叉验证原始 key（itest:<key>）确实带前缀写入
-			plain, err := redis.NewWithUrl(raw)
+			plain, err := redis.NewWithURL(raw)
 			require.NoError(t, err, "构建无前缀 client 失败")
-			defer func() { _ = plain.GracefulClose(context.Background()) }()
+			defer func() { _ = plain.GracefulClose(context.Background()) }() //nolint:contextcheck // 清理阶段 t.Context 已取消，关闭须脱离测试上下文
 
-			prefixed, err := redis.NewWithUrl(raw, redis.WithPrefix("itest"))
+			prefixed, err := redis.NewWithURL(raw, redis.WithPrefix("itest"))
 			require.NoError(t, err, "构建带前缀 client 失败")
-			defer func() { _ = prefixed.GracefulClose(context.Background()) }()
+			defer func() { _ = prefixed.GracefulClose(context.Background()) }() //nolint:contextcheck // 清理阶段 t.Context 已取消，关闭须脱离测试上下文
 
 			// hash tag（{user}:N）与非 hash tag（a/b/c/item:100）混合，
 			// 覆盖多个不同 hash slot，触发集群重定向路径。
@@ -83,7 +83,9 @@ func TestClusterIntegration(t *testing.T) {
 		})
 
 		t.Run("LoadFunction 全主节点加载", func(t *testing.T) {
-			// FUNCTION 需要 Redis >= 7.0；集群各节点版本一致，探测任一即可
+			// FUNCTION 需要 Redis >= 7.0；集群各节点版本一致，探测任一即可。
+			// 查询为纯内存读，断言前须显式 Probe。
+			require.NoError(t, rdb.Capability().Probe(ctx), "Capability Probe 不应报错")
 			if !rdb.Capability().VersionAtLeast("7.0") {
 				t.Skipf("服务器版本 %s 低于 7.0，不支持 FUNCTION 命令", rdb.Capability().Version())
 			}
@@ -97,7 +99,7 @@ func TestClusterIntegration(t *testing.T) {
 			// 用本库 LoadFunction 加载：集群分支内部 ForEachMaster 分发到所有主节点。
 			// 测试结束不删除函数（函数库名唯一带随机后缀，不影响他人；需要清理时
 			// 可对每个主节点执行 FUNCTION DELETE）。
-			require.NoError(t, rdb.LoadFunction(code), "LoadFunction 应成功")
+			require.NoError(t, rdb.LoadFunction(ctx, code), "LoadFunction 应成功")
 
 			// 用独立 goredis ClusterClient 遍历每个主节点执行 FUNCTION LIST，
 			// 直接验证每个主节点都加载了该函数库（LoadFunction 集群修复的回归验证）
@@ -132,7 +134,7 @@ func TestClusterIntegration(t *testing.T) {
 		t.Run("AddPrefix 在集群下工作", func(t *testing.T) {
 			// 父 rdb 无前缀，子池前缀为 "sub"；子池连接配置继承自父（同一集群）
 			sub := rdb.AddPrefix("sub")
-			defer func() { _ = sub.GracefulClose(context.Background()) }()
+			defer func() { _ = sub.GracefulClose(context.Background()) }() //nolint:contextcheck // 清理阶段 t.Context 已取消，关闭须脱离测试上下文
 
 			keys := []string{"a", "{user}:1", "item:100", "k5", "k6"}
 			for i, k := range keys {
@@ -169,9 +171,10 @@ func TestClusterIntegration(t *testing.T) {
 				}
 			}()
 
-			bf := rdb.NewBloomFilter(base,
+			bf, bferr := rdb.NewBloomFilter(ctx, base,
 				redis.WithCapacity(100_000), redis.WithFalsePositive(0.01),
 				redis.WithShardCount(8))
+			require.NoError(t, bferr, "构造即连接（分片 BF.RESERVE）")
 
 			items := make([]any, 300)
 			for i := range items {
@@ -261,7 +264,9 @@ func TestClusterIntegration(t *testing.T) {
 			// "BF.INFO not found → 零值分片归一"分支——全空分片（零写入）
 			// 时 Info 不得整体报错，聚合为零值；灌入少量元素后聚合转正。
 			// BF 路径依赖模块（前置 HasBloom() skip 门保证 auto 恒走 BF）：
-			// 无 bf 模块环境按既有守卫风格 skip。
+			// 无 bf 模块环境按既有守卫风格 skip。查询为纯内存读，先显式
+			// Probe（探测失败时 HasBloom=false → skip，与原静默口径一致）。
+			_ = rdb.Capability().Probe(ctx)
 			if !rdb.Capability().HasBloom() {
 				t.Skip("集群未加载 bf 模块，跳过 BF 路径 Info 空分片归一验证")
 			}
@@ -276,11 +281,17 @@ func TestClusterIntegration(t *testing.T) {
 				}
 			}()
 
-			bf := rdb.NewBloomFilter(base,
+			bf, bferr := rdb.NewBloomFilter(ctx, base,
 				redis.WithCapacity(100_000), redis.WithFalsePositive(0.01),
 				redis.WithShardCount(8))
+			require.NoError(t, bferr, "构造即连接（分片 BF.RESERVE）")
 
-			// 零写入：8 个分片键全部未初始化，逐分片 "not found" 归一
+			// 空分片归一能力锚：手工 DEL 全部物理键（库外干预后键不存在、
+			// 写读路径不自愈），分片态 Info 逐分片把 "not found" 归一为
+			// 零值分片、整体不报错。
+			for _, k := range keys {
+				require.NoError(t, rdb.Del(ctx, k).Err())
+			}
 			info, err := bf.Info(ctx)
 			require.NoError(t, err, "全空分片的 Info 应归一为零值而非整体报错")
 			assert.Equal(t, int64(0), info.NumItems, "空分片聚合 NumItems 应为 0")
@@ -288,7 +299,8 @@ func TestClusterIntegration(t *testing.T) {
 			assert.Equal(t, int64(0), info.Size, "空分片聚合 Size 应为 0")
 			assert.Equal(t, int64(0), info.NumFilters, "空分片聚合 NumFilters 应为 0")
 
-			// 灌入后聚合转正（分片态 BF 路径逐片惰性 BF.RESERVE）
+			// 灌入后聚合转正（键不存在时 BF.ADD 由服务端建立、后续
+			// AddMulti 落位；分片路由按既有键集合）
 			seed := make([]any, 30)
 			for i := range seed {
 				seed[i] = fmt.Sprintf("emptynorm-%s-%d", base, i)

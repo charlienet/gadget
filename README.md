@@ -42,7 +42,7 @@ import (
     "github.com/charlienet/gadget/redis"
 )
 
-rdb, err := redis.NewWithUrl("redis://127.0.0.1:6379")
+rdb, err := redis.NewWithURL("redis://127.0.0.1:6379")
 if err != nil {
     panic(err)
 }

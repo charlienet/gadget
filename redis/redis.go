@@ -13,6 +13,8 @@ import (
 )
 
 var (
+	// NotFound 是"键不存在"哨兵错误（go-redis redis.Nil 的别名），
+	// 调用方可用 errors.Is(err, redis.NotFound) 判定。
 	NotFound = redis.Nil
 )
 
@@ -38,27 +40,30 @@ func IsTxFailed(err error) bool {
 
 var _ Client = &redisClient{}
 
+// Client 是本库客户端接口：嵌入 go-redis UniversalClient 的全部命令能力，
+// 追加实例约束校验、运行模式、键前缀、能力缓存与布隆/布谷鸟/限流/延迟
+// 队列等扩展组件的构造入口。
 type Client interface {
 	redis.UniversalClient
-	Constraint(...Constraint) error                                                           // 实例约束
-	MustConstraint(constraints ...Constraint)                                                 // 强制约束，不符合约束条件时退出应用
-	LoadFunction(f string) error                                                              // 加载函数脚本
-	Mode() Mode                                                                               // 运行模式（standalone/cluster/sentinel/ring）
-	Prefix() string                                                                           // 统一前缀
-	Separator() string                                                                        // 分隔符
-	ComposeKey(key ...string) string                                                          // 组合键：拼接 key 段并应用统一前缀
-	AddPrefix(prefix ...string) Client                                                        // 添加前缀
-	ServerVersion() string                                                                    // 服务器版本
-	Capability() *Capability                                                                  // 能力探测（版本、模块等）
-	NewBloomFilter(key string, opts ...BloomOption) BloomFilter                               // 创建布隆过滤器（自动选择 BF.* 或 bitmap 实现）
-	NewBloomFilterWithEstimate(key string, capacity int64, falsePositive float64) BloomFilter // 等价于 NewBloomFilter(key, WithCapacity(n), WithFalsePositive(p))。
-	NewCuckooFilter(key string, opts ...CuckooOption) *CuckooFilter                           // 创建布谷鸟过滤器：服务器有 RedisBloom cuckoo 模块走 CF.* 命令，无则自动回退 Redis Hash+Lua 实现（按能力分派）
-	NewDelayedQueue(key string, opts ...QueueOption) *DelayedQueue                            // 创建延迟队列（ZSET 实现）
-	NewRateLimiter(name string, opts ...RateLimiterOption) *RateLimiter                       // 创建限流器（按名称隔离限流 key 空间，空名称不隔离）；已弃用，见 ratelimit 模块，为兼容保留于接口
-	NewLeakyBucket(name string, opts ...LeakyBucketOption) *LeakyBucket                       // 创建漏桶限流器（恒定输出速率、拒绝突发；name 隔离同限流器）；已弃用，见 ratelimit 模块，为兼容保留于接口
-	CompareAndSet(ctx context.Context, key string, oldValue, newValue any) (bool, error)      // CompareAndSet 原子比较并设置：key 当前值等于 oldValue 时设置为 newValue。
-	CompareAndDelete(ctx context.Context, key string, oldValue any) (bool, error)             // CompareAndDelete 原子比较并删除：key 当前值等于 oldValue 时删除。
-	GracefulClose(ctx context.Context) error                                                  // GracefulClose 优雅关闭连接池：幂等，级联关闭 AddPrefix 派生的子连接池，
+	Constraint(...Constraint) error                                                                                         // 实例约束
+	MustConstraint(constraints ...Constraint)                                                                               // 强制约束，不符合约束条件时退出应用
+	LoadFunction(ctx context.Context, code string) error                                                                    // 加载函数脚本（ctx 透传所有分支）
+	Mode() Mode                                                                                                             // 运行模式（standalone/cluster/sentinel/ring）
+	Prefix() string                                                                                                         // 统一前缀
+	Separator() string                                                                                                      // 分隔符
+	ComposeKey(key ...string) string                                                                                        // 组合键：拼接 key 段并应用统一前缀
+	AddPrefix(prefix ...string) Client                                                                                      // 添加前缀
+	ServerVersion() string                                                                                                  // 服务器版本（未 Probe 过返回空串；探测见 Capability().Probe）
+	Capability() *Capability                                                                                                // 能力缓存（探测唯一入口 Capability().Probe(ctx)，查询纯内存读）
+	NewBloomFilter(ctx context.Context, key string, opts ...BloomOption) (BloomFilter, error)                               // 创建布隆过滤器：自动选择 BF.* 或 bitmap 实现，构造即连接（失败不交付实例）
+	NewBloomFilterWithEstimate(ctx context.Context, key string, capacity int64, falsePositive float64) (BloomFilter, error) // 等价于 NewBloomFilter(ctx, key, WithCapacity(n), WithFalsePositive(p))
+	NewCuckooFilter(ctx context.Context, key string, opts ...CuckooOption) (*CuckooFilter, error)                           // 创建布谷鸟过滤器：按能力分派 CF.* 或 Hash+Lua 实现，构造即连接（失败不交付实例）
+	NewDelayedQueue(key string, opts ...QueueOption) *DelayedQueue                                                          // 创建延迟队列（ZSET 实现）
+	NewRateLimiter(name string, opts ...RateLimiterOption) *RateLimiter                                                     // 创建限流器（按名称隔离限流 key 空间，空名称不隔离）；已弃用，见 ratelimit 模块，为兼容保留于接口
+	NewLeakyBucket(name string, opts ...LeakyBucketOption) *LeakyBucket                                                     // 创建漏桶限流器（恒定输出速率、拒绝突发；name 隔离同限流器）；已弃用，见 ratelimit 模块，为兼容保留于接口
+	CompareAndSet(ctx context.Context, key string, oldValue, newValue any) (bool, error)                                    // CompareAndSet 原子比较并设置：key 当前值等于 oldValue 时设置为 newValue。
+	CompareAndDelete(ctx context.Context, key string, oldValue any) (bool, error)                                           // CompareAndDelete 原子比较并删除：key 当前值等于 oldValue 时删除。
+	GracefulClose(ctx context.Context) error                                                                                // GracefulClose 优雅关闭连接池：幂等，级联关闭 AddPrefix 派生的子连接池，
 }
 
 type redisClient struct {
@@ -84,6 +89,8 @@ type closeState struct {
 	children map[*redisClient]struct{} // AddPrefix 派生的子连接池
 }
 
+// ParseURL 解析 redis:// / rediss:// URL（支持逗号分隔多地址种子列表与
+// master_name 扩展查询参数）为 RedisOptions，不创建连接。
 func ParseURL(redisURL string, opts ...Option) (RedisOptions, error) {
 	// 逗号分隔的多地址按 cluster/sentinel 种子列表处理；master_name 是本库
 	// 扩展的 query 参数（go-redis 不识别未知参数，需先行剥离再回填）。
@@ -176,7 +183,8 @@ func parseMultiAddrURL(u *url.URL, opts ...Option) (RedisOptions, error) {
 	return copt, nil
 }
 
-func NewWithUrl(url string, opts ...Option) (Client, error) {
+// NewWithURL 按 redis:// / rediss:// / 集群多地址 URL 创建 Client。
+func NewWithURL(url string, opts ...Option) (Client, error) {
 	opt, err := ParseURL(url, opts...)
 	if err != nil {
 		return nil, err
@@ -185,6 +193,8 @@ func NewWithUrl(url string, opts ...Option) (Client, error) {
 	return newWithOpts(&opt, newPrefix(opt.separator, opt.prefix)), nil
 }
 
+// New 以本库默认选项叠加给定 Option 创建 Client（不探测服务器，能力查询
+// 需显式 Capability().Probe(ctx)）。
 func New(opts ...Option) Client {
 	opt := defaultOptions
 	for _, o := range opts {
@@ -291,7 +301,8 @@ func (rdb redisClient) AddPrefix(prefixes ...string) Client {
 
 	rdb.state.mu.Lock()
 	if rdb.state.closed {
-		// 父连接池已关闭：新建的子连接池无人管理，立即关闭避免泄漏
+		// 父连接池已关闭：新建的子连接池无人管理，立即关闭避免泄漏。
+		// 紧急清理路径：刻意使用无 deadline 的 Background，不受调用方上下文影响。
 		rdb.state.mu.Unlock()
 		_ = child.GracefulClose(context.Background())
 		return child
@@ -316,13 +327,11 @@ func (rdb redisClient) ComposeKey(key ...string) string {
 }
 
 // LoadFunction 加载函数脚本。函数是实例级状态，按底层连接类型分发以保证
-// 所有节点可用：
+// 所有节点可用，ctx 透传全部分支：
 //   - *redis.ClusterClient：并发向所有主节点加载（ForEachMaster，返回首个错误）
 //   - *redis.Ring：向所有 shard 实例加载（ForEachShard）
 //   - 其余（单机/哨兵 failover）：直接加载到当前连接
-func (rdb redisClient) LoadFunction(code string) error {
-	ctx := context.Background()
-
+func (rdb redisClient) LoadFunction(ctx context.Context, code string) error {
 	switch cc := rdb.UniversalClient.(type) {
 	case *redis.ClusterClient:
 		return cc.ForEachMaster(ctx, func(ctx context.Context, client *redis.Client) error {
@@ -349,6 +358,8 @@ func (rdb redisClient) Capability() *Capability {
 // 统一走 GracefulClose 语义（幂等 + 级联关闭 AddPrefix 派生池）。
 // 对 NewWithClient 包装的外部连接池，只关闭本库派生的子连接池，
 // 不关闭外部传入的 uc（由调用方负责关闭自己的连接池）。
+// 本方法是无 ctx 的接口兼容形态：内部以 Background 无限等待级联关闭；
+// 需要超时/取消控制时使用 GracefulClose(ctx)。
 func (rdb redisClient) Close() error {
 	return rdb.GracefulClose(context.Background())
 }
@@ -419,12 +430,12 @@ func newWithOpts(opt *RedisOptions, prefix redisPrefix) *redisClient {
 
 // initBreaker 按配置构造熔断器并注册熔断 hook（默认启用）。
 // 熔断 hook 为最外层：Open 时快速失败（不执行命令、不实际连接）。
-func (c *redisClient) initBreaker(rdb redis.UniversalClient, opt *RedisOptions) {
+func (rdb *redisClient) initBreaker(client redis.UniversalClient, opt *RedisOptions) {
 	if !opt.breakerEnabled {
 		return
 	}
-	c.breaker = newCircuitBreaker(opt.breakerThreshold, opt.breakerCooldown)
-	rdb.AddHook(&breakerHook{breaker: c.breaker})
+	rdb.breaker = newCircuitBreaker(opt.breakerThreshold, opt.breakerCooldown)
+	client.AddHook(&breakerHook{breaker: rdb.breaker})
 }
 
 // --- Lua 能力记忆 ---

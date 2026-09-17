@@ -35,9 +35,11 @@ func PrefixHook(prefix, separator string) redis.Hook {
 // renames）。用于 PrefixHook 独立用法下的 pub/sub 对称：
 // PUBLISH 经 hook 加前缀，而 go-redis 的 PubSub 订阅走专用连接不经
 // ProcessHook，订阅端必须显式加前缀，否则两端不对称静默失联。
-func SubscribeWithPrefix(uc redis.UniversalClient, prefix, separator string, channels ...string) *redis.PubSub {
+// ctx 作用于订阅建立阶段；返回的 *redis.PubSub 生命周期不受 ctx 后续
+// 取消管理，停止须调用 PubSub.Close()。
+func SubscribeWithPrefix(ctx context.Context, uc redis.UniversalClient, prefix, separator string, channels ...string) *redis.PubSub {
 	p := newPrefix(separator, prefix)
-	return uc.Subscribe(context.Background(), p.renames(channels...)...)
+	return uc.Subscribe(ctx, p.renames(channels...)...)
 }
 
 func (r renameHook) DialHook(next redis.DialHook) redis.DialHook {

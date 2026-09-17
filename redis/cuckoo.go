@@ -3,7 +3,6 @@ package redis
 import (
 	"context"
 	"strings"
-	"sync"
 )
 
 // CuckooInfo 包含布谷鸟过滤器的元数据。模块版对应 CF.INFO 输出；回退版
@@ -25,7 +24,7 @@ type CuckooOption func(*cuckooConfig)
 
 type cuckooConfig struct {
 	failPolicyConfig
-	capacity      int64 // 预估容量（模块版 >0 时 CF.RESERVE 预分配；回退版决定桶数量）
+	capacity      int64 // 预估容量（模块版首写前恒 CF.RESERVE 预建，未显式传参按默认 1000000；回退版决定桶数量 numBuckets=capacity/bucketSize，默认 10000 为存量键布局兼容约束）
 	maxIterations int64 // 最大踢出迭代次数
 	bucketSize    int64 // 桶大小
 	expansion     int64 // 扩容因子（仅模块版 CF.RESERVE 使用）
@@ -38,8 +37,10 @@ func defaultCuckooConfig() cuckooConfig { return cuckooConfig{} }
 
 // WithCuckooCapacity 设置预估容量（命名避免与 BloomFilter 的 WithCapacity
 // 冲突——两者是不同类型 Option，Go 同包不允许同名重载）。
-// 模块版：指定后 CF.RESERVE 预分配；未指定（0）时 CF.ADD 惰性创建。
-// 回退版：容量决定桶数量（numBuckets = capacity / bucketSize）。
+// 非法值（n<=0）静默忽略，等同未显式传参（模块版按默认容量 1000000 预建；
+// 回退版按默认 10000 决定桶数量）。
+// 模块版：决定 CF.RESERVE 预建容量；回退版：容量决定桶数量
+// （numBuckets = capacity / bucketSize）。
 func WithCuckooCapacity(n int64) CuckooOption {
 	return func(c *cuckooConfig) {
 		if n > 0 {
@@ -92,7 +93,8 @@ type cuckooFilterImpl interface {
 	AddNX(ctx context.Context, item any) (bool, error)
 	Del(ctx context.Context, item any) (bool, error)
 	Info(ctx context.Context) (*CuckooInfo, error)
-	// Reset 清空整个过滤器（DEL 物理键）。模块版需同步复位 CF.RESERVE 闸门。
+	// Reset 清空整个过滤器（DEL 物理键）并立即按当前配置同步重建（模块版）；
+	// 回退版纯 DEL。
 	Reset(ctx context.Context) error
 }
 
@@ -102,8 +104,16 @@ type cuckooFilterImpl interface {
 //
 // 与 BloomFilter 不同，布谷鸟过滤器支持删除（Del），且误判率更低。
 //
-// 本库不封装 CF.INSERT/CF.INSERTNX：预分配一律经 WithCuckooCapacity
-// 惰性 CF.RESERVE；回退路径首写天然 autocreate。
+// 本库不封装 CF.INSERT/CF.INSERTNX：CF.* 路径构造即连接——工厂与 Reset
+// 都同步执行 CF.RESERVE（未显式传容量按默认 1000000；失败返回错误、
+// 不交付实例/不留下半重建）；回退版 Hash 键惰性、空即就绪，无建立动作，
+// 仅在构造期做类型校验。
+//
+// 两路径未显式传参时的有效容量口径不同（有意为之，非缺陷）：模块版恒按
+// 1000000 建立，这是分配契约——键在构造时即以该容量在服务端建立；回退版
+// 不存在建立动作，其默认容量 10000 仅决定寻址布局（numBuckets），不是
+// 分配量，且是存量键的兼容冻结约束。对容量敏感的应用请一律显式
+// WithCuckooCapacity，两侧取值一致即可。
 //
 // item 序列化承诺：item 为 any。回退版（hashImpl）的指纹/桶索引由
 // marshalItem(item) 的规范字节经 xxh3-64 导出；模块版（cfCmdImpl）由
@@ -128,8 +138,9 @@ type CuckooFilter struct {
 }
 
 // NewCuckooFilter 创建布谷鸟过滤器（挂 *redisClient）。
-// 分派逻辑：每次创建时按能力探测结果选择实现（Capability().HasCuckoo()，
-// 探测结果有缓存，与 bloom.go 的 NewBloomFilter 分派方式一致）。
+// 分派逻辑：按 Capability 缓存选择实现（Capability().HasCuckoo()，与
+// bloom.go 的 NewBloomFilter 分派方式一致）；构造前未显式
+// Capability().Probe(ctx) 时按保守态分派（恒回退 Hash+Lua 路径）。
 // 失效兜底策略默认 FailOpen（过滤器是保护性能力：服务不可用时放行业务）；
 // 可用 WithFailPolicy 显式改为 FailClosed。
 //
@@ -140,7 +151,15 @@ type CuckooFilter struct {
 // 键结构完全不同（CF.* 的模块内部编码 vs 回退版的单个 Hash key），
 // **数据不互通**：升级前用回退版写入的过滤器，升级后在 CF.* 路径下读不到，
 // 需按新 key 重建过滤器（或显式接受一次冷启动）。
-func (rdb *redisClient) NewCuckooFilter(key string, opts ...CuckooOption) *CuckooFilter {
+//
+// 构造即连接：CF.* 路径同步执行 CF.RESERVE（未显式传容量按默认 1000000）
+// ——键不存在即建立、既有真 CF 键复用并按声明的布局口径校验（bucketSize/
+// maxIterations 等值、capacity 容纳判定；expansion 不回读比对）；回退版
+// 校验键类型为 none/hash（不建键——空 Hash 与不存在对全部命令等价，占位
+// 写入会污染 Info 统计）。类型冲突或布局不符在构造期 fail-loud（数据类
+// 错误、键未被修改）；服务不可用包 ErrRedisUnavailable 哨兵。失败返回
+// (nil, err)，不交付半初始化实例；构造失败不随 FailPolicy 兜底。
+func (rdb *redisClient) NewCuckooFilter(ctx context.Context, key string, opts ...CuckooOption) (*CuckooFilter, error) {
 	cfg := defaultCuckooConfig()
 	cfg.policy = FailOpen // 过滤器默认 FailOpen：宁可放行不阻塞业务
 	for _, o := range opts {
@@ -149,12 +168,16 @@ func (rdb *redisClient) NewCuckooFilter(key string, opts ...CuckooOption) *Cucko
 
 	if rdb.cap.HasCuckoo() {
 		impl := &cfCmdImpl{client: rdb, key: key, cfg: cfg}
-		// 必须显式 Store：atomic.Pointer 零值 Load() 返回 nil，漏 Store 会在
-		// ensureReserve 处 panic。
-		impl.once.Store(new(sync.Once))
-		return &CuckooFilter{impl: impl, policy: cfg.policy}
+		if err := impl.connectAll(ctx); err != nil {
+			return nil, err
+		}
+		return &CuckooFilter{impl: impl, policy: cfg.policy}, nil
 	}
-	return &CuckooFilter{impl: newHashImpl(rdb, key, cfg), policy: cfg.policy}
+	impl := newHashImpl(rdb, key, cfg)
+	if err := impl.connect(ctx); err != nil {
+		return nil, err
+	}
+	return &CuckooFilter{impl: impl, policy: cfg.policy}, nil
 }
 
 // fallbackBool 按策略返回布谷鸟过滤器兜底值 + 哨兵错误：FailOpen → true
@@ -338,9 +361,9 @@ func (cf *CuckooFilter) Info(ctx context.Context) (*CuckooInfo, error) {
 // 失败（含服务不可用）恒返回错误，不受 FailPolicy 兜底影响——"没清掉
 // 却假装清了"会让会话隔离静默失效。
 //
-// 模块版注意：Reset 会复位内部惰性 CF.RESERVE 闸门，之后继续 Add 按
-// WithCuckooCapacity 等配置重建过滤器；绕开本方法手工 DEL 后复用实例，
-// 配置会被模块默认参数静默替换——清空请一律走 Reset。
+// 模块版注意：Reset 删除后立即按当前配置（未显式传参按默认容量 1000000）
+// 同步 CF.RESERVE 重建，返回成功即键已就绪；绕开本方法手工 DEL 后复用
+// 实例不自愈（写路径无预建动作）——键生命周期由库管辖，清空一律走 Reset。
 func (cf *CuckooFilter) Reset(ctx context.Context) error {
 	err := cf.impl.Reset(ctx)
 	if err != nil && IsUnavailable(err) {

@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"sync"
 	"testing"
 	"time"
 )
@@ -38,7 +37,7 @@ func benchCuckooClient(b *testing.B, env string) *redisClient {
 	if raw == "" {
 		b.Skipf("%s not set; skip real-env benchmark", env)
 	}
-	rdb, err := NewWithUrl(raw)
+	rdb, err := NewWithURL(raw)
 	if err != nil {
 		b.Fatalf("%s URL 解析失败：%v", env, err)
 	}
@@ -56,6 +55,7 @@ func benchCuckooImpl(b *testing.B, env, pathTag string,
 ) {
 	b.Helper()
 	rc := benchCuckooClient(b, env)
+	// benchmark 主体：testing.B 无 Context()，使用 Background
 	ctx := context.Background()
 
 	cfg := defaultCuckooConfig()
@@ -66,12 +66,13 @@ func benchCuckooImpl(b *testing.B, env, pathTag string,
 		b.Helper()
 		key := fmt.Sprintf("bench:%s:%d:%s", pathTag, time.Now().UnixNano(), suffix)
 		impl := mk(rc, key, cfg)
-		b.Cleanup(func() { _ = rc.Del(context.Background(), key).Err() })
-		// 预热 RESERVE/首 EVAL（模块版闸门），把一次性建过滤器开销挡在计时外。
+		b.Cleanup(func() { _ = rc.Del(context.Background(), key).Err() }) //nolint:contextcheck // bench 清理闭包：testing.B 无 Context()
+		// 构造期建立挡在计时外（直构实例不经工厂 connect，显式 connectAll
+		// 一次；回退版 hash 无建立动作）。
 		if c, ok := impl.(*cfCmdImpl); ok {
 			b.StopTimer()
-			if err := c.ensureReserve(ctx); err != nil {
-				b.Fatalf("预热 CF.RESERVE：%v", err)
+			if err := c.connectAll(ctx); err != nil {
+				b.Fatalf("建立 CF.RESERVE：%v", err)
 			}
 			b.StartTimer()
 		}
@@ -223,9 +224,7 @@ func benchCuckooImpl(b *testing.B, env, pathTag string,
 }
 
 func mkBenchCfImpl(rc *redisClient, key string, cfg cuckooConfig) cuckooFilterImpl {
-	impl := &cfCmdImpl{client: rc, key: key, cfg: cfg}
-	impl.once.Store(new(sync.Once)) // 构造纪律：atomic.Pointer 零值 Load 为 nil
-	return impl
+	return &cfCmdImpl{client: rc, key: key, cfg: cfg}
 }
 
 func mkBenchHashImpl(rc *redisClient, key string, cfg cuckooConfig) cuckooFilterImpl {

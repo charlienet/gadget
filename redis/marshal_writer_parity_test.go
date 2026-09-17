@@ -1,7 +1,6 @@
 package redis
 
 import (
-	"context"
 	"net"
 	"testing"
 	"time"
@@ -35,7 +34,7 @@ func TestMarshalWriterParity(t *testing.T) {
 	client := goredis.NewClient(&goredis.Options{Addr: mr.Addr()})
 	defer func() { _ = client.Close() }()
 
-	ctx := context.Background()
+	ctx := t.Context()
 	const key = "marshal:parity"
 
 	ts := time.Date(2024, 1, 2, 3, 4, 5, 0, time.UTC)

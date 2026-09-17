@@ -12,19 +12,19 @@ rdb.Constraint(Ping())
 
 URL 连接三种运行模式
 
-ParseURL/NewWithUrl 支持通过 URL 指定运行模式（纯解析，不连接服务器）：
+ParseURL/NewWithURL 支持通过 URL 指定运行模式（纯解析，不连接服务器）：
 
 - 单机（默认）：单地址
   ```go
-  rdb, _ := redis.NewWithUrl("redis://:password@host:6379")
+  rdb, _ := redis.NewWithURL("redis://:password@host:6379")
   ```
 - 集群：逗号分隔多地址（种子列表），无 master_name；也支持官方 addr 参数追加地址
   ```go
-  rdb, _ := redis.NewWithUrl("redis://:password@h1:7001,h2:7002,h3:7003")
+  rdb, _ := redis.NewWithURL("redis://:password@h1:7001,h2:7002,h3:7003")
   ```
 - 哨兵：多地址（哨兵节点列表）+ master_name 参数
   ```go
-  rdb, _ := redis.NewWithUrl("redis://:password@s1:26379,s2:26379,s3:26379?master_name=mymaster")
+  rdb, _ := redis.NewWithURL("redis://:password@s1:26379,s2:26379,s3:26379?master_name=mymaster")
   ```
 
 哨兵格式说明：go-redis 官方无哨兵 URL 格式，本库扩展了 master_name query 参数
@@ -46,7 +46,7 @@ rdb.AddHook(redis.PrefixHook("myapp", ":"))
 Publish 端生效；独立用法下订阅端请使用 SubscribeWithPrefix 保证两端对称：
 
 ```go
-sub := redis.SubscribeWithPrefix(rdb, "myapp", ":", "events")
+sub := redis.SubscribeWithPrefix(ctx, rdb, "myapp", ":", "events")
 ```
 
 
@@ -79,7 +79,7 @@ rdb, err := redis.NewWithClient(uc,
 if err != nil { /* handle */ }
 ```
 
-WithRedisOptions 也可与 redis.New/NewWithUrl 配合，直接构造连接配置：
+WithRedisOptions 也可与 redis.New/NewWithURL 配合，直接构造连接配置：
 
 ```go
 rdb := redis.New(
@@ -99,6 +99,10 @@ rdb := redis.New(
   不含 `*` 的 BY nosort 等除外）。
 - 前缀幂等约定：传入命令的 key 不应自带前缀（前缀由 hook 统一添加）。
   手动拼接前缀后再传入会二次加前缀，属约定内的误用。
+- KEYS 与 SCAN 口径不对称（刻意设计）：`KEYS` 的 pattern 由 PrefixHook
+  统一加前缀，传业务 pattern 即可；`SCAN` 的 MATCH pattern **不改写**，
+  须自带完整前缀——SCAN 游标语义下改写 pattern 无法与游标状态对应，
+  该排除同时避免误伤无通配符 pattern。
 - 脚本内硬编码 key 不受前缀保护：使用 EVAL/FCALL 时，脚本里的 key 常量需在
   应用侧自行加上相同前缀，或改用 KEYS 参数传入。
 
@@ -131,6 +135,8 @@ MustConstraint 用于启动期强制校验（如版本、连通性），不满�
 SubscribeWithPrefix
 
 独立使用 PrefixHook 时，订阅端须用本函数显式加前缀（见上文 Pub/Sub 边界）。
+ctx 作用于订阅建立阶段；返回的 `*redis.PubSub` 生命周期不受 ctx 后续取消
+管理，停止须调用 `PubSub.Close()`。
 本库 redisClient.Subscribe/PSubscribe/SSubscribe 已内置加前缀逻辑，无需使用本函数。
 
 
@@ -194,14 +200,18 @@ if !res.Allowed {
 布隆过滤器（双路径，无需 RedisBloom 模块）：
 
 ```go
-bf := rdb.NewBloomFilter("bf:1", redis.WithCapacity(1000000), redis.WithFalsePositive(0.01))
+bf, err := rdb.NewBloomFilter(ctx, "bf:1", redis.WithCapacity(1000000), redis.WithFalsePositive(0.01))
+if err != nil {
+    // 构造即连接：建键/校验失败（类型冲突、布局不符、服务不可用）不交付实例
+    return err
+}
 added, err := bf.Add(ctx, "item1")            // 返回是否新增（已存在返回 false）
 ok, err := bf.Exists(ctx, "item1")            // false=必不存在；true=可能存在
 flags, err := bf.AddMulti(ctx, "a", "b", "c") // 批量，返回顺序与入参严格对应（对齐 BF.MADD）
 info, err := bf.Info(ctx)                     // 元数据（bitmap 路径 NumItems 由 BITCOUNT 估算）
 card, err := bf.Card(ctx)                     // 去重基数估计（对齐 BF.CARD，与 NumItems 口径不同，见下）
-err = bf.Reset(ctx)                           // 就地清空复用实例（容量/FPR 约束不变）
-// 快捷等价：rdb.NewBloomFilterWithEstimate("bf:1", 1000000, 0.01)
+err = bf.Reset(ctx)                           // 就地清空 + 同步按当前配置重建（返回即就绪）
+// 快捷等价：rdb.NewBloomFilterWithEstimate(ctx, "bf:1", 1000000, 0.01)
 ```
 
 分派逻辑：服务器加载了 RedisBloom 的 bf 模块 → 原生 BF.* 命令（自动扩容子
@@ -210,7 +220,9 @@ err = bf.Reset(ctx)                           // 就地清空复用实例（容�
 （并发 Add 同一 item 原子，恰一个返回"新增"）；AddMulti/ExistsMulti 走
 **单次批量 Lua 脚本**（1 往返处理 n×k 个位，返回顺序与入参严格对应，对齐
 BF.MADD 语义；不分块，超大 n 时单次脚本的 O(n·k) 服务端执行代价由调用方
-控制批量大小）。可用 rdb.Capability().HasBloom() 预检模块是否加载。
+控制批量大小）。可用 `rdb.Capability().Probe(ctx)` + `rdb.Capability().HasBloom()`
+预检模块是否加载——查询为纯内存读，**未显式 Probe 时恒返回 false**
+（工厂据此保守分派到 bitmap 回退路径）。
 
 **item 参数类型（any）与序列化冻结契约**：`Add/Exists/AddMulti/ExistsMulti`
 的 item 是 `any`，位哈希与集群分片路由前统一编码为规范字节。支持的类型
@@ -251,28 +263,39 @@ Lua 能力记忆与降级兜底：EVAL 失败按错误类别三态记忆（连�
 时的尽力而为降级。
 
 容量规划速查：最优位图 `m=ceil(-n·ln p/ln2²)`、哈希个数 `k=ceil(ln2·m/n)`、
-每元素位数 ≈ `-log2(p)`（1% ≈ 9.6 bit、0.1% ≈ 10 bit）：
+每元素位数 ≈ `-log2(p)`（0.01%（默认）≈ 13.3 bit、1% ≈ 9.6 bit、
+0.1% ≈ 10 bit）；表中 m 已按实现做奇化（m|1），内存为预热后的实际键长
+⌈m/8⌉ 字节：
 
-| 容量 n | 误判率 p | 位图 m | 内存（m/8） | k |
+| 容量 n | 误判率 p | 位图 m | 内存（⌈m/8⌉） | k |
 |---|---|---|---|---|
-| 1 万 | 1% | 95,851 bit | ≈ 12 KB | 7 |
-| 100 万 | 1% | 9,585,059 bit | ≈ 1.14 MB | 7 |
-| 1000 万 | 0.1% | 143,775,876 bit | ≈ 17.1 MB | 10 |
-| ≈4.5 亿 | 1% | 2^32-1 bit | 512 MB（位图上限） | 7 |
+| 1 万 | 0.01%（默认） | 191,703 bit | ≈ 23.4 KB | 14 |
+| 100 万 | 0.01%（默认） | 19,170,117 bit | ≈ 2.29 MB | 14 |
+| 1000 万 | 0.01%（默认） | 191,701,169 bit | ≈ 22.9 MB | 14 |
+| 1 万 | 1%（对照） | 95,851 bit | ≈ 12 KB | 7 |
+| 100 万 | 1%（对照） | 9,585,059 bit | ≈ 1.14 MB | 7 |
+| 1000 万 | 0.1%（对照） | 143,775,876 bit | ≈ 17.1 MB | 10 |
+| ≈2.24 亿 | 0.01%（默认） | 2^32-1 bit | 512 MB（位图上限） | 14 |
+| ≈4.5 亿 | 1%（对照） | 2^32-1 bit | 512 MB（位图上限） | 7 |
 
 容量契约声明：bitmap 路径容量**创建时固定、位图不扩容**；插入超过预估容量
 后误判率按 `(1-e^(-k·n'/m))^k` 单调恶化且**不可恢复**（位图无删除语义），
 属应用端容量规划责任。解法：预估充足容量 / 周期性重建（换新 key 灌入，或
 `Reset` 就地清空复用同一实例，见下文 Reset 说明）/ 部署 RedisBloom 模块
-（BF.* 路径自动扩容）。非法参数静默回落默认值：
-`WithCapacity(n<=0)` 保留 1000000、`WithFalsePositive` 仅接受 (0,1) 开区间。
-本库不封装 BF.INSERT/CF.INSERT（含 autocreate 选项）：预分配一律经
-WithCapacity/WithEstimate/WithCuckooCapacity 惰性 RESERVE；回退路径首写
-天然 autocreate。
+（BF.* 路径自动扩容）。非法参数静默回落默认值：`WithCapacity(n<=0)` 保留
+默认 1000000、`WithFalsePositive` 仅接受 (0,1) 开区间、非法保留默认
+0.0001（=0.01%）。
+本库不封装 BF.INSERT/CF.INSERT（含 autocreate 选项）：布隆与布谷鸟均为
+**构造即连接**——工厂 `NewBloomFilter(ctx, …)`/`NewCuckooFilter(ctx, …)`
+返回前同步完成建键/校验（BF.\* 逐物理键 `BF.RESERVE`；bitmap 逐键
+SETBIT 末位全额分配 ⌈m/8⌉ 字节；CF.\* 键级 `CF.RESERVE`；回退版 Hash
+仅类型校验、不建键），连接失败返回错误、不交付实例（详见"构造即连接与
+内存语义"与布谷鸟章节）。
 
 上限与成本：位图上限 2^32-1 bit（Redis 字符串 512MB 限制），p=0.01 时
-capacity 超约 4.5 亿将在创建时 fail-fast panic（提示降低 capacity 或部署
-RedisBloom）；`Info` 的 NumItems 由 BITCOUNT 置位数反推
+capacity 超约 4.5 亿、默认 p=0.0001 时超约 2.24 亿将在创建时 fail-fast
+panic（提示降低 capacity 或部署 RedisBloom）；`Info` 的 NumItems 由
+BITCOUNT 置位数反推
 （`numItems≈-(m/k)·ln(1-bitsSet/m)`），BITCOUNT 为 O(bytes) 全量扫描，
 仅适合低频运维查询。
 
@@ -296,10 +319,13 @@ Card 不变。两路径的估计器不同：BF.* 路径为模块内概率基数�
 **恒返回错误**（Unavailable 类包装为 `ErrRedisUnavailable` 哨兵，
 `errors.Is` 可感知），与 FailPolicy 取值无关——"没清掉却假装清了"不可
 接受。与并发 Add/Exists 无全序保证，需要强一致清空的场景请改用全新键 +
-指针原子替换。模块路径（BF.\*）会同步复位惰性 BF.RESERVE 闸门，后续首次
-写入重新按配置 RESERVE；**绕开 Reset 手搓 DEL 后复用同一实例，键会被
-RedisBloom 默认参数（capacity=100）静默重建，容量契约作废——清空请一律
-走 Reset**。Reset 删除整个键，勿与其他数据共用该键。
+指针原子替换。BF.\* 与 bitmap 路径 Reset 在 DEL 后**立即同步重建**
+（同一构造期连接例程：BF.\* 逐键 `BF.RESERVE`、bitmap 逐键 SETBIT 全额
+分配），返回成功即键已就绪；回退版 Hash/CF 的 Reset 分别为纯 DEL（键
+不存在即就绪）与 DEL + 重新 CF.RESERVE。**绕开 Reset 手搓 DEL 后复用
+同一实例不自愈**——写路径不再携带建立动作，BF.\* 键会被 RedisBloom 以
+默认参数（capacity=100）静默重建，bitmap 键随写零散增长，容量契约作废
+——清空请一律走 Reset。Reset 删除整个键，勿与其他数据共用该键。
 
 **Redis Cluster 分片（显式 opt-in）**：分片默认关闭——v0.5.0 起须显式
 `WithShardCount(n>1)` 才启用。`Mode()==ModeCluster` 且 `n>1` 时工厂把过滤器
@@ -326,7 +352,9 @@ n=1）时不分片，键名与行为完全不变。`WithCapacity` 在分片下�
   要求各节点模块/配置同构，否则分派错路径会表现为部分分片键
   "unknown command" 类错误。
 - `Info()` 对每个分片键各发一轮命令（成本 ×effectiveN），更严格限制为
-  低频运维查询；`AddMulti`/`ExistsMulti` 中途失败时可能已部分写入
+  低频运维查询；键不存在时模块版（BF.\*）Info 返回 not-found 错误、
+  回退版（bitmap）返回零值 Info 不报错——部署装卸 RedisBloom 会切换
+  该行为，属两路径固有差异；`AddMulti`/`ExistsMulti` 中途失败时可能已部分写入
   （已成功的分片不回滚）——布隆置位幂等、整体重试无数据危害（仅重试
   时"新增"返回值失准）；任一分片组服务不可用则全部结果按 FailPolicy
    整体兜底（FailOpen 全 true / FailClosed 全 false + 哨兵错误），不产生
@@ -355,20 +383,51 @@ n=1）时不分片，键名与行为完全不变。`WithCapacity` 在分片下�
   键常共享前缀，首字节取模会把同前缀键全打到单一分片、打穿负载分布，纯负
   收益。
 
-**实现路径选择**：实现路径恒由 `HasBloom()` 能力探测自动选择（有 bf 模块
-走 BF.\*、无则 bitmap 回退），**不提供强制旋钮**——两路径数据布局不互通，
-任何路径切换本就等同重建过滤器；需要双路径对照时用两个不同 key 分别灌入
-同批数据。
+**实现路径选择**：实现路径恒由 `HasBloom()` 能力缓存判定：已
+`Probe(ctx)` 且 bf 在场走 BF.\*，未探测/无模块走 bitmap 回退，**不提供强制
+旋钮**——两路径数据布局不互通，任何路径切换本就等同重建过滤器；需要双路径
+对照时用两个不同 key 分别灌入同批数据。
 
-**BF.\* standalone 容量提示**：仅集群分片模式下 BF.\* 路径会按配置容量惰性
-`BF.RESERVE` 预分配；单机（不分片）BF.\* 首写按 RedisBloom 默认
-capacity=100 autocreate 后进扩容链，大规模插入时实测 FPR 仍贴预算线
-（实测灌入 10k、设定 0.01：FPR≈0.0099，未超预算；bitmap 回退路径同参数
-实测 0.0000）；对 FPR 敏感或需余量的场景建议分片（每分片 RESERVE 生效）
-或预留更大容量。
+> **fp 落空面披露**：BF.\* 路径的 falsePositive 属**请求参数**、服务端
+> 不提供回读核验（BF.INFO 不回 error rate）——既有键的复用不承诺 fp 与
+> 本实例配置一致。严格 fp 契约请使用 CF.\*（布局参数回读比对）或 bitmap
+> 路径（键长度即 m/p 布局指纹，不符即 fail-loud）。
+
+**构造即连接与内存语义**：布隆工厂返回前同步完成每个物理键的建键/校验，
+不提供惰性预建通道、也不提供 `Reserve` API（该 API 仅存在于未发布分支，
+零兼容包袱）。
+
+- BF.\* 路径：逐物理键 `BF.RESERVE`（未显式传参按默认 1000000/0.0001；
+  分片形态一批 Pipeline 提交）。三态判定：**复用判定** = RESERVE 报
+  "item exists"/"already exists"（既有真 bloom 键，吞错复用、参数不改
+  写）；**类型冲突**（string 键 WRONGTYPE、CF 键等模块互撞）= 构造期
+  fail-loud 数据类错误、键不被触碰；其余 Unavailable 类包
+  `ErrRedisUnavailable` 哨兵。构造失败即返回 `(nil, err)`，不交付半
+  初始化实例、不受 FailPolicy 影响。诚实边界：BF.\* 的 falsePositive
+  无法服务端回读核验（BF.INFO 不回该字段），复用既有键时 fp 一致性属
+  界外——对误判率有严格契约的场景请改用 CF.\*（bucketSize/
+  maxIterations/capacity 可核验）或 bitmap 路径（长度即布局指纹）。
+- bitmap 路径：逐物理键经服务端原子脚本三态处理——空键 `SETBIT` 末位
+  （`m-1` 位，值 0）一次性全额分配 ⌈m/8⌉ 字节（位图无稀疏表示，键内存
+  可预期）；同布局键复用；**异布局报 `layout mismatch` 数据类错误且键
+  不被触碰**。只读路径（`Exists`/`ExistsMulti`/`Info`/`Card`）不建键。
+- 写读路径为纯命令（Add/Exists 恒定单往返），无任何隐藏的建立动作。
+
+```go
+bf, err := rdb.NewBloomFilter(ctx, "bf:key", redis.WithCapacity(1_000_000))
+if err != nil { // 构造即连接失败：类型冲突/布局不符/服务不可用（哨兵可感知）
+    return err
+}
+// bf 返回即键已就绪，Add/Exists 无额外建立开销
+```
+
+- **已存在键**：连接期复用不改写其参数；要让新参数生效，`Reset(ctx)`
+  （清键 + 同步按新参数重建）或换新 key 重建。
 
 **减少 Redis 请求数的推荐姿势（布隆/布谷鸟通用）**：
 
+- **构造即连接，无需预热**：工厂返回即物理键已建立/校验完毕，写读路径为
+  纯命令、无隐藏建立动作；不需要（也不存在）`Reserve` 预热 API。
 - **合批优先**：单条 `Add`/`Exists` 的延迟主要来自一次网络 RTT（内网典型
   0.2–0.4ms/次，Redis 服务端执行仅 µs 级）；改用 `ExistsMulti`/`AddMulti`
   批量接口后成本摊到每 item 约 2–4µs（实测 CF 路径 1000 项 1.8µs/item），
@@ -421,11 +480,91 @@ minor 承载）：
    门面统一返回 `(false, nil)`）——此前依赖模块路径错误形态的调用方，
    请改判 `(false, nil)`。
 
+**BREAKING（v0.9.0）BloomFilter 工厂签名/连接语义重构 + 默认误判率收紧**
+（按 v0.x 惯例以 minor 承载）：
+
+1. **工厂签名**（source-breaking，全部调用点迁移）：
+   `NewBloomFilter(key, opts...) BloomFilter` →
+   `NewBloomFilter(ctx, key, opts...) (BloomFilter, error)`；
+   `NewBloomFilterWithEstimate` 同理。迁移示例一行：
+   `bf, err := rdb.NewBloomFilter(ctx, "bf:key")`。
+2. **连接语义**：构造即连接——工厂返回前同步完成每个物理键的建键/校验
+   （BF.\* 逐键 `BF.RESERVE`；bitmap 逐键服务端原子脚本全额分配
+   ⌈m/8⌉ 字节），失败返回错误、不交付半初始化实例；三态判定中"复用"
+   的判据是 BF.RESERVE 的 exists 类错误，**类型冲突（WRONGTYPE/模块互撞、
+   bitmap layout mismatch）构造期 fail-loud、键不被触碰**。界外声明：
+   绕开 Reset 手工 DEL 后复用实例**不自愈**（写路径为纯命令、无建立
+   动作），BF.\* 键会被服务端 autocreate（capacity=100）静默接管、
+   bitmap 键零散增长——键生命周期由库管辖，干预后请重建实例或 Reset。
+   BF.\* 的 falsePositive 无法服务端核验（复用既有键 fp 一致性属界外，
+   严格 fp 契约用 CF.\*/bitmap）；bitmap 大 capacity 者构造即占满内存
+   （默认 1e6/0.0001 档 ≈2.4MB/键），容量须预估。
+3. **Reset 语义**：DEL 全部物理键后**立即同步重建**，返回成功即键已
+   就绪；失败如实返回，重试 Reset 幂等。
+4. **不提供 `Reserve` API**（该 API 仅存在于未发布分支，零兼容包袱）；
+   `BloomFilter` 接口保持方法集不变，外部 mock/装饰器无需改动。
+
+行为变更（默认误判率）：**默认 falsePositive 由 0.01 收紧为 0.0001
+（=0.01%）**——未显式传参的用户 bitmap 位图约 2 倍大、哈希函数 14 个
+（k=⌈ln2·m/n⌉，19.17 bit/元素），BF.\* 路径服务端 RESERVE 参数同步
+变化；显式传参者不受影响。已存在键（含旧版 autocreate 出的键）复用
+时不改写参数；新参数生效需 `Reset` 或换键。
+
+**BREAKING（v0.9.0）Capability 探测断链 + API ctx 补齐 + NewWithUrl 改名**
+（按 v0.x 惯例以 minor 承载）：
+
+1. **Capability 惰性探测移除**：`Capability().Probe(ctx)` 成为触发网络探测
+   的唯一入口，全部查询方法（Version/VersionAtLeast/HasModule/HasBloom/
+   HasCuckoo/HasCMS/HasTopK/HasTDigest 等）变为**纯内存读**——未显式探测
+   （或 `Refresh()` 之后）返回保守值（false/空串），不再自动发起命令。
+   **`NewBloomFilter`/`NewCuckooFilter` 在未探测时一律保守回退
+   bitmap/Hash+Lua 实现**：需要模块实现，构造前先
+   `rdb.Capability().Probe(ctx)`。模块中途装卸的生效路径为
+   `Refresh()`+`Probe(ctx)`。
+   **迁移雷区**：旧版本依赖自动探测命中 BF.\* 的部署，升级后若未在创建
+   过滤器前显式 `Probe(ctx)`，将静默切换为 bitmap 键结构、读不到存量
+   BF.\* 数据（两路径布局不互通）。
+   依赖 `Constraint(Version(...))` 的启动校验链须先 `Probe(ctx)`，否则
+   返回 `version not obtained`（fail-loud，不静默放行）。
+2. **签名加 ctx（source-breaking，直接换参）**：
+   `LoadFunction(f string)` → `LoadFunction(ctx, f string)`（ctx 透传
+   cluster/ring/单机全部分支）；
+   `SubscribeWithPrefix(uc, prefix, sep, channels...)` →
+   `SubscribeWithPrefix(ctx, uc, prefix, sep, channels...)`（ctx 作用于
+   订阅建立阶段，返回的 PubSub 不受 ctx 后续取消管理、停止须 `Close()`）。
+3. **`NewWithUrl` 改名 `NewWithURL`**（var-naming 规范，source-breaking，
+   直接换名）。
+4. **constraint.Ping 的 Background 决策记录**：约束为启动期校验，此刻不
+   存在可传递的调用方请求上下文；内部固定 `context.Background()`+3s
+   deadline 收窄探测、不向下游传播——为本库"无 ctx 公开 API 内刻意使用
+   Background"的已记录决策。
+
+**（v0.9.0）CuckooFilter 工厂签名与连接语义**（随上述 BloomFilter 同批）：
+
+1. **工厂签名**（source-breaking）：`NewCuckooFilter(key, opts...)
+   *CuckooFilter` → `NewCuckooFilter(ctx, key, opts...)
+   (*CuckooFilter, error)`；门面不提供 `Reserve`（仅存在于未发布分支）。
+2. **行为变更**：CF.\* 路径构造即连接——同步 `CF.RESERVE`（未显式传
+   `WithCuckooCapacity` 按默认 **1000000**），既有真 CF 键复用并按声明
+   口径校验（bucketSize/maxIterations 等值、capacity 容纳判定），不符
+   构造期报 layout mismatch、键未触碰；Reset 为 DEL + 同步重建。回退版
+   无预建动作、构造期仅类型校验（none/hash 通过、其他类型 fail-loud）、
+   不建键，其布局与默认容量 10000（numBuckets=2500）**不变**（存量键
+   兼容冻结约束）。构造失败返回错误、不交付实例，不随 FailPolicy 兜底。
+3. **旧键附注**：存量 autocreate/异参建立的键在**容纳充足时**复用且不改写
+   参数（capacity 恒参与容纳比对，未显式传参按默认 1000000 承载声明；
+   容纳不足或显式 bucketSize/maxIterations 不符时构造期报 layout
+   mismatch、键不被触碰）；要让新参数在旧键上生效需 `Reset` 或换键。
+
 
  布谷鸟过滤器（双实现，无需 RedisBloom 模块）：
 
 ```go
-cf := rdb.NewCuckooFilter("cf:1", redis.WithCuckooCapacity(1000000))
+cf, err := rdb.NewCuckooFilter(ctx, "cf:1", redis.WithCuckooCapacity(1000000))
+if err != nil {
+    // 构造即连接：CF.RESERVE 失败 / 既有键布局不符 / 类型冲突不交付实例
+    return err
+}
 cf.Add(ctx, "item1")                  // 返回是否插入（模块版多重集/回退版去重，见下方语义矩阵）
 cf.Exists(ctx, "item1")               // 存在性检查（无假阴性）
 cf.ExistsMulti(ctx, "a", "b", "c")    // 批量存在性，单命令往返、结果顺序与入参对应
@@ -434,17 +573,33 @@ cf.Count(ctx, "item1")                // 出现次数估计（0=确定不存在�
 cf.AddMulti(ctx, "a", "b", "c")       // 批量添加（对齐 CF.INSERT 语义）
 cf.Del(ctx, "item1")                  // 支持删除（与 BF 不同）
 cf.Info(ctx)                          // 元数据
-cf.Reset(ctx)                         // 整键就地清空（幂等、可重试）
+cf.Reset(ctx)                         // 整键清空 + 同步重建（幂等、可重试）
 ```
 
 分派逻辑：服务器加载了 RedisBloom 的 cuckoo 模块 → 原生 CF.* 命令；
 未加载 → 自动回退到 Hash + Lua 实现（普通 Redis 即可运行，无模块依赖）。
+**构造即连接**：CF.\* 路径工厂与 Reset 同步执行 `CF.RESERVE`（未显式传
+容量按默认 1000000），既有真 CF 键复用并按声明口径校验（bucketSize/
+maxIterations 等值、capacity 容纳判定，不符报 layout mismatch、键未触碰、
+构造期 fail-loud）；回退版 Hash 键惰性、空即就绪，构造期仅类型校验
+（none/hash 通过、其他类型 fail-loud）、不建键；只读路径不触发任何建立
+动作。不提供 `Reserve` API（仅存在于未发布分支）。
+
+> **默认容量口径的不对称**（有意为之，非缺陷）：两路径未显式传参时的
+> 有效容量口径不同——模块版（CF.\*）恒按 **1000000** 预建，这是分配契约，
+> 键在第一笔写入前即以该容量在服务端建立；回退版（Hash+Lua）不存在预建
+> 动作，其默认容量 **10000** 仅决定寻址布局（numBuckets=capacity/
+> bucketSize），不是分配量，且是存量键的兼容冻结约束。对容量敏感的应用
+> 请一律显式 `WithCuckooCapacity`，两侧取值一致即可。
+
 回退版特征：单次往返（每条操作一条 Lua 脚本）、状态存于单个 Hash key
 （field=桶索引，value=桶内指纹数组）、模加候选桶 + 方向位驱逐链保证
 **插入成功的元素必可命中（无假阴性）**；驱逐置换与 CF.ADD 语义对齐
 （超容量时 Add 返回 false，元素可能被驱逐丢失，属 cuckoo 正常行为）。
-可用 rdb.Capability().HasCuckoo() 预检 CF.* 命令族是否可用（v0.7.0 起经
-`COMMAND INFO CF.ADD` 真实确认，不再是"查模块名"）。item 参数同样是 `any`，
+可用 `rdb.Capability().Probe(ctx)` + `rdb.Capability().HasCuckoo()` 预检
+CF.* 命令族是否可用（经
+`COMMAND INFO CF.ADD` 真实确认，不再是"查模块名"）；查询为纯内存读，
+未显式 Probe 时恒返回 false（工厂据此保守分派到 Hash+Lua 回退实现）。item 参数同样是 `any`，
 支持类型清单与序列化冻结契约见上文布隆章节（回退版的指纹/桶索引由
 `marshalItem(item)` 的规范字节导出）。
 
@@ -468,13 +623,15 @@ cf.Reset(ctx)                         // 整键就地清空（幂等、可重试
 的推荐姿势"。
 
 底层实现口径：模块版 AddMulti 为**单条 CF.INSERT**，不带 CAPACITY/
-NOCREATE 选项——预分配统一走 WithCuckooCapacity 的惰性 CF.RESERVE 通道
-（避免 RESERVE 与 INSERT 双通道配置语义分裂）；回退版为**单条批量 Lua**
+NOCREATE 选项——预分配恒经惰性 CF.RESERVE（未显式传参按默认 1000000，
+通道唯一，避免 RESERVE 与 INSERT 双通道配置语义分裂）；回退版为**单条批量 Lua**
 （原子），单次执行时长 O(n×maxIterations×bucketSize)，超大批量会阻塞
 Redis，由调用方控批、本库不分块。`Info` 回退版仅 **Size/NumBuckets/
 NumItems/BucketSize 四字段有效**（Size 为估算：占用桶×桶字节数，
 NumBuckets 为占用桶数），其余 NumFilters/NumDeletes/Expansion/
-MaxIterations 恒 0；模块版全字段有效。
+MaxIterations 恒 0；模块版全字段有效。键不存在时模块版（CF.\*）Info
+返回 not-found 错误、回退版（Hash）返回零值 Info 不报错——部署装卸
+RedisBloom 会切换该行为，属两路径固有差异。
 
 **Reset（就地清空）**：整键销毁、重建过滤器。与布隆章同族语义但更简单：
 两路径状态都在单个键内（CF.* 键 / 单个 Hash），一条 DEL **天然完全
@@ -484,8 +641,8 @@ Add 的元素可能落在清空前后两个世代）。与 Del 的边界：Del �
 原文的条目（**需持有 item 本体**，且过滤器无枚举能力，无法用于全清），
 Reset 整键销毁。Reset **≠ CF.COMPACT**：后者是 RedisBloom 的内部整理
 命令、数据保留（本库未封装 CF.COMPACT，Reset 不隐式调用它）。模块版
-会同步复位惰性 CF.RESERVE 闸门，后续 Add 按 WithCuckooCapacity 等配置
-重建；绕开 Reset 手搓 DEL 后复用实例，配置会被模块默认参数静默替换
+会同步复位惰性 CF.RESERVE 闸门，后续写入恒重新按当前配置（未显式传参按
+默认 1000000）CF.RESERVE 重建；绕开 Reset 手搓 DEL 后复用实例，配置会被模块默认参数静默替换
 （纪律与布隆章相同——清空一律走 Reset）。失败**恒返回错误**（Unavailable
 类包装为 ErrRedisUnavailable 哨兵，`errors.Is` 可感知），不受 FailPolicy
 兜底影响——"没清掉却假装清了"会让会话隔离静默失效。
@@ -553,7 +710,7 @@ Redis 服务不可用时（dial 失败、读写超时、连接池超时、连接
 
 ```go
 rl := rdb.NewRateLimiter("login", redis.WithFailPolicy[*redis.RateLimiter](redis.FailOpen))
-cf := rdb.NewCuckooFilter("cf:1", redis.WithFailPolicy[*redis.CuckooConfig](redis.FailOpen))
+cf, _ := rdb.NewCuckooFilter(ctx, "cf:1", redis.WithFailPolicy[*redis.CuckooConfig](redis.FailOpen))
 ```
 
 边界与可观测性：

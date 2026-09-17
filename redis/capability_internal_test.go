@@ -3,15 +3,15 @@ package redis
 import (
 	"errors"
 	"testing"
+
+	"github.com/hashicorp/go-version"
 )
 
 // 本文件覆盖能力探测（capability.go）的纯逻辑层：模块行解析、模块名匹配、
 // 命令族缓存字段的判定读取、COMMAND INFO 回复解析。
 //
-// 构造 Capability 时一律带 ready: true：ensureLoaded 见 ready 即直接返回，
-// 不会触发 Probe（否则 rdb 为 nil 会炸、或发出真实网络命令）。这也是
-// HasCuckoo 等判定与 HasModule 共用同一"先 ensureLoaded 再加锁"结构的
-// 前提。
+// 构造 Capability 时直置字段值：查询方法是纯内存读、不发 IO，直构缓存
+// 即可覆盖判定逻辑。
 //
 // 端到端探测（miniredis）回归见 redis_test.go 的 TestCapabilityModules。
 
@@ -48,7 +48,6 @@ func TestParseModuleLine(t *testing.T) {
 // TestHasModule 验证模块名匹配口径：EqualFold 全名匹配（子串不算命中）。
 func TestHasModule(t *testing.T) {
 	c := &Capability{
-		ready: true,
 		modules: []moduleInfo{
 			{Name: "bf", Version: "20200"},
 			{Name: "ReJSON", Version: "20000"},
@@ -87,7 +86,6 @@ func TestHasModule(t *testing.T) {
 // "cf" 恒 false）。
 func TestBloomFamilyCacheFields(t *testing.T) {
 	c := &Capability{
-		ready:      true,
 		modules:    []moduleInfo{{Name: "bf"}},
 		hasCuckoo:  true,
 		hasCMS:     false,
@@ -128,7 +126,6 @@ func TestBloomFamilyCacheFields(t *testing.T) {
 // 修复没有把 HasBloom 一起改坏（BF.* 仍以模块在场为口径）。
 func TestValkeyBloomScenario(t *testing.T) {
 	c := &Capability{
-		ready:   true,
 		modules: []moduleInfo{{Name: "bf", Version: "10000"}},
 		// hasCuckoo/hasCMS/hasTopK/hasTDigest 保持零值 false：probeCommandFamily
 		// 探测后写回的结果即全部不存在。
@@ -227,16 +224,23 @@ func TestParseCommandInfoResponse(t *testing.T) {
 	}
 }
 
-// TestRefreshKeepsDataAndClearsReady 验证缓存清零的职责划分：Refresh 只
-// 丢弃就绪标记、不改数据，数据清零由下一轮 probeLocked 在探测前完成
-// （见 probeLocked 的"先清缓存"段），避免重试路径残留上一轮的 true。
-func TestRefreshKeepsDataAndClearsReady(t *testing.T) {
-	c := &Capability{ready: true, hasCuckoo: true, hasTopK: true}
-	c.Refresh()
-	if !c.hasCuckoo || !c.hasTopK {
-		t.Fatal("Refresh 不应直接改动缓存字段（清零由下次 probeLocked 负责）")
+// TestRefreshClearsData 验证 Refresh 的清零语义：数据与命令族缓存全部回到
+// 保守态（false/空串）；恢复数据须显式 Probe(ctx)。
+func TestRefreshClearsData(t *testing.T) {
+	c := &Capability{
+		modules:   []moduleInfo{{Name: "bf"}},
+		version:   "7.4.0",
+		hasCuckoo: true,
+		hasTopK:   true,
 	}
-	if c.ready {
-		t.Fatal("Refresh 应使 ready=false，触发下次重新探测")
+	if v, err := version.NewVersion("7.4.0"); err == nil {
+		c.versionSem = v
+	}
+	c.Refresh()
+	if c.Version() != "" || c.VersionAtLeast("7.0") {
+		t.Fatalf("Refresh 后版本查询应回到空串/false：version=%q", c.Version())
+	}
+	if c.HasBloom() || c.HasCuckoo() || c.HasTopK() {
+		t.Fatal("Refresh 后模块/命令族查询应全部回到 false")
 	}
 }

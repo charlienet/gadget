@@ -25,11 +25,14 @@ import (
 //  2. mr1.Close() 模拟宕机，操作失败
 //  3. mr2 绑定同一端口模拟恢复，再次读写成功（自动重连验证）
 func TestAutoReconnect(t *testing.T) {
+	// ctx 跨 miniredis 宕机→同端口恢复的多阶段存活，连接池生命周期有意
+	// 超出单次请求上下文，使用 Background（不适用 t.Context 绑定形态）。
 	ctx := context.Background()
 
 	// 选择一个可用端口（探测避免冲突；被占则跳过）
 	port := 16379
-	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	var lc net.ListenConfig
+	ln, err := lc.Listen(ctx, "tcp", fmt.Sprintf("127.0.0.1:%d", port))
 	if err != nil {
 		t.Skipf("端口 %d 被占用，跳过自动重连测试", port)
 	}

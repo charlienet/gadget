@@ -13,9 +13,9 @@ import (
 // 错误语义）"完全一致"由同一份代码保证，而非两份复制实现。
 //
 // 设计要点（对应规格 1-3、5、6）：
-//   - 仅 ModeCluster 且 WithShardCount(n>1) 显式开启时启用；默认不分片，
-//     standalone/哨兵/ring 或未开启的集群键名与行为与分片化之前完全一致
-//     （enabled=false，shardKey 恒返回 base）。
+//   - 仅 ModeCluster 且 WithShardCount(n>1) 显式开启时启用；默认不分片
+//     （enabled=false，shardKey 恒返回 base），standalone/哨兵/ring
+//     或未开启的集群为单键直达。
 //   - 物理键 = <base>#<idx>，idx ∈ [0, effectiveN)。开启后即使因容量
 //     收缩到 effectiveN==1（退化态）也统一带 #0 后缀，保持键名连续。
 //   - 路由 idx = xxh3.Hash128(marshalItem(item)).Hi % effectiveN（与 bitmap

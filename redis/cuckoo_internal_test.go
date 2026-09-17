@@ -2,8 +2,10 @@ package redis
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -150,185 +152,6 @@ func TestCuckooHashsDistribution(t *testing.T) {
 	t.Logf("i1 散布：%d 桶 / 期望 %d 每桶，fp 去重 %d/%d", h.numBuckets, exp, len(fpSeen), total)
 }
 
-// TestCfCmdImplGateRearmOnReset 钉死模块版 Reset 的 CF.RESERVE 闸门生命周期
-// （miniredis 离线探针，不依赖真实 RedisBloom）。
-//
-// 探针原理：miniredis 不支持 CF.*，ensureReserve 发出的 CF.RESERVE 必以
-// 命令级错误失败（非 Unavailable、不被 "item exists" 吞掉），恰好可作为
-// "闭包是否执行"的信号——失败后闸门解除武装（任务 6 起），Reset 换入新
-// sync.Once 后闭包同样重新执行 → 再次报命令错误。
-// 以此证明"Reset 后闸门复位、CF.RESERVE 会重发"（重发所用参数正确性由
-// cuckoo_test.go 的集成探针在有真实 RedisBloom 时验证）。
-//
-// 分派控制：手动置 Capability 缓存（ready+hasCuckoo）令 NewCuckooFilter
-// 走 cfCmdImpl 分支；DEL 是通用命令，miniredis 可执行。
-func TestCfCmdImplGateRearmOnReset(t *testing.T) {
-	mr, err := miniredis.Run()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer mr.Close()
-
-	base := New(WithAddr(mr.Addr()))
-	rc, ok := base.(*redisClient)
-	if !ok {
-		t.Fatalf("unexpected client type %T", base)
-	}
-	rc.cap = &Capability{ready: true, hasCuckoo: true}
-	defer func() { _ = rc.GracefulClose(context.Background()) }()
-
-	ctx := context.Background()
-	cf := rc.NewCuckooFilter("cfi:gate", WithCuckooCapacity(100), WithBucketSize(3))
-	impl, ok := cf.impl.(*cfCmdImpl)
-	if !ok {
-		t.Fatalf("分派异常：%T（期望 *cfCmdImpl）", cf.impl)
-	}
-
-	// ① 构造不变量：闸门非 nil——atomic.Pointer 零值 Load 返回 nil，
-	// 工厂构造点漏 Store(new(sync.Once)) 会在 ensureReserve 处 panic。
-	o1 := impl.once.Load()
-	if o1 == nil {
-		t.Fatal("工厂构造的 cfCmdImpl 闸门为 nil——构造点缺 Store(new(sync.Once))")
-	}
-
-	// ② 首次 ensureReserve：闭包执行、发出 CF.RESERVE → miniredis 报命令级
-	// 错误（非 Unavailable、不被吞）。
-	err1 := impl.ensureReserve(ctx)
-	if err1 == nil || IsUnavailable(err1) {
-		t.Fatalf("首次 ensureReserve 应发出 CF.RESERVE 并因 unknown command 失败，got %v", err1)
-	}
-	// 闸门失败即解除武装（任务 6，专项回归见 TestCfCmdImplGateDisarmOnFailure）：
-	// 第二次调用重新执行闭包 → 再次命令错误。
-	if err := impl.ensureReserve(ctx); err == nil || IsUnavailable(err) {
-		t.Fatalf("闸门失败后应解除武装并重发 CF.RESERVE，got %v", err)
-	}
-
-	// ③ Reset：DEL 成功（通用命令），并换入新闸门。
-	if err := impl.Reset(ctx); err != nil {
-		t.Fatalf("Reset（DEL 成功路径）：%v", err)
-	}
-	o2 := impl.once.Load()
-	if o2 == nil || o2 == o1 {
-		t.Fatal("Reset 未换入新闸门（once 指针身份未变或为 nil）")
-	}
-
-	// ④ 复位后 ensureReserve 重新执行闭包 → 重发 CF.RESERVE（再次命令错误）。
-	// 注：任务 6 起本探针与解除武装路径信号同形（失败也会重发），此处仍
-	// 保留断言以钉死 Reset 后闸门为新对象的事实（身份断言在 ③）。
-	err2 := impl.ensureReserve(ctx)
-	if err2 == nil || IsUnavailable(err2) {
-		t.Fatalf("闸门复位后应重发 CF.RESERVE，got %v", err2)
-	}
-}
-
-// TestCfCmdImplGateRearmOnFailedReset 钉死"无条件复位"决策：DEL 因服务宕机
-// 失败时 Reset 仍返回错误，但闸门必须照常换新。"仅成功才复位"的隐患：DEL
-// 实际已执行而客户端收到网络错误 → 旧闸门燃尽残留 → 实例后续 Add 不再
-// RESERVE，过滤器被模块默认参数（capacity=100、bucketSize=2、
-// maxIterations=20）隐式重建，With* 配置静默作废；双 RESERVE 竞态的代价
-// 只是被 ensureReserve 吞掉的 "item exists"，无害。
-func TestCfCmdImplGateRearmOnFailedReset(t *testing.T) {
-	mr, err := miniredis.Run()
-	if err != nil {
-		t.Fatal(err)
-	}
-	addr := mr.Addr()
-
-	base := New(WithAddr(addr))
-	rc, ok := base.(*redisClient)
-	if !ok {
-		t.Fatalf("unexpected client type %T", base)
-	}
-	defer func() { _ = rc.GracefulClose(context.Background()) }()
-
-	impl := &cfCmdImpl{client: rc, key: "cfi:gate-fail", cfg: defaultCuckooConfig()}
-	impl.once.Store(new(sync.Once))
-
-	ctx := context.Background()
-	old := impl.once.Load()
-	old.Do(func() {}) // 耗尽当代闸门（模拟 RESERVE 已执行过的状态）
-
-	mr.Close() // 服务宕机：DEL 产生网络层错误
-	err = impl.Reset(ctx)
-	if err == nil {
-		t.Fatal("宕机下 Reset 的 DEL 应返回错误")
-	}
-	if !IsUnavailable(err) {
-		t.Fatalf("宕机错误应判为 Unavailable（门面据此包装哨兵），got %v", err)
-	}
-
-	// 失败仍无条件复位：换入的新闸门可再次触发闭包。
-	next := impl.once.Load()
-	if next == old {
-		t.Fatal("DEL 失败后闸门仍应无条件复位（旧燃尽闸门残留将致默认参数隐式重建）")
-	}
-	fired := false
-	next.Do(func() { fired = true })
-	if !fired {
-		t.Fatal("复位后的闸门不可再触发（new(sync.Once) 未正确换入？）")
-	}
-}
-
-// TestCfCmdImplGateDisarmOnFailure 钉死闸门失败解除武装（任务 6）：
-// CF.RESERVE 报非 "item exists"/"already exists" 类错误（miniredis 下为
-// unknown command）时，ensureReserve 必须换掉本代闸门，下一次调用重试
-// CF.RESERVE——sync.Once 不辨成败，不解除武装则一次瞬态失败永久燃尽闸门，
-// 恢复后过滤器被模块默认参数隐式建立，With* 配置静默作废。
-// 每次失败都应换入新对象（连续失败不积累旧状态）。
-// "exists 类吞错维持武装"分支由 cuckoo_test.go 集成用例覆盖（需真实
-// RedisBloom 产生 "Item already exists"；miniredis v2.5.0 无法注入自定义
-// 错误文本）。
-func TestCfCmdImplGateDisarmOnFailure(t *testing.T) {
-	mr, err := miniredis.Run()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer mr.Close()
-
-	base := New(WithAddr(mr.Addr()))
-	rc, ok := base.(*redisClient)
-	if !ok {
-		t.Fatalf("unexpected client type %T", base)
-	}
-	rc.cap = &Capability{ready: true, hasCuckoo: true}
-	defer func() { _ = rc.GracefulClose(context.Background()) }()
-
-	ctx := context.Background()
-	cf := rc.NewCuckooFilter("cfi:disarm", WithCuckooCapacity(100))
-	impl, ok := cf.impl.(*cfCmdImpl)
-	if !ok {
-		t.Fatalf("分派异常：%T（期望 *cfCmdImpl）", cf.impl)
-	}
-
-	// 首次 ensureReserve：CF.RESERVE → unknown command 失败 → 解除武装。
-	g0 := impl.once.Load()
-	err = impl.ensureReserve(ctx)
-	if err == nil || IsUnavailable(err) {
-		t.Fatalf("首次 ensureReserve 应报命令级错误，got %v", err)
-	}
-	g1 := impl.once.Load()
-	if g1 == nil || g1 == g0 {
-		t.Fatal("RESERVE 失败后闸门未解除武装（旧燃尽 Once 残留，恢复后将永不再试）")
-	}
-
-	// 第二次：闭包重执行（重试 CF.RESERVE）→ 再次失败 → 再次解除武装。
-	err = impl.ensureReserve(ctx)
-	if err == nil || IsUnavailable(err) {
-		t.Fatalf("解除武装后第二次 ensureReserve 应重发 CF.RESERVE 并再次命令错误，got %v", err)
-	}
-	g2 := impl.once.Load()
-	if g2 == nil || g2 == g1 {
-		t.Fatal("第二次失败后闸门应再次换入新对象")
-	}
-
-	// 可触发性：当代闸门 Do 可执行（未燃尽）。
-	fired := false
-	g2.Do(func() { fired = true })
-	if !fired {
-		t.Fatal("当代闸门不可触发（解除武装换入的不是全新 sync.Once？）")
-	}
-}
-
 // ---------------------------------------------------------------------------
 // 真环境 hashImpl（降级实现）全方法覆盖
 //
@@ -340,7 +163,7 @@ func TestCfCmdImplGateDisarmOnFailure(t *testing.T) {
 //
 // 共享实例纪律：key 带 "cuckootest:" 前缀 + UnixNano 唯一段，收尾 Del；
 // 严禁 FLUSHDB/FLUSHALL。内部测试不能 import test 包（依赖图成环），
-// 守卫自建（os.Getenv + NewWithUrl）。
+// 守卫自建（os.Getenv + NewWithURL）。
 // ---------------------------------------------------------------------------
 
 // cuckooTestKey 生成共享实例上的隔离测试 key（前缀 + 纳秒唯一段 + 语义后缀）。
@@ -355,7 +178,7 @@ func newRealStandaloneClient(t *testing.T) *redisClient {
 	if raw == "" {
 		t.Skip("REDIS_URL not set; skip real-Redis test")
 	}
-	rdb, err := NewWithUrl(raw)
+	rdb, err := NewWithURL(raw)
 	if err != nil {
 		t.Fatalf("REDIS_URL 解析失败：%v", err)
 	}
@@ -374,7 +197,7 @@ func newRealClusterClient(t *testing.T) *redisClient {
 	if raw == "" {
 		t.Skip("REDIS_CLUSTER not set; skip cluster test")
 	}
-	rdb, err := NewWithUrl(raw)
+	rdb, err := NewWithURL(raw)
 	if err != nil {
 		t.Fatalf("REDIS_CLUSTER URL 解析失败：%v", err)
 	}
@@ -392,6 +215,8 @@ func newRealClusterClient(t *testing.T) *redisClient {
 // 逐字节一致，环境分叉即缺陷。集群特有的路由/脚本缓存语义见 extra 子测试。
 func runHashImplSuite(t *testing.T, envName string, rc *redisClient) {
 	t.Helper()
+	// 子测试 t.Cleanup 的收尾 Del 引用本 ctx（清理阶段执行），保留
+	// Background、不绑定 t.Context()。
 	ctx := context.Background()
 
 	// ---- 组 1：基本流（9 方法全触达） ----
@@ -698,4 +523,120 @@ func TestHashImplRealStandalone(t *testing.T) {
 func TestHashImplRealCluster(t *testing.T) {
 	rc := newRealClusterClient(t)
 	runHashImplSuite(t, "cluster", rc)
+}
+
+// TestHashImplDefaultLayoutFreeze 钉死回退版默认布局：defaultCuckooConfig
+// （无 Option）→ bucketSize==4、numBuckets==2500（=10000/4）。默认容量
+// 10000 是存量 Hash 键布局的兼容约束，与 CF.* 路径默认预建容量 1000000
+// 属不同机制。
+func TestHashImplDefaultLayoutFreeze(t *testing.T) {
+	h := newHashImpl(nil, "cfi:freeze", defaultCuckooConfig())
+	if h.bucketSize != 4 || h.numBuckets != 2500 {
+		t.Fatalf("默认布局漂移：bucketSize=%d numBuckets=%d（期望 4/2500）", h.bucketSize, h.numBuckets)
+	}
+}
+
+// TestCuckooFactoryTypeReject 断言回退版 hash 的构造期类型校验：不存在键
+// 构造通过且**不建键**（空即就绪）；string 键报 type mismatch 数据类错误、
+// 键不被触碰；Reset（纯 DEL）后重新构造同样通过。
+func TestCuckooFactoryTypeReject(t *testing.T) {
+	ctx := t.Context()
+	rc, mr := newMiniRedisClient(t)
+
+	t.Run("不存在键构造不建键", func(t *testing.T) {
+		cf, err := rc.NewCuckooFilter(ctx, "cfr:none")
+		if err != nil {
+			t.Fatalf("不存在键构造：%v", err)
+		}
+		if mr.Exists("cfr:none") {
+			t.Fatal("hash 构造不得建键——空 Hash 与不存在对全部命令等价，占位会污染 Info 统计")
+		}
+		if _, err := cf.Add(ctx, "w1"); err != nil {
+			t.Fatal(err)
+		}
+		if !mr.Exists("cfr:none") {
+			t.Fatal("首写后键应存在")
+		}
+	})
+
+	t.Run("string键type_mismatch", func(t *testing.T) {
+		if err := rc.Set(ctx, "cfr:str", "v", 0).Err(); err != nil {
+			t.Fatal(err)
+		}
+		_, err := rc.NewCuckooFilter(ctx, "cfr:str")
+		if err == nil || !strings.Contains(err.Error(), "type mismatch") {
+			t.Fatalf("string 键构造应报 type mismatch，got %v", err)
+		}
+		if errors.Is(err, ErrRedisUnavailable) {
+			t.Fatalf("type mismatch 是数据类错误，不得包哨兵：%v", err)
+		}
+		if v, gerr := mr.Get("cfr:str"); gerr != nil || v != "v" {
+			t.Fatalf("mismatch 路径不得触碰键：got %q err=%v", v, gerr)
+		}
+	})
+
+	t.Run("Reset后重新构造", func(t *testing.T) {
+		cf, err := rc.NewCuckooFilter(ctx, "cfr:rst")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := cf.Add(ctx, "r1"); err != nil {
+			t.Fatal(err)
+		}
+		if err := cf.Reset(ctx); err != nil {
+			t.Fatalf("Reset：%v", err)
+		}
+		if mr.Exists("cfr:rst") {
+			t.Fatal("hash Reset（纯 DEL）后键应不存在——回退版无同步重建动作")
+		}
+		if _, err := rc.NewCuckooFilter(ctx, "cfr:rst"); err != nil {
+			t.Fatalf("DEL 后重新构造应通过：%v", err)
+		}
+	})
+}
+
+// TestCfCmdImplResetUnavailable 断言 CF.* Reset 的失败可见性：DEL 阶段
+// 服务不可用 → errors.Is(ErrRedisUnavailable) 哨兵（与 FailPolicy 无关）；
+// 服务恢复后重试 Reset，DEL 幂等通过、同步重建按当前配置真实发出
+// CF.RESERVE（miniredis 无 CF 模块 → unknown command 数据类错误，
+// 非哨兵）——错误不越界、无半状态。
+func TestCfCmdImplResetUnavailable(t *testing.T) {
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mr.Close()
+
+	base := New(WithAddr(mr.Addr()))
+	rc, ok := base.(*redisClient)
+	if !ok {
+		t.Fatalf("unexpected client type %T", base)
+	}
+	defer func() { _ = rc.GracefulClose(context.Background()) }()
+
+	cfg := defaultCuckooConfig()
+	cfg.capacity = 100 // 直构实例显式容量（构造期不连接，Reset 走 DEL+connectAll）
+	cfg.policy = FailOpen
+	cf := &cfCmdImpl{client: rc, key: "cfi:rstfail", cfg: cfg}
+	ctx := t.Context()
+
+	mr.Close() // 服务不可用：Reset 的 DEL 阶段即失败
+	if err := cf.Reset(ctx); !errors.Is(err, ErrRedisUnavailable) {
+		t.Fatalf("服务不可用时 Reset 应返回哨兵错误，got %v", err)
+	}
+
+	// 恢复后重试：DEL（键不存在）幂等通过，进入同步重建阶段——
+	// miniredis 无 CF 模块，CF.RESERVE 报 unknown command（数据类、非哨兵）
+	mr.Restart()
+	err = cf.Reset(ctx)
+	if !errContainsCmd(err, "CF.RESERVE") {
+		t.Fatalf("恢复后 Reset 应实发 CF.RESERVE 重建，got %v", err)
+	}
+	if errors.Is(err, ErrRedisUnavailable) {
+		t.Fatalf("unknown command 属数据类，不得包哨兵：%v", err)
+	}
+	// 连发幂等：错误形态确定（DEL 已执行、重建确定性失败）
+	if err2 := cf.Reset(ctx); !errContainsCmd(err2, "CF.RESERVE") {
+		t.Fatalf("二次 Reset 应同形态（幂等重试安全），got %v", err2)
+	}
 }

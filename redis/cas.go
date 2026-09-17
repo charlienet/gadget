@@ -9,6 +9,8 @@ import (
 
 // casNil 哨兵值：标记"期望 key 不存在"的 CAS 语义（对应 SETNX）。
 // 选用含特殊前缀的字符串，与业务值冲突概率极低。
+// 该字面量为库保留值：业务侧不应当作数据值写入对应键，否则与
+// CompareAndSet(key, nil, v) 的"不存在才设置"语义碰撞。
 const casNil = "__GADGET_CAS_NIL__"
 
 // casSetScript 原子比较并设置：

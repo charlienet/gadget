@@ -16,7 +16,7 @@ import (
 // 配额充足全部消耗、配额不足部分放行（Consumed=剩余量）、无配额拒绝。
 func TestAllowAtMost(t *testing.T) {
 	mini.Run(t, func(rdb redis.Client) {
-		ctx := context.Background()
+		ctx := t.Context()
 		require.NoError(t, rdb.FlushDB(ctx).Err())
 
 		t.Run("配额充足：cost 全部消耗", func(t *testing.T) {
@@ -111,7 +111,7 @@ func TestReset(t *testing.T) {
 
 	rdb := redis.New(redis.WithAddr(mr.Addr()))
 	defer func() { _ = rdb.GracefulClose(context.Background()) }()
-	ctx := context.Background()
+	ctx := t.Context()
 
 	rl := rdb.NewRateLimiter("")
 	const k = "reset"

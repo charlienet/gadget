@@ -2,6 +2,7 @@ package redis
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"sync"
 
@@ -9,22 +10,22 @@ import (
 )
 
 // Capability provides cached information about the Redis server's version
-// and loaded modules. It is lazily populated on first access and can be
-// refreshed via Probe or Refresh.
+// and loaded modules. Probe(ctx) 是触发网络探测的唯一入口；全部查询方法
+// （Version/VersionAtLeast/HasModule/HasXXX）均为纯内存读——未探测（或
+// Refresh 之后）返回保守值（false/空串），不会自动发起命令。模块中途
+// 装卸的生效路径为 Refresh()+Probe(ctx)。
 type Capability struct {
-	mu    sync.Mutex
-	rdb   *redisClient
-	ready bool
+	mu  sync.Mutex
+	rdb *redisClient
 
 	version    string
 	versionSem *version.Version
 	modules    []moduleInfo
 
-	// 命令族级能力缓存（v0.7.0 起新增）：由 probeCommandFamily 经
-	// `COMMAND INFO <族>.<命令>` 逐族真实确认，仅在 bf 模块在场时探测，
-	// 其余情况恒 false。**不得**再用模块名判定——INFO MODULES 里的模块名
-	// 是 bf/cb/RedisBloom 等加载名，而 cf/cms/topk/tdigest 只是命令前缀，
-	// 按前缀查模块名恒 false（历史缺陷）。
+	// 命令族级能力缓存：由 probeLocked 在 bf 模块在场时经
+	// `COMMAND INFO <族>.<命令>` 逐族真实确认，其余情况恒 false。**不得**
+	// 再用模块名判定——INFO MODULES 里的模块名是 bf/cb/RedisBloom 等加载名，
+	// 而 cf/cms/topk/tdigest 只是命令前缀，按前缀查模块名恒 false。
 	hasCuckoo  bool
 	hasCMS     bool
 	hasTopK    bool
@@ -41,25 +42,24 @@ func newCapability(rdb *redisClient) *Capability {
 }
 
 // Probe sends INFO commands to the server and caches version and module info.
-// 探测失败（如服务器不可达）时返回真实错误，且不标记缓存就绪，
-// 后续访问会重新探测（见 ensureLoaded）。
+// 探测失败（如服务器不可达）时返回真实错误，调用方决定重试时机；
+// 查询方法不感知探测状态，始终返回当前缓存值。
 func (c *Capability) Probe(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.probeLocked(ctx)
 }
 
-// Refresh forces a re-probe on the next access (discards cached data).
+// Refresh 清除已缓存的能力数据（查询回到保守态 false/空串）；重探须显式
+// Probe(ctx)——模块中途装卸的生效路径为 Refresh()+Probe(ctx)。
 func (c *Capability) Refresh() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.ready = false
+	c.version, c.versionSem, c.modules = "", nil, nil
+	c.hasCuckoo, c.hasCMS, c.hasTopK, c.hasTDigest = false, false, false, false
 }
 
 func (c *Capability) probeLocked(ctx context.Context) error {
-	// 注意：探测全部成功（INFO 命令执行成功）才置 ready=true；
-	// 任一探测失败直接返回错误，ready 保持 false，后续访问会重试（见 ensureLoaded）。
-
 	// --- Server version ---
 	info, err := c.rdb.Info(ctx, "Server").Result()
 	if err != nil {
@@ -102,27 +102,21 @@ func (c *Capability) probeLocked(ctx context.Context) error {
 	// 往返）。
 	//
 	// ⚠️ 锁序：本函数由 Probe 在**持有 c.mu** 的路径上调用，绝不能调
-	// c.HasModule("bf")——它先 ensureLoaded()→Probe()→再次 Lock，而
-	// sync.Mutex 不可重入，同 goroutine 自死锁。故此处直接遍历
-	// c.modules 判等，匹配口径与 HasModule 完全一致（EqualFold 全名）。
-	bfLoaded := false
-	for _, m := range c.modules {
-		if strings.EqualFold(m.Name, "bf") {
-			bfLoaded = true
-			break
-		}
-	}
+	// c.HasModule("bf")——它再次加锁，而 sync.Mutex 不可重入，同 goroutine
+	// 自死锁。故此处直接查 c.modules，匹配口径与 HasModule 完全一致
+	// （EqualFold 全名）。
+	bfLoaded := slices.ContainsFunc(c.modules, func(m moduleInfo) bool {
+		return strings.EqualFold(m.Name, "bf")
+	})
 	if bfLoaded {
 		if err := c.probeCommandFamily(ctx); err != nil {
-			// 网络/服务端错误：原样返回、ready 保持 false（与本函数
-			// 现有 INFO 失败语义一致）——**不得把探测失败当作"不支持"
-			// 缓存**，否则瞬断会把 CF.* 路径永久降级为 Lua 回退实现。
+			// 网络/服务端错误：原样返回——**不得把探测失败当作"不支持"
+			// 缓存**，否则瞬断会把 CF.* 路径永久降级为 Lua 回退实现；
+			// 需要重试由调用方再次 Probe。
 			return err
 		}
 	}
 
-	// INFO 与（bf 在场时的）命令族探测均成功，才标记缓存就绪
-	c.ready = true
 	return nil
 }
 
@@ -216,29 +210,17 @@ func parseModuleLine(line string) moduleInfo {
 	return m
 }
 
-// ensureLoaded probes once on first access.
-func (c *Capability) ensureLoaded() {
-	c.mu.Lock()
-	ready := c.ready
-	c.mu.Unlock()
-	if !ready {
-		// 惰性探测：失败静默忽略（错误详情可通过主动调用 Probe 获取），
-		// 且 ready 保持 false，后续访问会重试，避免探测失败被永久缓存。
-		_ = c.Probe(context.Background())
-	}
-}
-
 // Version returns the Redis server version string (e.g. "7.2.5").
+// 纯内存读：未 Probe 过时返回空串。
 func (c *Capability) Version() string {
-	c.ensureLoaded()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.version
 }
 
 // VersionAtLeast returns true if the server version >= minVersion (e.g. "7.4").
+// 纯内存读：未 Probe 过（或版本不可解析）时返回 false。
 func (c *Capability) VersionAtLeast(minVersion string) bool {
-	c.ensureLoaded()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.versionSem == nil {
@@ -252,66 +234,78 @@ func (c *Capability) VersionAtLeast(minVersion string) bool {
 }
 
 // HasModule returns true if a module with the given name is loaded.
-// Matching is case-insensitive.
+// Matching is case-insensitive（EqualFold 全名）。
+// 纯内存读：未 Probe 过时返回 false。
 func (c *Capability) HasModule(name string) bool {
-	c.ensureLoaded()
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	for _, m := range c.modules {
-		if strings.EqualFold(m.Name, name) {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(c.modules, func(m moduleInfo) bool {
+		return strings.EqualFold(m.Name, name)
+	})
 }
 
-// Convenience module checks.
-//
-// 命令前缀 cf/cms/topk/tdigest 不是模块名，对应判定走 probeCommandFamily
-// 的探测缓存（见下方 HasCuckoo 等）；HasModule 只适用于真实模块名。
-func (c *Capability) HasJSON() bool       { return c.HasModule("ReJSON") }
-func (c *Capability) HasSearch() bool     { return c.HasModule("search") }
+// HasJSON 报告是否加载了 RedisJSON（ReJSON）模块。
+// 纯内存读：未 Probe 过时恒 false。
+func (c *Capability) HasJSON() bool { return c.HasModule("ReJSON") }
+
+// HasSearch 报告是否加载了 search（RediSearch）模块。
+// 纯内存读：未 Probe 过时恒 false。
+func (c *Capability) HasSearch() bool { return c.HasModule("search") }
+
+// HasTimeSeries 报告是否加载了 timeseries 模块。
+// 纯内存读：未 Probe 过时恒 false。
 func (c *Capability) HasTimeSeries() bool { return c.HasModule("timeseries") }
-func (c *Capability) HasGraph() bool      { return c.HasModule("graph") }
-func (c *Capability) HasGears() bool      { return c.HasModule("gears") }
-func (c *Capability) HasVectorSet() bool  { return c.HasModule("vectorset") }
+
+// HasGraph 报告是否加载了 graph（RedisGraph）模块。
+// 纯内存读：未 Probe 过时恒 false。
+func (c *Capability) HasGraph() bool { return c.HasModule("graph") }
+
+// HasGears 报告是否加载了 gears 模块。
+// 纯内存读：未 Probe 过时恒 false。
+func (c *Capability) HasGears() bool { return c.HasModule("gears") }
+
+// HasVectorSet 报告是否加载了 vectorset 模块。
+// 纯内存读：未 Probe 过时恒 false。
+func (c *Capability) HasVectorSet() bool { return c.HasModule("vectorset") }
+
+// 以上便捷判定的口径与 HasModule 一致（EqualFold 全名匹配真实模块名）；
+// 命令前缀 cf/cms/topk/tdigest 不是模块名，对应判定走下方命令族缓存方法。
 
 // HasBloom 判定 BF.* 命令族可用性，口径是 bf 模块在场（INFO MODULES）。
 // 不叠加命令族探测：bf 在场 ⇒ BF.* 可用，在 RedisBloom、valkey-bloom、
 // Redis 8 内建等形态下均成立（BF.* 是该模块的核心命令族，不存在"模块
 // 加载了但 BF. 不可用"的实际形态），无需多付 1 个往返。
+// 纯内存读：未 Probe 过时返回 false。
 func (c *Capability) HasBloom() bool { return c.HasModule("bf") }
 
-// HasCuckoo/HasCMS/HasTopK/HasTDigest 判定对应命令族是否可用：读 bf 在
-// 场时由 probeCommandFamily 经 `COMMAND INFO` 逐族确认的缓存（v0.7.0 起；
-// 此前误按模块名 "cf"/"cms"/"topk"/"tdigest" 查 INFO MODULES，恒 false）。
-// bf 不在场时四者必为 false，无需探测。
-//
-// 锁结构与 HasModule 一致：先 ensureLoaded（内部会加锁探测，故**不可**
-// 在持锁路径调用），再加锁读字段。
+// HasCuckoo 报告 CF.*（布谷鸟）命令族是否可用：读 bf 模块在场时由
+// probeCommandFamily 经 `COMMAND INFO CF.ADD` 确认的缓存；bf 不在场必为
+// false。纯内存读（加锁读字段）：未 Probe 过时恒 false。
 func (c *Capability) HasCuckoo() bool {
-	c.ensureLoaded()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.hasCuckoo
 }
 
+// HasCMS 报告 CMS.*（计数-最小 sketch）命令族是否可用，判定与读取口径
+// 同 HasCuckoo。纯内存读：未 Probe 过时恒 false。
 func (c *Capability) HasCMS() bool {
-	c.ensureLoaded()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.hasCMS
 }
 
+// HasTopK 报告 TOPK.* 命令族是否可用，判定与读取口径同 HasCuckoo。
+// 纯内存读：未 Probe 过时恒 false。
 func (c *Capability) HasTopK() bool {
-	c.ensureLoaded()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.hasTopK
 }
 
+// HasTDigest 报告 TDIGEST.* 命令族是否可用，判定与读取口径同 HasCuckoo。
+// 纯内存读：未 Probe 过时恒 false。
 func (c *Capability) HasTDigest() bool {
-	c.ensureLoaded()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.hasTDigest

@@ -16,7 +16,7 @@ import (
 // 突发放行、超限拒绝、Remaining 递减、过期清理、RetryAfter 精度。
 func TestTokenBucketGCRA(t *testing.T) {
 	mini.Run(t, func(rdb redis.Client) {
-		ctx := context.Background()
+		ctx := t.Context()
 		require.NoError(t, rdb.FlushDB(ctx).Err(), "清空限流 key")
 
 		t.Run("rate=10/s：前 10 次放行后出现拒绝", func(t *testing.T) {
@@ -89,7 +89,7 @@ func TestTokenBucketExpiry(t *testing.T) {
 
 	rdb := redis.New(redis.WithAddr(mr.Addr()))
 	defer func() { _ = rdb.GracefulClose(context.Background()) }()
-	ctx := context.Background()
+	ctx := t.Context()
 
 	rl := rdb.NewRateLimiter("")
 	const k = "tb-exp"

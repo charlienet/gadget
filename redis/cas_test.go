@@ -1,7 +1,6 @@
 package redis_test
 
 import (
-	"context"
 	"testing"
 
 	"github.com/charlienet/gadget/redis"
@@ -13,7 +12,7 @@ import (
 // TestCompareAndSet 验证 CAS 原子比较并设置（miniredis + Lua）。
 func TestCompareAndSet(t *testing.T) {
 	mini.Run(t, func(rdb redis.Client) {
-		ctx := context.Background()
+		ctx := t.Context()
 
 		t.Run("值匹配时设置", func(t *testing.T) {
 			require.NoError(t, rdb.Set(ctx, "cas:1", "old", 0).Err())
@@ -70,7 +69,7 @@ func TestCompareAndSet(t *testing.T) {
 // TestCompareAndDelete 验证 CAS 原子比较并删除（miniredis + Lua）。
 func TestCompareAndDelete(t *testing.T) {
 	mini.Run(t, func(rdb redis.Client) {
-		ctx := context.Background()
+		ctx := t.Context()
 
 		t.Run("值匹配时删除", func(t *testing.T) {
 			require.NoError(t, rdb.Set(ctx, "cad:1", "old", 0).Err())
