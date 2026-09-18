@@ -18,8 +18,8 @@ github.com/charlienet/gadget/breaker v0.1.0 h1:/2zFJpwbY7+zNugexawBj30zTZppniEpr
 github.com/charlienet/gadget/breaker v0.1.0/go.mod h1:6DKOASfM8BAunRwXK3H/Z7dNAYQQMafFT6jbpE3CBNU=
 github.com/charlienet/gadget/cache v0.6.0 h1:JrGGN6+Wfzia9nyLDDXnptFnWoTHGP8Ghm7Eojd9Ml8=
 github.com/charlienet/gadget/cache v0.6.0/go.mod h1:VXGSzgHSMyldE16YXTtfGRzS6qp6p4rLOOP28nEAhrI=
-github.com/charlienet/gadget/redis v0.8.0 h1:pBjASgGUgkUEV4MTxd6+FXAJ04o62LqHc0ciqxEVPdM=
-github.com/charlienet/gadget/redis v0.8.0/go.mod h1:x4x4saIVZR1VnFHlNwG9+iDtr5WGXJ8weoHZWGWtKv0=
+github.com/charlienet/gadget/redis v0.9.0 h1:KeU9Taqzcfj2VqvWlA/Dmn34A818mt4fFVTBqDS2Lv8=
+github.com/charlienet/gadget/redis v0.9.0/go.mod h1:x4x4saIVZR1VnFHlNwG9+iDtr5WGXJ8weoHZWGWtKv0=
 github.com/charlienet/gadget/retry v0.1.0 h1:G89ADCZ/3kyjiDbJ5/pizNbxjM7KuJ4O2JTIJZP/dWw=
 github.com/charlienet/gadget/retry v0.1.0/go.mod h1:waIa0yYJ5tJkdfPEBUiNsBQe8QxKRe7th7A1n5E+Dd4=
 github.com/cloudwego/base64x v0.1.6 h1:t11wG9AECkCDk5fMSoxmufanudBtJ+/HemLstXDLI2M=
