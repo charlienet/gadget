@@ -129,11 +129,17 @@ func validateConfig(c bigcache.Config) error {
 // previous instance is closed first so its cleanup goroutines do not leak.
 // It returns the underlying library's construction error so callers can
 // surface it explicitly instead of panicking.
+// 重建使用 Background：bigcache.New 的驱动契约要求传入 ctx，但重建发生在
+// 构造/Initialize 阶段，无调用方请求上下文可传递（豁免记录见下）。
 func (s *bigcache_store) rebuild() error {
 	if s.cache != nil {
+		// 有意丢弃：Close 失败无恢复动作——旧实例随即被新实例替换，
+		// 其清理 goroutine 泄漏与否不影响正确性，不值得为此中断重建。
 		_ = s.cache.Close()
 	}
 
+	// bigcache.New 的驱动契约要求 ctx，重建发生在构造/Initialize 阶段。
+	// 豁免：接口契约（驱动约束）无调用方 ctx 入口，此处为背景决策记录（README v0.9.0 同级）。
 	c, err := bigcache.New(context.Background(), s.config)
 	if err != nil {
 		return fmt.Errorf("bigcache: rebuild: %w", err)
@@ -192,9 +198,9 @@ func (f *bigcache_store) Put(ctx context.Context, key string, v []byte, expireSe
 	// library evicts oldest entries until it fits and, if the value alone is
 	// larger than the whole queue, wipes the entire shard before failing.
 	// Reject such writes up front with an explicit error.
-	if max := f.maxShardSize(); max > 0 && len(v) > max {
+	if limit := f.maxShardSize(); limit > 0 && len(v) > limit {
 		return fmt.Errorf("bigcache put key=%s: value size %d exceeds per-shard limit %d (HardMaxCacheSize=%dMB / Shards=%d)",
-			key, len(v), max, f.config.HardMaxCacheSize, f.config.Shards)
+			key, len(v), limit, f.config.HardMaxCacheSize, f.config.Shards)
 	}
 
 	if err := f.cache.Set(key, v); err != nil {

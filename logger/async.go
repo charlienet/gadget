@@ -2,6 +2,7 @@ package logger
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -226,7 +227,7 @@ func Close(timeout time.Duration) error {
 	var err error
 	for _, l := range ls {
 		if e := l.close(timeout); e != nil {
-			err = e
+			err = errors.Join(err, e)
 		}
 	}
 	return err

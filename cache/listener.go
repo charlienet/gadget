@@ -6,7 +6,7 @@ import "context"
 // Publish 必须在 Close 前完成；实现须保证 Publish 与 Close 并发安全。
 type Listener interface {
 	Subscribe() chan string
-	Publish(key string) error
+	Publish(ctx context.Context, key string) error
 	// Ready 返回监听器首次就绪信号（订阅/连接建立完成）。新实例对外服务前
 	// 可等待该信号，避免就绪前发布的失效消息丢失。实现必须幂等/线程安全。
 	Ready() <-chan struct{}

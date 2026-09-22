@@ -22,11 +22,11 @@ func Run(t testing.TB, fn func(rdb redis.Client)) {
 	r, clean, err := createMiniRedis()
 
 	assert.Nil(t, err, err)
-	defer clean()
+	defer clean(t)
 	fn(r)
 }
 
-func createMiniRedis() (r redis.Client, clean func(), err error) {
+func createMiniRedis() (r redis.Client, clean func(tb testing.TB), err error) {
 	mr, err := miniredis.Run()
 	if err != nil {
 		return nil, nil, err
@@ -37,8 +37,8 @@ func createMiniRedis() (r redis.Client, clean func(), err error) {
 
 	rdb := redis.New(redis.WithAddr(addr))
 
-	return rdb, func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	return rdb, func(tb testing.TB) {
+		ctx, cancel := context.WithTimeout(tb.Context(), 5*time.Second)
 		defer cancel()
 		_ = rdb.GracefulClose(ctx)
 		mr.Close()

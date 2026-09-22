@@ -73,9 +73,10 @@ func TestConcurrentPutGetDelete(t *testing.T) {
 
 	var wg sync.WaitGroup
 	for i := 0; i < goroutines; i++ {
-		wg.Add(1)
-		go func(id int) {
-			defer wg.Done()
+
+		id := i
+
+		wg.Go(func() {
 			for r := 0; r < rounds; r++ {
 				switch r % 3 {
 				case 0, 1:
@@ -101,7 +102,7 @@ func TestConcurrentPutGetDelete(t *testing.T) {
 					return
 				}
 			}
-		}(i)
+		})
 	}
 	wg.Wait()
 

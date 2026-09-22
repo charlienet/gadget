@@ -32,19 +32,20 @@ func startServer(t *testing.T) *server.Server {
 // 用例 1：Subscribe 后 Publish，handler 必须收到；Topic==subject、Body 相等。
 func TestSubscribeReceivesPublishedMessage(t *testing.T) {
 	srv := startServer(t)
+	ctx := t.Context()
 	b, err := plugin.New(plugin.WithURL(srv.ClientURL()), plugin.WithName("case1"))
 	require.NoError(t, err)
-	defer func() { assert.NoError(t, b.Close()) }()
+	defer func() { assert.NoError(t, b.Close(ctx)) }()
 
 	done := make(chan broker.Event, 8)
-	sub, err := b.Subscribe("case1.basic", func(e broker.Event) error {
+	sub, err := b.Subscribe(ctx, "case1.basic", func(e broker.Event) error {
 		done <- e
 		return nil
 	})
 	require.NoError(t, err)
-	defer func() { assert.NoError(t, sub.Unsubscribe()) }()
+	defer func() { assert.NoError(t, sub.Unsubscribe(ctx)) }()
 
-	require.NoError(t, b.Publish("case1.basic", &broker.Message{Body: "hello"}))
+	require.NoError(t, b.Publish(ctx, "case1.basic", &broker.Message{Body: "hello"}))
 
 	select {
 	case e := <-done:
@@ -61,18 +62,19 @@ func TestSubscribeReceivesPublishedMessage(t *testing.T) {
 // 用例 2：通配符订阅 foo.* 收到 foo.bar 时，Event.Topic() 必须是真实 subject。
 func TestSubscribeWildcardSubjectReportsRealTopic(t *testing.T) {
 	srv := startServer(t)
+	ctx := t.Context()
 	b, err := plugin.New(plugin.WithURL(srv.ClientURL()))
 	require.NoError(t, err)
-	defer func() { assert.NoError(t, b.Close()) }()
+	defer func() { assert.NoError(t, b.Close(ctx)) }()
 
 	done := make(chan string, 8)
-	_, err = b.Subscribe("foo.*", func(e broker.Event) error {
+	_, err = b.Subscribe(ctx, "foo.*", func(e broker.Event) error {
 		done <- e.Topic()
 		return nil
 	})
 	require.NoError(t, err)
 
-	require.NoError(t, b.Publish("foo.bar", &broker.Message{Body: "wild"}))
+	require.NoError(t, b.Publish(ctx, "foo.bar", &broker.Message{Body: "wild"}))
 
 	select {
 	case topic := <-done:
@@ -99,6 +101,7 @@ func TestNewFailsOnUnreachableURL(t *testing.T) {
 // 过渡，故经 ClosedCB 等到连接真正关闭后再断言终态错误。
 func TestPublishAfterCloseReturnsError(t *testing.T) {
 	srv := startServer(t)
+	ctx := t.Context()
 	closed := make(chan struct{})
 	b, err := plugin.New(
 		plugin.WithURL(srv.ClientURL()),
@@ -106,7 +109,7 @@ func TestPublishAfterCloseReturnsError(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	require.NoError(t, b.Close())
+	require.NoError(t, b.Close(ctx))
 
 	select {
 	case <-closed:
@@ -114,7 +117,7 @@ func TestPublishAfterCloseReturnsError(t *testing.T) {
 		t.Fatal("等待连接在 Drain 后完全关闭超时")
 	}
 
-	err = b.Publish("case4.after-close", &broker.Message{Body: "x"})
+	err = b.Publish(ctx, "case4.after-close", &broker.Message{Body: "x"})
 	require.Error(t, err)
 	assert.ErrorIs(t, err, natsgo.ErrConnectionClosed)
 }
@@ -123,6 +126,7 @@ func TestPublishAfterCloseReturnsError(t *testing.T) {
 // server shutdown 后走 FlushTimeout 路径返回 error。
 func TestSyncPublishConfirmsServerReceipt(t *testing.T) {
 	srv := startServer(t)
+	ctx := t.Context()
 	b, err := plugin.New(
 		plugin.WithURL(srv.ClientURL()),
 		plugin.WithSyncPublish(time.Second),
@@ -131,15 +135,15 @@ func TestSyncPublishConfirmsServerReceipt(t *testing.T) {
 	require.NoError(t, err)
 
 	// 服务端在线：Publish + FlushTimeout 往返确认成功
-	require.NoError(t, b.Publish("case5.sync", &broker.Message{Body: "confirm-me"}))
+	require.NoError(t, b.Publish(ctx, "case5.sync", &broker.Message{Body: "confirm-me"}))
 
 	// 服务端关闭：同步确认路径必须报错
 	srv.Shutdown()
-	err = b.Publish("case5.sync", &broker.Message{Body: "x"})
+	err = b.Publish(ctx, "case5.sync", &broker.Message{Body: "x"})
 	assert.Error(t, err, "server shutdown 后同步发布必须返回 error（FlushTimeout 路径）")
 
 	// 此处 Close 已无健康连接可 drain，容忍错误仅记录
-	if cerr := b.Close(); cerr != nil {
+	if cerr := b.Close(ctx); cerr != nil {
 		t.Logf("server shutdown 后 Close: %v", cerr)
 	}
 }
@@ -147,6 +151,7 @@ func TestSyncPublishConfirmsServerReceipt(t *testing.T) {
 // 用例 6：handler panic 被 recover 转 error 经 hook 上报；进程不崩、订阅存活。
 func TestHandlerPanicRecoveredAndReported(t *testing.T) {
 	srv := startServer(t)
+	ctx := t.Context()
 	hooks := make(chan error, 8)
 	topics := make(chan string, 8)
 	b, err := plugin.New(
@@ -157,10 +162,10 @@ func TestHandlerPanicRecoveredAndReported(t *testing.T) {
 		}),
 	)
 	require.NoError(t, err)
-	defer func() { assert.NoError(t, b.Close()) }()
+	defer func() { assert.NoError(t, b.Close(ctx)) }()
 
 	delivered := make(chan string, 8)
-	_, err = b.Subscribe("case6.panic", func(e broker.Event) error {
+	_, err = b.Subscribe(ctx, "case6.panic", func(e broker.Event) error {
 		if e.Message().Body == "boom" {
 			panic("boom")
 		}
@@ -169,7 +174,7 @@ func TestHandlerPanicRecoveredAndReported(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	require.NoError(t, b.Publish("case6.panic", &broker.Message{Body: "boom"}))
+	require.NoError(t, b.Publish(ctx, "case6.panic", &broker.Message{Body: "boom"}))
 	select {
 	case herr := <-hooks:
 		require.NotNil(t, herr)
@@ -181,7 +186,7 @@ func TestHandlerPanicRecoveredAndReported(t *testing.T) {
 	}
 
 	// 后续消息仍投递：订阅在 handler panic 后存活
-	require.NoError(t, b.Publish("case6.panic", &broker.Message{Body: "alive"}))
+	require.NoError(t, b.Publish(ctx, "case6.panic", &broker.Message{Body: "alive"}))
 	select {
 	case body := <-delivered:
 		assert.Equal(t, "alive", body, "handler panic 后订阅必须存活")
@@ -194,6 +199,7 @@ func TestHandlerPanicRecoveredAndReported(t *testing.T) {
 // 不 panic 不阻塞后续投递。
 func TestHandlerErrorReported(t *testing.T) {
 	srv := startServer(t)
+	ctx := t.Context()
 
 	type hookRecord struct {
 		topic string
@@ -207,15 +213,15 @@ func TestHandlerErrorReported(t *testing.T) {
 		}),
 	)
 	require.NoError(t, err)
-	defer func() { assert.NoError(t, b.Close()) }()
+	defer func() { assert.NoError(t, b.Close(ctx)) }()
 
 	wantErr := errors.New("handler failed")
-	_, err = b.Subscribe("case7.err", func(e broker.Event) error {
+	_, err = b.Subscribe(ctx, "case7.err", func(e broker.Event) error {
 		return wantErr
 	})
 	require.NoError(t, err)
 
-	require.NoError(t, b.Publish("case7.err", &broker.Message{Body: "x"}))
+	require.NoError(t, b.Publish(ctx, "case7.err", &broker.Message{Body: "x"}))
 	select {
 	case rec := <-hooks:
 		assert.ErrorIs(t, rec.err, wantErr, "hook 必须收到 handler 返回的原始 error")
@@ -227,17 +233,17 @@ func TestHandlerErrorReported(t *testing.T) {
 	// 无 hook：错误丢弃但不得 panic / 阻塞后续消息投递
 	b2, err := plugin.New(plugin.WithURL(srv.ClientURL()))
 	require.NoError(t, err)
-	defer func() { assert.NoError(t, b2.Close()) }()
+	defer func() { assert.NoError(t, b2.Close(ctx)) }()
 
 	count := make(chan struct{}, 8)
-	_, err = b2.Subscribe("case7.nohook", func(e broker.Event) error {
+	_, err = b2.Subscribe(ctx, "case7.nohook", func(e broker.Event) error {
 		count <- struct{}{}
 		return errors.New("dropped silently")
 	})
 	require.NoError(t, err)
 
 	for i := 0; i < 2; i++ {
-		require.NoError(t, b2.Publish("case7.nohook", &broker.Message{Body: "x"}))
+		require.NoError(t, b2.Publish(ctx, "case7.nohook", &broker.Message{Body: "x"}))
 	}
 	for i := 0; i < 2; i++ {
 		select {
@@ -251,20 +257,21 @@ func TestHandlerErrorReported(t *testing.T) {
 // 用例 8：Unsubscribe 返回后再 Publish，计数恒为 N（不再投递）。
 func TestUnsubscribeStopsDelivery(t *testing.T) {
 	srv := startServer(t)
+	ctx := t.Context()
 	b, err := plugin.New(plugin.WithURL(srv.ClientURL()))
 	require.NoError(t, err)
-	defer func() { assert.NoError(t, b.Close()) }()
+	defer func() { assert.NoError(t, b.Close(ctx)) }()
 
 	const n = 3
 	got := make(chan struct{}, 64)
-	sub, err := b.Subscribe("case8.unsub", func(e broker.Event) error {
+	sub, err := b.Subscribe(ctx, "case8.unsub", func(e broker.Event) error {
 		got <- struct{}{}
 		return nil
 	})
 	require.NoError(t, err)
 
 	for i := 0; i < n; i++ {
-		require.NoError(t, b.Publish("case8.unsub", &broker.Message{Body: "x"}))
+		require.NoError(t, b.Publish(ctx, "case8.unsub", &broker.Message{Body: "x"}))
 	}
 	for i := 0; i < n; i++ {
 		select {
@@ -274,11 +281,11 @@ func TestUnsubscribeStopsDelivery(t *testing.T) {
 		}
 	}
 
-	require.NoError(t, sub.Unsubscribe())
+	require.NoError(t, sub.Unsubscribe(ctx))
 
 	// 同步点：Unsubscribe 返回后再 publish
 	for i := 0; i < n; i++ {
-		require.NoError(t, b.Publish("case8.unsub", &broker.Message{Body: "y"}))
+		require.NoError(t, b.Publish(ctx, "case8.unsub", &broker.Message{Body: "y"}))
 	}
 	select {
 	case <-got:
@@ -293,22 +300,23 @@ func TestUnsubscribeStopsDelivery(t *testing.T) {
 // 用例 9：publish N 条后立即 Close，Drain 保证在途消息全部送达；二次 Close 返回 nil。
 func TestCloseDrainsInflight(t *testing.T) {
 	srv := startServer(t)
+	ctx := t.Context()
 	b, err := plugin.New(plugin.WithURL(srv.ClientURL()))
 	require.NoError(t, err)
 
 	const n = 5
 	got := make(chan struct{}, n)
-	_, err = b.Subscribe("case9.drain", func(e broker.Event) error {
+	_, err = b.Subscribe(ctx, "case9.drain", func(e broker.Event) error {
 		got <- struct{}{}
 		return nil
 	})
 	require.NoError(t, err)
 
 	for i := 0; i < n; i++ {
-		require.NoError(t, b.Publish("case9.drain", &broker.Message{Body: "m"}))
+		require.NoError(t, b.Publish(ctx, "case9.drain", &broker.Message{Body: "m"}))
 	}
 	// publish 后立即 Close：Drain 排空在途消息
-	require.NoError(t, b.Close())
+	require.NoError(t, b.Close(ctx))
 
 	received := 0
 	deadline := time.After(5 * time.Second)
@@ -321,12 +329,13 @@ func TestCloseDrainsInflight(t *testing.T) {
 		}
 	}
 
-	assert.NoError(t, b.Close(), "第二次 Close 必须返回 nil（幂等）")
+	assert.NoError(t, b.Close(ctx), "第二次 Close 必须返回 nil（幂等）")
 }
 
 // 用例 10：多 goroutine 混合 Subscribe/Unsubscribe/Publish，-race 无告警，Close 干净退出。
 func TestConcurrentSubscribeUnsubscribePublish(t *testing.T) {
 	srv := startServer(t)
+	ctx := t.Context()
 	b, err := plugin.New(plugin.WithURL(srv.ClientURL()), plugin.WithName("case10"))
 	require.NoError(t, err)
 
@@ -336,12 +345,11 @@ func TestConcurrentSubscribeUnsubscribePublish(t *testing.T) {
 		publishedSuccess int64
 	)
 	for i := 0; i < 4; i++ {
-		wg.Add(1)
-		go func(idx int) {
-			defer wg.Done()
+		wg.Go(func() {
+			idx := i
 			topic := fmt.Sprintf("case10.mix.%d", idx)
 			for j := 0; j < 20; j++ {
-				sub, serr := b.Subscribe(topic, func(e broker.Event) error {
+				sub, serr := b.Subscribe(ctx, topic, func(e broker.Event) error {
 					atomic.AddInt64(&received, 1)
 					return nil
 				})
@@ -349,27 +357,25 @@ func TestConcurrentSubscribeUnsubscribePublish(t *testing.T) {
 					t.Logf("并发 Subscribe 返回错误: %v", serr)
 					return
 				}
-				if uerr := sub.Unsubscribe(); uerr != nil {
+				if uerr := sub.Unsubscribe(ctx); uerr != nil {
 					t.Logf("并发 Unsubscribe 返回错误: %v", uerr)
 					return
 				}
 			}
-		}(i)
+		})
 	}
 	for i := 0; i < 2; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for j := 0; j < 50; j++ {
-				if perr := b.Publish(fmt.Sprintf("case10.mix.%d", j%4), &broker.Message{Body: "x"}); perr == nil {
+				if perr := b.Publish(ctx, fmt.Sprintf("case10.mix.%d", j%4), &broker.Message{Body: "x"}); perr == nil {
 					atomic.AddInt64(&publishedSuccess, 1)
 				}
 			}
-		}()
+		})
 	}
 	wg.Wait()
 
-	assert.NoError(t, b.Close(), "Close 必须干净退出")
+	assert.NoError(t, b.Close(ctx), "Close 必须干净退出")
 	assert.Greater(t, atomic.LoadInt64(&publishedSuccess), int64(0))
 	// received 计数取决于并发时序，本用例核心断言是 -race 无告警且不死锁
 }

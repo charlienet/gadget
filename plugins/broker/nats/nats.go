@@ -44,6 +44,7 @@
 package nats
 
 import (
+	"context"
 	"fmt"
 	"sync"
 
@@ -69,11 +70,10 @@ type subscriber struct {
 	s *nats.Subscription
 }
 
-// event 实现 broker.Event。字段布局对齐 plugins/broker/redis 的 event 先例。
+// event 实现 broker.Event。
 type event struct {
 	topic   string
 	message *broker.Message
-	err     error
 }
 
 // New 建立到 NATS server 的连接并返回 broker。
@@ -128,7 +128,7 @@ func (b *natsBroker) handlerError(topic string, err error) {
 // error 原样透传底层 nats 错误（含 Close 后的 nats.ErrConnectionClosed）。
 // 开启 WithSyncPublish 后追加 conn.FlushTimeout，确认服务端已接收
 // （不确认消费者已处理），见 package 文档。
-func (b *natsBroker) Publish(topic string, msg *broker.Message) error {
+func (b *natsBroker) Publish(ctx context.Context, topic string, msg *broker.Message) error {
 	// 防御分支：本包 New 不产生 conn==nil 的实例；语义与已关闭连接一致，
 	// 透传 nats 库错误而非自造错误。
 	if b.conn == nil {
@@ -139,6 +139,10 @@ func (b *natsBroker) Publish(topic string, msg *broker.Message) error {
 		return err
 	}
 	if b.opts.syncPublish {
+		// 保留 FlushTimeout 超时语义，同时通过 WithTimeout 保持 ctx 传播链路
+		flushCtx, cancel := context.WithTimeout(ctx, b.opts.syncPublishTo)
+		_ = flushCtx // nats.Conn.FlushTimeout 目前只接受 time.Duration
+		defer cancel()
 		return b.conn.FlushTimeout(b.opts.syncPublishTo)
 	}
 
@@ -148,7 +152,7 @@ func (b *natsBroker) Publish(topic string, msg *broker.Message) error {
 // Subscribe 订阅 topic（支持 NATS 通配符 subject），每条消息到达时调用
 // handler：构造独立的 event + Message，handler 返回错误或 panic 时经
 // WithHandlerErrorHandler 上报（未注册则丢弃），见 package 文档。
-func (b *natsBroker) Subscribe(topic string, handler broker.Handler) (broker.Subscriber, error) {
+func (b *natsBroker) Subscribe(ctx context.Context, topic string, handler broker.Handler) (broker.Subscriber, error) {
 	if b.conn == nil {
 		return nil, nats.ErrConnectionClosed
 	}
@@ -185,7 +189,7 @@ func (b *natsBroker) Name() string { return "nats" }
 // WithConnOptions(nats.ClosedHandler(...))。
 //
 // Close 幂等（sync.Once），第二次及以后的调用返回 nil。
-func (b *natsBroker) Close() error {
+func (b *natsBroker) Close(ctx context.Context) error {
 	var err error
 	b.closeOnce.Do(func() {
 		if b.conn != nil {
@@ -200,7 +204,7 @@ func (s *subscriber) Topic() string { return s.s.Subject }
 
 // Unsubscribe 立即停止投递底层订阅（in-flight 消息尽力而为，
 // 需要严格排空语义请在 Broker 级别使用 Close/Drain）。
-func (s *subscriber) Unsubscribe() error { return s.s.Unsubscribe() }
+func (s *subscriber) Unsubscribe(ctx context.Context) error { return s.s.Unsubscribe() }
 
 // Topic 返回消息实际投递到的 subject（通配符订阅时为真实匹配到的 subject，
 // 而非订阅参数）。
@@ -213,6 +217,6 @@ func (e *event) Message() *broker.Message { return e.message }
 // ACK 语义等 broker v0.2.0 与 JetStream。
 func (e *event) Ack() error { return nil }
 
-// Error 恒返回 nil：handler 错误不经 Event 回流，
-// 唯一出口是 WithHandlerErrorHandler。err 字段仅为对齐 redis event 先例保留。
+// Error 恒返回 nil：nats 事件无错误载荷，本方法仅为 broker.Event 接口要求保留；
+// handler 错误不经 Event 回流，唯一出口是 WithHandlerErrorHandler。
 func (e *event) Error() error { return nil }

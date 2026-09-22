@@ -3,6 +3,7 @@ package redis
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -88,7 +89,7 @@ var dequeueScript = goredis.NewScript(`
 func (q *DelayedQueue) Dequeue(ctx context.Context) (string, bool, error) {
 	now := time.Now().UnixMilli()
 	payload, err := dequeueScript.Run(ctx, q.client, []string{q.key}, now).Result()
-	if err == goredis.Nil {
+	if errors.Is(err, goredis.Nil) {
 		return "", false, nil
 	}
 	if err != nil {
@@ -124,7 +125,7 @@ func (q *DelayedQueue) DequeueBatch(ctx context.Context, count int) ([]string, e
 
 	now := time.Now().UnixMilli()
 	items, err := dequeueBatchScript.Run(ctx, q.client, []string{q.key}, now, count).StringSlice()
-	if err == goredis.Nil {
+	if errors.Is(err, goredis.Nil) {
 		return []string{}, nil
 	}
 	if err != nil {

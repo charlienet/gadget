@@ -59,7 +59,7 @@ func TestSS(t *testing.T) {
 		c := "abc"
 		c2 := "abc:dddd"
 		r := NewListener(rdb, c)
-		defer func() { _ = r.Close(context.Background()) }()
+		defer func() { _ = r.Close(t.Context()) }()
 
 		// 发布 10 条随机 key 作为预期收到的消息集合
 		published := make([]string, 0, 10)
@@ -84,7 +84,7 @@ func TestSS(t *testing.T) {
 		// 等待订阅建立后发布，避免消息在订阅前发出而丢失
 		waitReady(t, r)
 		for _, key := range published {
-			_ = r.Publish(key)
+			_ = r.Publish(t.Context(), key)
 		}
 
 		// 发布到其他 channel 的消息不应被本监听器收到
@@ -124,7 +124,7 @@ func TestCacheWatch(t *testing.T) {
 	channel := "abcdef"
 	test.RunOnRedis(t, func(rdb redis.Client) {
 		lis := NewListener(rdb, channel)
-		defer func() { _ = lis.Close(context.Background()) }()
+		defer func() { _ = lis.Close(t.Context()) }()
 
 		c := cache.New(cache.WithMemStore(), cache.WithListener(lis))
 		defer c.Close()
@@ -132,20 +132,20 @@ func TestCacheWatch(t *testing.T) {
 		key := "abc"
 
 		// 写入并命中本地缓存
-		assert.NoError(t, c.Put(context.Background(), key, "hello", 60))
+		assert.NoError(t, c.Put(t.Context(), key, "hello", 60))
 		var s string
-		assert.NoError(t, c.Get(context.Background(), key, &s))
+		assert.NoError(t, c.Get(t.Context(), key, &s))
 		assert.Equal(t, "hello", s)
 
 		// 发布失效通知前等待订阅建立（避免消息在订阅前发布而丢失，
 		// 本地缓存将残留旧数据直到 TTL 过期）
 		waitReady(t, lis)
-		assert.NoError(t, lis.Publish(key))
+		assert.NoError(t, lis.Publish(t.Context(), key))
 
 		deadline := time.Now().Add(3 * time.Second)
 		for {
 			var s2 string
-			err := c.Get(context.Background(), key, &s2)
+			err := c.Get(t.Context(), key, &s2)
 			if errors.Is(err, cache.ErrEntityNotExist) {
 				break // 本地缓存已被清除
 			}
@@ -163,11 +163,11 @@ func TestCacheWatch(t *testing.T) {
 func TestListenerReconnection(t *testing.T) {
 	test.RunOnRedis(t, func(rdb redis.Client) {
 		lis := NewListener(rdb, "test-reconnect-channel")
-		defer func() { _ = lis.Close(context.Background()) }()
+		defer func() { _ = lis.Close(t.Context()) }()
 
 		// 等待订阅建立后再发布（at-most-once：订阅前的消息会丢失）
 		waitReady(t, lis)
-		err := lis.Publish("test-key")
+		err := lis.Publish(t.Context(), "test-key")
 		if err != nil {
 			t.Fatalf("publish failed: %v", err)
 		}

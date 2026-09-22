@@ -22,6 +22,8 @@ const (
 )
 
 // GetLevel 解析级别字符串（保留原有 API，返回类型不变）
+//
+// Deprecated: 使用 ParseLevel。
 func GetLevel(levelStr string) (Level, error) {
 	switch strings.ToUpper(levelStr) {
 	case "TRACE":

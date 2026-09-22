@@ -2,6 +2,8 @@ package logger
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"os"
@@ -10,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // --- M-2：New 替换默认实例前关闭旧实例（flush 异步队列 + 注册表不累积）---
@@ -101,6 +104,131 @@ func TestConcurrentNewRegistryChurn(t *testing.T) {
 	if inst != nil {
 		_ = inst.close(0)
 	}
+}
+
+// --- errors.Join：多实例关闭错误全部保留 ---
+
+// blockingWriter 同 lifecycle_test.go：首次 Write 阻塞，由外部 close(hold) 放行。
+type blockingWriter struct {
+	once    sync.Once
+	started chan struct{}
+	hold    chan struct{}
+}
+
+func (w *blockingWriter) Write(p []byte) (int, error) {
+	w.once.Do(func() { close(w.started) })
+	<-w.hold
+	return len(p), nil
+}
+
+// TestSlogLoggerCloseJoinsAllErrors 验证 slogLogger.close 在 async 超时（返回错误）
+// 且 fileCloser 也返回错误时，两者均被 errors.Join 合并，errors.Is 可双双命中。
+func TestSlogLoggerCloseJoinsAllErrors(t *testing.T) {
+	// blockingWriter 让 AsyncHandler 消费 goroutine 阻塞 → Close 超时 → 返回错误
+	bw := &blockingWriter{started: make(chan struct{}), hold: make(chan struct{})}
+	h := NewAsyncHandler(slog.NewTextHandler(bw, nil), 4, false)
+
+	// 触发消费：第一条 Write 阻塞
+	go func() {
+		rec := slog.NewRecord(time.Now(), slog.LevelInfo, "hold", 0)
+		_ = h.Handle(context.Background(), rec)
+	}()
+	<-bw.started // 确认消费 goroutine 已进入 Write 阻塞
+
+	l := &slogLogger{
+		opt:        Options{Async: true},
+		level:      NewDynamicLevel(slog.LevelInfo),
+		slog:       slog.New(h),
+		async:      h,
+		fileWriter: io.Discard,
+		fileCloser: errCloser{}, // Close 永远返回 errors.New("closer boom")
+		closeOnce:  sync.Once{},
+	}
+
+	err := l.close(20 * time.Millisecond)
+	if err == nil {
+		t.Fatal("expected non-nil error when both async timeout and fileCloser fail")
+	}
+	// fileCloser 固定错误（errCloser 来自同包 console_internal_test.go）
+	if !errors.Is(err, errCloserError) {
+		t.Errorf("errors.Is(err, errCloserError) = false; want true. err=%v", err)
+	}
+	// async 超时错误也在链中
+	if !strings.Contains(err.Error(), "not drained") {
+		t.Errorf("expected async timeout error in chain, got: %v", err)
+	}
+	// 放行消费 goroutine 避免泄漏
+	close(bw.hold)
+}
+
+// TestPackageCloseJoinsAllErrors 验证包级 Close 在多个 slogLogger 实例均失败时，
+// errors.Join 合并的错误链中 errors.Is 可同时命中每个实例的错误。
+func TestPackageCloseJoinsAllErrors(t *testing.T) {
+	// 保存并恢复默认状态
+	defaultMu.Lock()
+	prevInst := defaultInstance
+	prevLeveler := defaultLeveler
+	defaultMu.Unlock()
+	t.Cleanup(func() {
+		defaultMu.Lock()
+		defaultInstance, defaultLeveler = prevInst, prevLeveler
+		defaultMu.Unlock()
+	})
+
+	// 实例 1：async 超时（blockingWriter → Close 超时）
+	bw1 := &blockingWriter{started: make(chan struct{}), hold: make(chan struct{})}
+	h1 := NewAsyncHandler(slog.NewTextHandler(bw1, nil), 4, false)
+	go func() {
+		rec := slog.NewRecord(time.Now(), slog.LevelInfo, "hold1", 0)
+		_ = h1.Handle(context.Background(), rec)
+	}()
+	<-bw1.started
+
+	l1 := &slogLogger{
+		opt:        Options{Async: true},
+		level:      NewDynamicLevel(slog.LevelInfo),
+		slog:       slog.New(h1),
+		async:      h1,
+		fileWriter: io.Discard,
+		fileCloser: errCloser{}, // fileCloser 成功（errCloser 的失败用错误内容匹配，非 errors.Is）
+		closeOnce:  sync.Once{},
+	}
+	registerLogger(l1)
+	t.Cleanup(func() { unregisterLogger(l1) })
+
+	// 实例 2：fileCloser 失败（async 正常关闭，fileCloser 失败）
+	bw2 := &blockingWriter{started: make(chan struct{}), hold: make(chan struct{})}
+	h2 := NewAsyncHandler(slog.NewTextHandler(bw2, nil), 4, false)
+	// 立即放行 h2 的消费：async 正常排空
+	close(bw2.hold)
+
+	l2 := &slogLogger{
+		opt:        Options{Async: true},
+		level:      NewDynamicLevel(slog.LevelInfo),
+		slog:       slog.New(h2),
+		async:      h2,
+		fileWriter: io.Discard,
+		fileCloser: errCloser{}, // Close 永远返回 errors.New("closer boom")
+		closeOnce:  sync.Once{},
+	}
+	registerLogger(l2)
+	t.Cleanup(func() { unregisterLogger(l2) })
+
+	err := Close(20 * time.Millisecond)
+	if err == nil {
+		t.Fatal("expected non-nil error from package Close with failing instances")
+	}
+	// 实例 1 的 async 超时错误（l1.close 返回）
+	if !strings.Contains(err.Error(), "not drained") {
+		t.Errorf("expected async timeout error in chain, got: %v", err)
+	}
+	// 实例 2 的 fileCloser 固定错误（errors.Is 可命中）
+	if !errors.Is(err, errCloserError) {
+		t.Errorf("errors.Is(err, errCloserError) = false; want true. err=%v", err)
+	}
+
+	// 放行实例 1 的消费 goroutine 避免泄漏
+	close(bw1.hold)
 }
 
 // --- 文件输出格式（JSON / Text 后端分流，见 newFileHandler / FileFormat 枚举）---

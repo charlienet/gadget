@@ -10,8 +10,6 @@ import (
 // 先例，不加 recover）。同一 tick 顺带驱动 memoryBackend.buckets 的条目
 // 回收（sweepOnce 内 reapIdle），故后端无需自持协程，防 goroutine 泄漏。
 func (l *Limiter) sweepLoop() {
-	defer l.wg.Done()
-
 	interval := l.spec.IdleRetention / 2
 	if interval <= 0 {
 		interval = time.Second

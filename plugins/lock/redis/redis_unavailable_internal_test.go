@@ -71,7 +71,7 @@ func TestTryAcquireUnavailableWrapping(t *testing.T) {
 	defer client.Close()
 	b := New(client)
 
-	ok, err := b.TryAcquire(context.Background(), "gadget-lock-test:unavailable", "tok", time.Second)
+	ok, err := b.TryAcquire(t.Context(), "gadget-lock-test:unavailable", "tok", time.Second)
 	if err == nil {
 		t.Fatal("不可达后端必须报错")
 	}

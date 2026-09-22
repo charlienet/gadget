@@ -1,6 +1,7 @@
 package redis
 
 import (
+	"slices"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -50,7 +51,7 @@ func WithAddr(addr string) Option {
 // WithAddrs 设置多地址列表（集群节点种子等）。
 func WithAddrs(addrs []string) Option {
 	return func(o *RedisOptions) {
-		o.Addrs = addrs
+		o.Addrs = slices.Clone(addrs)
 	}
 }
 

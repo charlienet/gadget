@@ -135,7 +135,7 @@ func isBusinessCmd(name string) bool {
 
 // TestRetryDisabledByDefault 用例1：不传 WithRetry，注入 1 次失败后 Get → 返回错误、calls==1（无重试）。
 func TestRetryDisabledByDefault(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 
 	h := newFlaky(1)
 	_, s := newTestStore(t, h) // 默认关闭重试（不传 WithRetry）
@@ -146,7 +146,7 @@ func TestRetryDisabledByDefault(t *testing.T) {
 
 // TestRetryMissNotRetried 用例2：WithRetry 下 Get 不存在 key → (空,false,nil)、calls==1（miss 不重试）。
 func TestRetryMissNotRetried(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 
 	h := newFlaky(0) // 全程透传，仅统计调用次数
 	_, s := newTestStore(t, h, WithRetry())
@@ -159,7 +159,7 @@ func TestRetryMissNotRetried(t *testing.T) {
 
 // TestRetryWrongTypeNotRetried 用例3：WRONGTYPE 命令级错误立即返回、calls==1（不重试）。
 func TestRetryWrongTypeNotRetried(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 
 	h := newFlaky(0)
 	rdb, s := newTestStore(t, h, WithRetry())
@@ -175,7 +175,7 @@ func TestRetryWrongTypeNotRetried(t *testing.T) {
 
 // TestRetryTransientThenSuccess 用例4：注入 2 次失败后第 3 次成功，覆盖各方法，calls==3。
 func TestRetryTransientThenSuccess(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 
 	h := newFlaky(0)
 	rdb, s := newTestStore(t, h, WithRetry())
@@ -234,7 +234,7 @@ func TestRetryTransientThenSuccess(t *testing.T) {
 
 // TestRetryExhausted 用例5：恒注入 → 重试耗尽返回原始 OpError、calls==3。
 func TestRetryExhausted(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 
 	h := newFlaky(-1) // 恒定注入
 	_, s := newTestStore(t, h, WithRetry())
@@ -248,7 +248,7 @@ func TestRetryExhausted(t *testing.T) {
 
 // TestRetryUserOverrideAttempts 用例6：WithRetry(WithMaxAttempts(2)) + 恒注入 → calls==2（用户覆盖默认 3）。
 func TestRetryUserOverrideAttempts(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 
 	h := newFlaky(-1) // 恒定注入
 	_, s := newTestStore(t, h, WithRetry(retry.WithMaxAttempts(2)))
@@ -261,6 +261,7 @@ func TestRetryUserOverrideAttempts(t *testing.T) {
 // TestRetryCtxDeadline 用例7：恒注入 + MaxAttempts(5) + Fixed(50ms) + ~120ms deadline
 // → 返回 context.DeadlineExceeded、calls < 5（退避期间 ctx 到期，返回 ctx.Err 而非网络错误）。
 func TestRetryCtxDeadline(t *testing.T) {
+	// 保留：本用例测取消/超时语义（退避期间 ctx 到期），不能用 t.Context()
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Millisecond)
 	defer cancel()
 
@@ -279,7 +280,7 @@ func TestRetryCtxDeadline(t *testing.T) {
 // TestRetrySetMultiExpireNoAmplification 用例8：SetMulti(expire>0) 走循环内 r.Put（已含重试），
 // 不再外层套 r.do。恒注入下首个 Put 重试 3 次即失败返回，总 calls==3（证明无 3×3 放大）。
 func TestRetrySetMultiExpireNoAmplification(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 
 	h := newFlaky(-1) // 恒定注入
 	_, s := newTestStore(t, h, WithRetry())
@@ -301,7 +302,7 @@ func TestRetrySetMultiExpireNoAmplification(t *testing.T) {
 // 改为「无注入并发压测」，仍全程走 retryOn=true 的 do/新建退避路径，稳定验证 race 与
 // 结果正确性；「重试后成功」的语义由用例4 在单线程 hook 注入下覆盖。
 func TestRetryConcurrent(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 
 	const goroutines = 50
 
@@ -311,6 +312,7 @@ func TestRetryConcurrent(t *testing.T) {
 
 	var wg sync.WaitGroup
 	errCh := make(chan error, goroutines*2)
+	// 动态计数（goroutines 是变量），保留 Add/Done 模式
 	wg.Add(goroutines)
 	for i := 0; i < goroutines; i++ {
 		go func(i int) {
@@ -359,7 +361,7 @@ func TestRetryConcurrent(t *testing.T) {
 // 聚焦「并发 × 重试循环」，须关闭熔断以隔离该干扰；熔断与重试的分层关系见 redis.go 的 do。
 // 注：calls 断言在 wg.Wait() 后、无任何其它业务命令时读取，保证精确等于 N*3。
 func TestRetryConcurrentExhausted(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 
 	mr, err := miniredis.Run()
 	require.NoError(t, err)
@@ -378,6 +380,7 @@ func TestRetryConcurrentExhausted(t *testing.T) {
 
 	var wg sync.WaitGroup
 	errs := make([]error, n) // 各 goroutine 写独立下标，无数据竞争
+	// 动态计数（n 是变量），保留 Add/Done 模式
 	wg.Add(n)
 	for i := 0; i < n; i++ {
 		go func(i int) {

@@ -28,7 +28,7 @@ func TestLoadFromFunc(t *testing.T) {
 
 	c := cache.New()
 
-	ctx := context.Background()
+	ctx := t.Context()
 	v := cacheItem{}
 
 	loadfn := func(ctx context.Context, key string, v any) (bool, error) {
@@ -74,9 +74,10 @@ func TestGetFromFn(t *testing.T) {
 	}
 
 	var wg = new(sync.WaitGroup)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	g := 10
+	// 动态计数（g 是变量），保留 Add/Done 模式
 	wg.Add(g)
 	for range g {
 		go func() {
@@ -90,7 +91,6 @@ func TestGetFromFn(t *testing.T) {
 			assert.Equal(t, j, struct2Json(u))
 		}()
 	}
-
 	wg.Wait()
 	t.Log("shared:", c.Stats().Shared)
 }
@@ -101,7 +101,7 @@ func TestNotExistEntity(t *testing.T) {
 	var s string
 
 	f := func() error {
-		return c.Getfn(context.Background(), key, &s, func(ctx context.Context, key string, v any) (bool, error) {
+		return c.Getfn(t.Context(), key, &s, func(ctx context.Context, key string, v any) (bool, error) {
 			return false, nil
 		}, 100)
 	}
@@ -114,7 +114,7 @@ func TestNotExistEntity(t *testing.T) {
 func TestNoCache(t *testing.T) {
 	c := cache.New()
 
-	ctx := context.Background()
+	ctx := t.Context()
 	var item cacheItem
 
 	t.Log(c.Getfn(ctx, "ttt", &item, func(ctx context.Context, key string, v any) (bool, error) {
@@ -133,7 +133,7 @@ func TestNoCache(t *testing.T) {
 
 func TestSourceError(t *testing.T) {
 	c := cache.New()
-	t.Log(c.Getfn(context.Background(), "abc", map[string]any{}, func(ctx context.Context, key string, v any) (bool, error) {
+	t.Log(c.Getfn(t.Context(), "abc", map[string]any{}, func(ctx context.Context, key string, v any) (bool, error) {
 		return false, errors.New("data source load error")
 	}, 20))
 
@@ -213,7 +213,7 @@ func newMockListener() *mockListener {
 }
 
 func (l *mockListener) Subscribe() chan string { return l.ch }
-func (l *mockListener) Publish(key string) error {
+func (l *mockListener) Publish(ctx context.Context, key string) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.published = append(l.published, key)
@@ -239,7 +239,7 @@ func (l *mockListener) Close(ctx context.Context) error {
 
 func TestPutAndGet(t *testing.T) {
 	c := cache.New(cache.WithMemStore())
-	ctx := context.Background()
+	ctx := t.Context()
 
 	err := c.Put(ctx, "testkey", "hello", 60)
 	assert.Nil(t, err)
@@ -253,13 +253,13 @@ func TestPutAndGet(t *testing.T) {
 func TestGetNonExistent(t *testing.T) {
 	c := cache.New(cache.WithMemStore())
 	var s string
-	err := c.Get(context.Background(), "nonexistent", &s)
+	err := c.Get(t.Context(), "nonexistent", &s)
 	assert.ErrorIs(t, err, cache.ErrEntityNotExist)
 }
 
 func TestDelete(t *testing.T) {
 	c := cache.New(cache.WithMemStore())
-	ctx := context.Background()
+	ctx := t.Context()
 
 	_ = c.Put(ctx, "key1", "val1", 60)
 	_ = c.Put(ctx, "key2", "val2", 60)
@@ -285,7 +285,7 @@ func TestMultiLevelCache(t *testing.T) {
 		func(o *cache.Options) { o.WithStore(local) },
 		func(o *cache.Options) { o.WithStore(remote) },
 	)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	// Put to both
 	_ = c.Put(ctx, "key", "value", 60)
@@ -301,7 +301,7 @@ func TestRemoteFallback(t *testing.T) {
 	local := newMockStore("local", false)
 	remote := newMockStore("remote", true)
 
-	_ = remote.Put(context.Background(), "remotekey", []byte("\"remoteval\""), 60)
+	_ = remote.Put(t.Context(), "remotekey", []byte("\"remoteval\""), 60)
 
 	c := cache.New(
 		func(o *cache.Options) { o.WithStore(local) },
@@ -309,20 +309,20 @@ func TestRemoteFallback(t *testing.T) {
 	)
 
 	var s string
-	err := c.Get(context.Background(), "remotekey", &s)
+	err := c.Get(t.Context(), "remotekey", &s)
 	assert.Nil(t, err)
 	assert.Equal(t, "remoteval", s)
 
 	// Should now be in local store too (write-back)
 	// Note: local store has version-prefixed data, so read through cache
 	var cached string
-	assert.Nil(t, c.Get(context.Background(), "remotekey", &cached))
+	assert.Nil(t, c.Get(t.Context(), "remotekey", &cached))
 	assert.Equal(t, "remoteval", cached)
 }
 
 func TestGetfnLoadFnCalledOnMiss(t *testing.T) {
 	c := cache.New(cache.WithMemStore())
-	ctx := context.Background()
+	ctx := t.Context()
 
 	called := false
 	loadFn := func(ctx context.Context, key string, v any) (bool, error) {
@@ -350,7 +350,7 @@ func TestGetfnLoadFnCalledOnMiss(t *testing.T) {
 
 func TestGetfnLoadFnError(t *testing.T) {
 	c := cache.New()
-	ctx := context.Background()
+	ctx := t.Context()
 
 	callCount := 0
 	loadFn := func(ctx context.Context, key string, v any) (bool, error) {
@@ -374,7 +374,7 @@ func TestGetfnOtherErrorStillNotCached(t *testing.T) {
 	// 错误语义边界：loadFn 返回任何 error 一律视为真实失败——直接返回、
 	// 不写占位不缓存，二次调用重试 fn（"错误不拦截"行为固化）。
 	c := cache.New(cache.WithMemStore())
-	ctx := context.Background()
+	ctx := t.Context()
 
 	callCount := 0
 	loadFn := func(ctx context.Context, key string, v any) (bool, error) {
@@ -395,7 +395,7 @@ func TestGetfnOtherErrorStillNotCached(t *testing.T) {
 
 func TestGetfnSourceNotFound(t *testing.T) {
 	c := cache.New(cache.WithMemStore())
-	ctx := context.Background()
+	ctx := t.Context()
 
 	callCount := 0
 	loadFn := func(ctx context.Context, key string, v any) (bool, error) {
@@ -417,7 +417,7 @@ func TestGetfnSourceNotFound(t *testing.T) {
 
 func TestPreLoad(t *testing.T) {
 	c := cache.New(cache.WithMemStore())
-	ctx := context.Background()
+	ctx := t.Context()
 
 	err := c.PreLoad(ctx, func(ctx context.Context) (map[string]any, error) {
 		return map[string]any{
@@ -439,7 +439,7 @@ func TestPreLoad(t *testing.T) {
 func TestPreLoadError(t *testing.T) {
 	c := cache.New()
 	expectedErr := errors.New("preload failed")
-	err := c.PreLoad(context.Background(), func(ctx context.Context) (map[string]any, error) {
+	err := c.PreLoad(t.Context(), func(ctx context.Context) (map[string]any, error) {
 		return nil, expectedErr
 	}, 60)
 	assert.ErrorIs(t, err, expectedErr)
@@ -451,7 +451,7 @@ func TestDeleteViaListener(t *testing.T) {
 		cache.WithMemStore(),
 		cache.WithListener(lis),
 	)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	_ = c.Put(ctx, "listenerkey", "value", 60)
 
@@ -459,7 +459,7 @@ func TestDeleteViaListener(t *testing.T) {
 	assert.Nil(t, c.Get(ctx, "listenerkey", &s))
 
 	// Simulate invalidation from another instance
-	_ = lis.Publish("listenerkey")
+	_ = lis.Publish(t.Context(), "listenerkey")
 	time.Sleep(100 * time.Millisecond) // allow watcher to process
 
 	err := c.Get(ctx, "listenerkey", &s)
@@ -471,7 +471,7 @@ func TestStats(t *testing.T) {
 	c := cache.New(
 		func(o *cache.Options) { o.WithStore(local) },
 	)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	_ = c.Put(ctx, "statkey", "value", 60)
 
@@ -484,7 +484,7 @@ func TestStats(t *testing.T) {
 
 func TestInvalidateThenGet(t *testing.T) {
 	c := cache.New(cache.WithMemStore())
-	ctx := context.Background()
+	ctx := t.Context()
 
 	_ = c.Put(ctx, "updatekey", "old", 60)
 
@@ -504,7 +504,7 @@ func TestInvalidateThenGet(t *testing.T) {
 
 func TestInvalidateError(t *testing.T) {
 	c := cache.New(cache.WithMemStore())
-	ctx := context.Background()
+	ctx := t.Context()
 
 	_ = c.Put(ctx, "errorkey", "value", 60)
 	err := c.Invalidate(ctx, func(ctx context.Context) ([]string, error) {
@@ -530,7 +530,7 @@ func TestWithTTL(t *testing.T) {
 
 func TestConcurrentGetfn(t *testing.T) {
 	c := cache.New(cache.WithMemStore())
-	ctx := context.Background()
+	ctx := t.Context()
 
 	var mu sync.Mutex
 	loadCount := 0
@@ -548,14 +548,12 @@ func TestConcurrentGetfn(t *testing.T) {
 
 	var wg sync.WaitGroup
 	for i := 0; i < 10; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			var result string
 			// Use same key to test singleflight dedup
 			assert.Nil(t, c.Getfn(ctx, "concurrentkey", &result, loadFn, 60))
 			assert.Equal(t, "concurrent", result)
-		}()
+		})
 	}
 	wg.Wait()
 
@@ -572,7 +570,7 @@ func TestConcurrentGetfnSourceNotFound(t *testing.T) {
 	//   需要校验），不再访问 remote → 占位在 L1 生效，后续调用不穿透到 fn；
 	// - respond 对占位返回 ErrEntityNotExist。
 	c := cache.New(cache.WithMemStore())
-	ctx := context.Background()
+	ctx := t.Context()
 
 	var mu sync.Mutex
 	callCount := 0
@@ -588,13 +586,11 @@ func TestConcurrentGetfnSourceNotFound(t *testing.T) {
 	var wg sync.WaitGroup
 	errs := make(chan error, 10)
 	for i := 0; i < 10; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			<-start
 			var s string
 			errs <- c.Getfn(ctx, "missing", &s, loadFn, 60)
-		}()
+		})
 	}
 	close(start) // 同时释放所有 goroutine
 	wg.Wait()
@@ -618,7 +614,7 @@ func TestConcurrentGetfnLoadFnError(t *testing.T) {
 	//   不写占位）；sg.Do 完成后 Forget → 后续调用同 key 会重新执行 fn。
 	// - 因此"fn 失败不缓存、下次调用重试"是固化的错误语义。
 	c := cache.New(cache.WithMemStore())
-	ctx := context.Background()
+	ctx := t.Context()
 
 	srcErr := errors.New("source unavailable")
 	var mu sync.Mutex
@@ -635,13 +631,11 @@ func TestConcurrentGetfnLoadFnError(t *testing.T) {
 	var wg sync.WaitGroup
 	errs := make(chan error, 10)
 	for i := 0; i < 10; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			<-start
 			var s string
 			errs <- c.Getfn(ctx, "errkey", &s, loadFn, 60)
-		}()
+		})
 	}
 	close(start)
 	wg.Wait()
@@ -665,7 +659,7 @@ func TestConcurrentGetfnWaitersBlockUntilLeaderDone(t *testing.T) {
 	// 全流程（cache.go Getfn），waiter 在 Do 上阻塞直到 leader 闭包完成，
 	// 因此所有调用方的返回时间都晚于 fn 的完成时间。
 	c := cache.New(cache.WithMemStore())
-	ctx := context.Background()
+	ctx := t.Context()
 
 	var fnStart, fnEnd atomic.Int64
 	var mu sync.Mutex
@@ -689,15 +683,13 @@ func TestConcurrentGetfnWaitersBlockUntilLeaderDone(t *testing.T) {
 	returns := make(chan int64, n)
 	var wg sync.WaitGroup
 	for i := 0; i < n; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			<-start
 			var result string
 			assert.Nil(t, c.Getfn(ctx, "waitkey", &result, loadFn, 60))
 			assert.Equal(t, "waited", result)
 			returns <- time.Now().UnixNano()
-		}()
+		})
 	}
 	close(start)
 	wg.Wait()
@@ -745,20 +737,18 @@ func TestConcurrentGetDedupsRemoteAccess(t *testing.T) {
 		cache.WithMemStore(),
 		func(o *cache.Options) { o.WithStore(remote) },
 	)
-	ctx := context.Background()
+	ctx := t.Context()
 	_ = remote.Put(ctx, "k", []byte(`"value"`), 60)
 
 	start := make(chan struct{})
 	var wg sync.WaitGroup
 	errs := make(chan error, 8)
 	for i := 0; i < 8; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			<-start
 			var s string
 			errs <- c.Get(ctx, "k", &s)
-		}()
+		})
 	}
 	close(start)
 	wg.Wait()
@@ -788,7 +778,7 @@ func TestConcurrentGetMultiDedupsRemoteAccessBulk(t *testing.T) {
 		cache.WithMemStore(),
 		func(o *cache.Options) { o.WithStore(remote) },
 	)
-	ctx := context.Background()
+	ctx := t.Context()
 	keys := []string{"k1", "k2", "k3"}
 	for i, k := range keys {
 		_ = remote.Put(ctx, k, []byte(fmt.Sprintf(`"v%d"`, i)), 60)
@@ -799,14 +789,12 @@ func TestConcurrentGetMultiDedupsRemoteAccessBulk(t *testing.T) {
 	errs := make(chan error, 8)
 	results := make(chan map[string]any, 8)
 	for i := 0; i < 8; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			<-start
 			res, err := c.GetMulti(ctx, keys...)
 			errs <- err
 			results <- res
-		}()
+		})
 	}
 	close(start)
 	wg.Wait()
@@ -835,7 +823,7 @@ func TestConcurrentGetMultiDedupsRemoteAccessFallback(t *testing.T) {
 		func(o *cache.Options) { o.WithStore(local) },
 		func(o *cache.Options) { o.WithStore(remote) },
 	)
-	ctx := context.Background()
+	ctx := t.Context()
 	keys := []string{"k1", "k2"}
 	for i, k := range keys {
 		_ = remote.Put(ctx, k, []byte(fmt.Sprintf(`"f%d"`, i)), 60)
@@ -846,14 +834,12 @@ func TestConcurrentGetMultiDedupsRemoteAccessFallback(t *testing.T) {
 	errs := make(chan error, 8)
 	results := make(chan map[string]any, 8)
 	for i := 0; i < 8; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			<-start
 			res, err := c.GetMulti(ctx, keys...)
 			errs <- err
 			results <- res
-		}()
+		})
 	}
 	close(start)
 	wg.Wait()
@@ -884,7 +870,7 @@ func TestConcurrentGetfnRemoteSlowFnFast(t *testing.T) {
 		cache.WithMemStore(),
 		func(o *cache.Options) { o.WithStore(remote) },
 	)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	var mu sync.Mutex
 	loadCount := 0
@@ -902,14 +888,12 @@ func TestConcurrentGetfnRemoteSlowFnFast(t *testing.T) {
 	start := make(chan struct{})
 	var wg sync.WaitGroup
 	for i := 0; i < 8; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			<-start
 			var result string
 			assert.Nil(t, c.Getfn(ctx, "slowremote-key", &result, loadFn, 60))
 			assert.Equal(t, "fast", result)
-		}()
+		})
 	}
 	close(start)
 	wg.Wait()
@@ -920,7 +904,7 @@ func TestConcurrentGetfnRemoteSlowFnFast(t *testing.T) {
 
 func TestMemStoreClose(t *testing.T) {
 	c := cache.New(cache.WithMemStore())
-	ctx := context.Background()
+	ctx := t.Context()
 
 	_ = c.Put(ctx, "closekey", "value", 1)
 
@@ -939,7 +923,7 @@ func TestMemStoreEvictionLoop(t *testing.T) {
 		cache.WithCleanupInterval(100*time.Millisecond),
 		cache.WithTTLJitter(0), // 关闭默认抖动，验证精确 TTL 过期
 	)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	_ = c.Put(ctx, "evictme", "expired", 1) // 1 second TTL
 
@@ -962,7 +946,7 @@ func TestMemStoreExpiration(t *testing.T) {
 		cache.WithMemStore(),
 		cache.WithTTLJitter(0), // 关闭默认抖动，验证精确 TTL 过期
 	)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	_ = store.Put(ctx, "expkey", "expvalue", 1) // 1 second TTL
 
@@ -1013,7 +997,7 @@ func TestWithMetricsWiresEviction(t *testing.T) {
 		cache.WithMetrics(spy),
 	)
 	defer c.Close()
-	ctx := context.Background()
+	ctx := t.Context()
 
 	// maxItems=1：写入第 2 个 key 触发一次 LRU 驱逐。
 	assert.Nil(t, c.Put(ctx, "a", "1", 60))
@@ -1032,7 +1016,7 @@ func TestCapacityMaxItemsLRU(t *testing.T) {
 		cache.WithMemStore(),
 		cache.WithMaxItems(3),
 	)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	// Insert 3 items → 链表 head→tail = c, b, a
 	_ = c.Put(ctx, "a", "1", 60)
@@ -1064,7 +1048,7 @@ func TestCapacityMaxBytes(t *testing.T) {
 		cache.WithMemStore(),
 		cache.WithMaxBytes(50), // 每项实际 21 字节（12 字节 JSON 字符串 + 9 字节版本前缀）: 2 项 42 字节，第 3 项 63 字节触发 eviction
 	)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	// Insert items until eviction kicks in
 	_ = c.Put(ctx, "k1", "1234567890", 60) // 21 bytes
@@ -1088,7 +1072,7 @@ func TestCapacityOverwriteKey(t *testing.T) {
 		cache.WithMemStore(),
 		cache.WithMaxItems(2),
 	)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	_ = c.Put(ctx, "a", "1", 60)
 	_ = c.Put(ctx, "b", "2", 60)
@@ -1152,7 +1136,7 @@ func TestDegradeEntersAndSkipsRemote(t *testing.T) {
 		cache.WithDegradeRecoveryInterval(100*time.Millisecond),
 		cache.WithVerifyEvery(1), // 每次 Get 都触发 remote 校验，以真实驱动降级计数
 	)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	// 本地放一个值，通过概率校验路径让 remote 连续失败
 	_ = local.Put(ctx, "key", []byte(`"value"`), 60)
@@ -1192,7 +1176,7 @@ func TestDegradedModeSkipsRemoteStore(t *testing.T) {
 		cache.WithDegradeThreshold(2),
 		cache.WithDegradeRecoveryInterval(50*time.Millisecond),
 	)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	// Use c.Put to go through proper serialization path
 	_ = c.Put(ctx, "localkey", "localval", 60)
@@ -1211,14 +1195,14 @@ func TestDegradedModeSkipsRemoteStore(t *testing.T) {
 
 func TestGetMultiEmpty(t *testing.T) {
 	c := cache.New(cache.WithMemStore())
-	result, err := c.GetMulti(context.Background())
+	result, err := c.GetMulti(t.Context())
 	assert.Nil(t, err)
 	assert.Empty(t, result)
 }
 
 func TestGetMultiAllHit(t *testing.T) {
 	c := cache.New(cache.WithMemStore())
-	ctx := context.Background()
+	ctx := t.Context()
 
 	_ = c.Put(ctx, "a", "hello-a", 60)
 	_ = c.Put(ctx, "b", "hello-b", 60)
@@ -1234,7 +1218,7 @@ func TestGetMultiAllHit(t *testing.T) {
 
 func TestGetMultiPartialMiss(t *testing.T) {
 	c := cache.New(cache.WithMemStore())
-	ctx := context.Background()
+	ctx := t.Context()
 
 	_ = c.Put(ctx, "a", "alpha", 60)
 	// "b" not in cache
@@ -1248,7 +1232,7 @@ func TestGetMultiPartialMiss(t *testing.T) {
 
 func TestSetMulti(t *testing.T) {
 	c := cache.New(cache.WithMemStore())
-	ctx := context.Background()
+	ctx := t.Context()
 
 	err := c.SetMulti(ctx, map[string]any{
 		"x": "value-x",
@@ -1271,7 +1255,7 @@ func TestSetMulti(t *testing.T) {
 
 func TestSetMultiEmpty(t *testing.T) {
 	c := cache.New(cache.WithMemStore())
-	err := c.SetMulti(context.Background(), map[string]any{}, 60)
+	err := c.SetMulti(t.Context(), map[string]any{}, 60)
 	assert.Nil(t, err)
 }
 
@@ -1279,7 +1263,7 @@ func TestSetMultiEmpty(t *testing.T) {
 
 func TestStatsClear(t *testing.T) {
 	s := cache.New(cache.WithMemStore())
-	ctx := context.Background()
+	ctx := t.Context()
 
 	_ = s.Put(ctx, "a", "val", 60)
 	var v string
@@ -1324,7 +1308,7 @@ func TestDegradeErrorCountTriggersDegraded(t *testing.T) {
 		cache.WithDegradeThreshold(2),
 		cache.WithDegradeRecoveryInterval(50*time.Millisecond),
 	)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	// Put a value in local store via cache (serialized properly)
 	_ = c.Put(ctx, "key", "value", 60)
@@ -1355,7 +1339,7 @@ func TestDegradeRecoveryAfterFailure(t *testing.T) {
 		cache.WithDegradeRecoveryInterval(50*time.Millisecond),
 		cache.WithVerifyEvery(1),
 	)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	_ = local.Put(ctx, "key", []byte(`"value"`), 60)
 
@@ -1387,7 +1371,7 @@ func TestDegradeRecoveryAfterFailure(t *testing.T) {
 func TestMemStoreBulkGetMulti(t *testing.T) {
 	// Test that memory_store's GetMulti works (covers the BulkStore implementation)
 	c := cache.New(cache.WithMemStore())
-	ctx := context.Background()
+	ctx := t.Context()
 
 	_ = c.Put(ctx, "a", "x", 60)
 	_ = c.Put(ctx, "b", "y", 60)
@@ -1401,7 +1385,7 @@ func TestMemStoreBulkGetMulti(t *testing.T) {
 func TestMemStoreBulkSetMulti(t *testing.T) {
 	// Test that memory_store's SetMulti works (covers via cache.SetMulti)
 	c := cache.New(cache.WithMemStore())
-	ctx := context.Background()
+	ctx := t.Context()
 
 	err := c.SetMulti(ctx, map[string]any{
 		"p": "1",
@@ -1451,7 +1435,7 @@ func TestListenerPublishOnDelete(t *testing.T) {
 		cache.WithMemStore(),
 		cache.WithListener(lis),
 	)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	_ = c.Put(ctx, "deletekey", "val", 60)
 	c.Delete(ctx, "deletekey")
@@ -1496,7 +1480,7 @@ func TestCloseMemStore(t *testing.T) {
 	c := cache.New(
 		cache.WithMemStore(),
 	)
-	ctx := context.Background()
+	ctx := t.Context()
 	_ = c.Put(ctx, "key", "val", 60)
 
 	var s string
@@ -1526,7 +1510,7 @@ func TestNoopMetricsDoesNotPanic(t *testing.T) {
 	// Verify the cache was created - noopMetrics is internal
 	// but the cache should work without custom metrics
 	// Note: 零参 New 现在默认注入内存缓存（P0-1），Put/Get 往返成功
-	ctx := context.Background()
+	ctx := t.Context()
 	err := c.Put(ctx, "nomet", "value", 60)
 	assert.Nil(t, err)
 
@@ -1567,7 +1551,7 @@ func TestVersionSyncGoroutineLifecycle(t *testing.T) {
 
 func TestDeletePatternPublicAPI(t *testing.T) {
 	c := cache.New(cache.WithMemStore())
-	ctx := context.Background()
+	ctx := t.Context()
 
 	_ = c.Put(ctx, "a:1", "v1", 60)
 	_ = c.Put(ctx, "a:2", "v2", 60)
@@ -1595,7 +1579,7 @@ func TestNoopMetricsDoesNotPanicOnEviction(t *testing.T) {
 		cache.WithMemStore(),
 		cache.WithMaxItems(1),
 	)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	_ = c.Put(ctx, "a", "1", 60)
 	_ = c.Put(ctx, "b", "2", 60) // should evict "a"
@@ -1612,7 +1596,7 @@ func TestNoopMetricsDoesNotPanicOnEviction(t *testing.T) {
 
 func TestMemStoreGetMulti(t *testing.T) {
 	c := cache.New(cache.WithMemStore())
-	ctx := context.Background()
+	ctx := t.Context()
 
 	_ = c.Put(ctx, "a", "x", 60)
 	_ = c.Put(ctx, "b", "y", 60)
@@ -1672,7 +1656,7 @@ func TestCloseIdempotent(t *testing.T) {
 
 func TestPutWithZeroExpireNeverMisses(t *testing.T) {
 	c := cache.New(cache.WithMemStore())
-	ctx := context.Background()
+	ctx := t.Context()
 
 	_ = c.Put(ctx, "forever", "value", 0)
 
@@ -1695,7 +1679,7 @@ func TestNewDefaultMemStore(t *testing.T) {
 	// 零参 New 默认注入本地内存缓存（与显式 WithMemStore 一致）：
 	// Put/Get 命中；Getfn 回源后二次调用不再回源（写入生效）。
 	c := cache.New()
-	ctx := context.Background()
+	ctx := t.Context()
 
 	assert.Nil(t, c.Put(ctx, "k", "v", 60))
 	var s string
@@ -1746,7 +1730,7 @@ func TestErrRemoteUnavailableClassification(t *testing.T) {
 		cache.WithMemStore(),
 		func(o *cache.Options) { o.WithStore(remote) },
 	)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	var s string
 	err := c.Get(ctx, "k", &s)
@@ -1788,7 +1772,7 @@ func TestPreLoadBatchWrite(t *testing.T) {
 	c := cache.New(
 		func(o *cache.Options) { o.WithStore(local) },
 	)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	err := c.PreLoad(ctx, func(ctx context.Context) (map[string]any, error) {
 		return map[string]any{"a": "1", "b": "2", "c": "3"}, nil
@@ -1810,7 +1794,7 @@ func TestPreLoadBatchWrite(t *testing.T) {
 func TestPreLoadEmpty(t *testing.T) {
 	// 空 map 不报错
 	c := cache.New()
-	ctx := context.Background()
+	ctx := t.Context()
 	err := c.PreLoad(ctx, func(ctx context.Context) (map[string]any, error) {
 		return map[string]any{}, nil
 	}, 60)
@@ -1822,7 +1806,7 @@ func TestPreLoadEmpty(t *testing.T) {
 
 func TestCacheStatsSnapshotIsolated(t *testing.T) {
 	c := cache.New(cache.WithMemStore())
-	ctx := context.Background()
+	ctx := t.Context()
 	_ = c.Put(ctx, "k", "v", 60)
 	var s string
 	_ = c.Get(ctx, "k", &s) // local hit
@@ -1836,5 +1820,66 @@ func TestCacheStatsSnapshotIsolated(t *testing.T) {
 	_ = c.Get(ctx, "k", &s)
 	after := c.Stats()
 	assert.GreaterOrEqual(t, after.TotalHits(), uint64(1), "snapshot mutation must not affect internal counters")
+	c.Close()
+}
+
+// TestGetfnSharedCancelIsolation 验证 singleflight 共享路径的取消隔离：
+// A 先进入 sg.Do（慢回源，20ms），A 的 ctx 带 10ms 超时；
+// A 进入后通知 B 发起同 key 请求（B 在 sg.Do 上等待，共享 A 的结果）。
+// 断言：B（长超时 5s）不会收到 A 的 DeadlineExceeded（取消传染）。
+func TestGetfnSharedCancelIsolation(t *testing.T) {
+	t.Parallel()
+
+	c := cache.New(cache.WithMemStore())
+	// 保留：本用例测取消/超时语义，不能用 t.Context()
+	ctxA, cancelA := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancelA()
+
+	// 保留：本用例测取消/超时语义，不能用 t.Context()
+	ctxB, cancelB := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelB()
+
+	// startA 通道：A 进入 sg.Do 闭包后关闭，通知 B 可以发起请求
+	startA := make(chan struct{})
+
+	var gotA, gotB error
+	var bFnCalled int32 // 原子标志：B 的 fn 是否被调用（singleflight 正常时应为 0）
+	var wg sync.WaitGroup
+
+	// 首请求 A：慢回源，短超时
+	wg.Go(func() {
+		gotA = c.Getfn(ctxA, "shared-key", new(any), func(ctx context.Context, key string, v any) (bool, error) {
+			close(startA)                     // 通知 B：A 已进入 sg.Do 闭包，B 可以安全发起请求
+			time.Sleep(20 * time.Millisecond) // 模拟慢回源
+			return true, nil
+		}, 60)
+	})
+
+	// 等 A 进入 sg.Do 后再启动 B，确保 A 是第一个执行者
+	wg.Go(func() {
+		<-startA // 等待 A 进入 sg.Do
+		gotB = c.Getfn(ctxB, "shared-key", new(any), func(ctx context.Context, key string, v any) (bool, error) {
+			// B 是共享调用者，fn 不应被再次执行
+			atomic.StoreInt32(&bFnCalled, 1)
+			return true, nil
+		}, 60)
+	})
+
+	wg.Wait()
+
+	if atomic.LoadInt32(&bFnCalled) != 0 {
+		t.Fatal("B 的 LoadFn 不应被执行（singleflight 共享去重）")
+	}
+
+	// A 应该因超时取消失败
+	if !errors.Is(gotA, context.DeadlineExceeded) {
+		t.Errorf("A 期望 DeadlineExceeded，got %v", gotA)
+	}
+
+	// B 不应收到 context.Canceled/DeadlineExceeded（取消传染）
+	if errors.Is(gotB, context.Canceled) || errors.Is(gotB, context.DeadlineExceeded) {
+		t.Errorf("B 不应被 A 的取消传染，got %v", gotB)
+	}
+
 	c.Close()
 }

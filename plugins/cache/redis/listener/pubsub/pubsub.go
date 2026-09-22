@@ -61,11 +61,9 @@ func NewListener(rdb redis.Client, channel string, opts ...Option) cache.Listene
 		o(r)
 	}
 
-	r.wg.Add(1)
-	go func() {
-		defer r.wg.Done()
+	r.wg.Go(func() {
 		r.watch()
-	}()
+	})
 
 	return r
 }
@@ -108,7 +106,7 @@ func (r *pubSubListener) subscribe() (*goredis.PubSub, error) {
 		rdb := r.rdb
 		r.mu.RUnlock()
 
-		subCtx, cancel := context.WithTimeout(context.Background(), subscribeTimeout)
+		subCtx, cancel := context.WithTimeout(context.TODO(), subscribeTimeout)
 		sub := rdb.Subscribe(subCtx, r.channel)
 		_, err := sub.Receive(subCtx)
 		cancel()
@@ -230,7 +228,7 @@ func (r *pubSubListener) watch() {
 		case <-healthTicker.C:
 			// Periodic health check: if ping fails, reconnect.
 			// Ping 同样使用带超时的 ctx，避免 dial 无超时时永久阻塞 watch。
-			pingCtx, cancel := context.WithTimeout(context.Background(), subscribeTimeout)
+			pingCtx, cancel := context.WithTimeout(context.TODO(), subscribeTimeout)
 			err := sub.Ping(pingCtx)
 			cancel()
 			if err != nil {
@@ -272,8 +270,8 @@ func (r *pubSubListener) Ready() <-chan struct{} {
 	return r.ready
 }
 
-func (r *pubSubListener) Publish(key string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), r.publishTimeout)
+func (r *pubSubListener) Publish(ctx context.Context, key string) error {
+	ctx, cancel := context.WithTimeout(ctx, r.publishTimeout)
 	defer cancel()
 
 	r.mu.RLock()

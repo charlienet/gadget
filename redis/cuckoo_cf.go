@@ -60,7 +60,7 @@ func (cf *cfCmdImpl) connectAll(ctx context.Context) error {
 
 // isCFKeyExistsErr 是 CF.* 路径的"键已存在"复用判据。
 func isCFKeyExistsErr(err error) bool {
-	return strings.Contains(err.Error(), "item exists") || strings.Contains(err.Error(), "already exists")
+	return isItemExistsText(err)
 }
 
 // verifyExisting 对复用的既有 CF 键按声明口径校验：capacity **恒比对**

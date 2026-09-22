@@ -22,7 +22,7 @@ func TestInvalidateMultipleKeys(t *testing.T) {
 	remote := newTestRemoteStore()
 	lis := &delayRecordingListener{}
 	c := newDelayCache(t, 0, remote, WithListener(lis)) // 关闭二次删，聚焦批量失效本身
-	ctx := context.Background()
+	ctx := t.Context()
 
 	for _, k := range []string{"k1", "k2", "k3"} {
 		assert.NoError(t, c.Put(ctx, k, "v", 60))
@@ -47,7 +47,7 @@ func TestInvalidateMultipleKeys(t *testing.T) {
 func TestInvalidateNilKeysIsNoop(t *testing.T) {
 	remote := newTestRemoteStore()
 	c := newDelayCache(t, 0, remote)
-	ctx := context.Background()
+	ctx := t.Context()
 	assert.NoError(t, c.Put(ctx, "k", "v", 60))
 
 	assert.NoError(t, c.Invalidate(ctx, func(_ context.Context) ([]string, error) {
@@ -61,7 +61,7 @@ func TestInvalidateNilKeysIsNoop(t *testing.T) {
 func TestInvalidateMutateErrorPropagates(t *testing.T) {
 	remote := newTestRemoteStore()
 	c := newDelayCache(t, 0, remote)
-	ctx := context.Background()
+	ctx := t.Context()
 	assert.NoError(t, c.Put(ctx, "k", "v", 60))
 
 	sentinel := errors.New("boom")
@@ -78,7 +78,7 @@ func TestInvalidateMutateErrorPropagates(t *testing.T) {
 func TestInvalidateConcurrentCrossKeysNoDeadlock(t *testing.T) {
 	remote := newTestRemoteStore()
 	c := newDelayCache(t, 0, remote)
-	ctx := context.Background()
+	ctx := t.Context()
 	for _, k := range []string{"k1", "k2"} {
 		assert.NoError(t, c.Put(ctx, k, "v", 60))
 	}
@@ -86,13 +86,11 @@ func TestInvalidateConcurrentCrossKeysNoDeadlock(t *testing.T) {
 	var wg sync.WaitGroup
 	start := make(chan struct{})
 	inv := func(keys ...string) {
-		defer wg.Done()
 		<-start
 		_ = c.Invalidate(ctx, mutateKeys(keys...))
 	}
-	wg.Add(2)
-	go inv("k1", "k2")
-	go inv("k2", "k1")
+	wg.Go(func() { inv("k1", "k2") })
+	wg.Go(func() { inv("k2", "k1") })
 	close(start)
 
 	done := make(chan struct{})
@@ -115,7 +113,7 @@ func TestInvalidateConcurrentCrossKeysNoDeadlock(t *testing.T) {
 func TestInvalidateNotSwallowedByConcurrentGetfn(t *testing.T) {
 	remote := newTestRemoteStore()
 	c := newDelayCache(t, 0, remote) // 关闭延时二次删：只验证"首删是否被共享吞掉"
-	ctx := context.Background()
+	ctx := t.Context()
 
 	// L1/L2 起始为空，确保 Getfn 必走 loadFn（回源），loadFn 模拟读到 mutate 前旧值。
 	inFlight := make(chan struct{})

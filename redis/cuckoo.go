@@ -2,7 +2,6 @@ package redis
 
 import (
 	"context"
-	"strings"
 )
 
 // CuckooInfo 包含布谷鸟过滤器的元数据。模块版对应 CF.INFO 输出；回退版
@@ -321,7 +320,7 @@ func (cf *CuckooFilter) AddMulti(ctx context.Context, items ...any) ([]bool, err
 // item 属不支持类型时返回数据类错误，不触发兜底。
 func (cf *CuckooFilter) Del(ctx context.Context, item any) (bool, error) {
 	deleted, err := cf.impl.Del(ctx, item)
-	if err != nil && strings.Contains(err.Error(), "Not found") {
+	if err != nil && isNotFoundByText(err) {
 		// not-found 归一化（评审定稿 M1）：字形取真机实测的模块输出
 		// （CF.DEL 报 "Not found"，大写 N；勿与 bloom 路径小写 "not
 		// found" 混淆）。置于 Unavailable 判定之前，仅字形匹配、其余

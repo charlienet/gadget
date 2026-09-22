@@ -62,7 +62,7 @@ func newTestClient(t *testing.T) goredis.Cmdable {
 	rdb := goredis.NewClient(opt)
 	t.Cleanup(func() { _ = rdb.Close() })
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
 	require.NoErrorf(t, rdb.Ping(ctx).Err(), "无法连接真实 Redis（%s），测试失败以避免假绿", url)
 
@@ -73,7 +73,7 @@ func newTestClient(t *testing.T) goredis.Cmdable {
 func TestBackendTryAcquire(t *testing.T) {
 	rdb := newTestClient(t)
 	backend := redislock.New(rdb)
-	ctx := context.Background()
+	ctx := t.Context()
 	key := lockKey(t, rdb, "ba:1")
 
 	t.Run("成功与互斥", func(t *testing.T) {
@@ -98,7 +98,7 @@ func TestBackendTryAcquire(t *testing.T) {
 func TestBackendRelease(t *testing.T) {
 	rdb := newTestClient(t)
 	backend := redislock.New(rdb)
-	ctx := context.Background()
+	ctx := t.Context()
 	key := lockKey(t, rdb, "ba:2")
 
 	_, err := backend.TryAcquire(ctx, key, "tok-a", 30*time.Second)
@@ -121,7 +121,7 @@ func TestBackendRelease(t *testing.T) {
 func TestBackendRenew(t *testing.T) {
 	rdb := newTestClient(t)
 	backend := redislock.New(rdb)
-	ctx := context.Background()
+	ctx := t.Context()
 	key := lockKey(t, rdb, "ba:3")
 
 	renewer, ok := backend.(lock.Renewer)
@@ -151,7 +151,7 @@ func TestBackendRenew(t *testing.T) {
 func TestBackendExpiry(t *testing.T) {
 	rdb := newTestClient(t)
 	backend := redislock.New(rdb)
-	ctx := context.Background()
+	ctx := t.Context()
 	key := lockKey(t, rdb, "ba:4")
 
 	ok, err := backend.TryAcquire(ctx, key, "tok-a", 50*time.Millisecond)
@@ -169,7 +169,7 @@ func TestBackendExpiry(t *testing.T) {
 func TestLockIntegration(t *testing.T) {
 	rdb := newTestClient(t)
 	backend := redislock.New(rdb)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	t.Run("互斥", func(t *testing.T) {
 		key := lockKey(t, rdb, "li:1")

@@ -154,7 +154,7 @@ func TestWholesaleUnavailableWrapping(t *testing.T) {
 	defer client.Close()
 	b := New(client)
 
-	_, _, err := b.Wholesale(context.Background(), "k", 1, testSpec(), ratelimit.GrantBestEffort)
+	_, _, err := b.Wholesale(t.Context(), "k", 1, testSpec(), ratelimit.GrantBestEffort)
 	if err == nil {
 		t.Fatal("不可达后端必须报错")
 	}
@@ -195,7 +195,7 @@ func TestSentinelNotExportedTwice(t *testing.T) {
 	// 插件绝不重新定义哨兵语义，只引用 core 的：包装串必须走 ratelimit 前缀。
 	client := newUnreachableClient()
 	defer client.Close()
-	_, _, err := New(client).Wholesale(context.Background(), "k", 1, testSpec(), ratelimit.GrantBestEffort)
+	_, _, err := New(client).Wholesale(t.Context(), "k", 1, testSpec(), ratelimit.GrantBestEffort)
 	if err != nil && !strings.Contains(err.Error(), ratelimit.ErrBackendUnavailable.Error()) {
 		t.Fatalf("包装错误应挂 core 哨兵原文，got %v", err)
 	}
@@ -213,7 +213,7 @@ func TestSentinelNotExportedTwice(t *testing.T) {
 // 同时断言拒绝零副作用：TAT 值与永不过期状态原样保留（不推进、不 SET）。
 func TestAllOrNothingRetryAfterExactFormula(t *testing.T) {
 	rdb := newRealRedis(t)
-	ctx := context.Background()
+	ctx := t.Context()
 	key := scriptKey(t, rdb, "aon-retry")
 
 	const (
@@ -254,7 +254,7 @@ func newRealRedis(t *testing.T) *goredis.Client {
 	require.NoErrorf(t, err, "解析 REDIS_URL 失败: %s", url)
 	rdb := goredis.NewClient(opt)
 	t.Cleanup(func() { _ = rdb.Close() })
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
 	require.NoErrorf(t, rdb.Ping(ctx).Err(), "无法连接真实 Redis（%s），测试失败以避免假绿", url)
 	return rdb
@@ -266,7 +266,7 @@ func scriptKey(t *testing.T, rdb *goredis.Client, base string) string {
 	id := atomic.AddUint64(&rlKeyCounter, 1)
 	key := fmt.Sprintf("{gadget-rlredis-test}:%s:%d:%d", base, time.Now().UnixNano(), id)
 	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 		defer cancel()
 		_ = rdb.Del(ctx, key).Err()
 	})
@@ -331,7 +331,7 @@ type scriptResult struct {
 
 func runScript(t *testing.T, s *goredis.Script, rdb *goredis.Client, key string, args ...any) scriptResult {
 	t.Helper()
-	v, err := s.Run(context.Background(), rdb, []string{key}, args...).Result()
+	v, err := s.Run(t.Context(), rdb, []string{key}, args...).Result()
 	require.NoError(t, err)
 	values, ok := v.([]any)
 	require.Truef(t, ok && len(values) >= 4, "脚本返回异常结构: %v", v)
@@ -362,7 +362,7 @@ func slicesOf(args []any, extra ...any) []any {
 func serverTat(t *testing.T, rdb *goredis.Client, burst, rate int, per time.Duration, r0 float64) string {
 	t.Helper()
 	const jan1_2017 = 1483228800
-	serverNow, err := rdb.Time(context.Background()).Result()
+	serverNow, err := rdb.Time(t.Context()).Result()
 	require.NoError(t, err)
 	nowOffset := float64(serverNow.Unix()-jan1_2017) + float64(serverNow.Nanosecond())/1e9
 	interval := per.Seconds() / float64(rate)
@@ -372,7 +372,7 @@ func serverTat(t *testing.T, rdb *goredis.Client, burst, rate int, per time.Dura
 
 func getTat(t *testing.T, rdb *goredis.Client, key string) float64 {
 	t.Helper()
-	s, err := rdb.Get(context.Background(), key).Result()
+	s, err := rdb.Get(t.Context(), key).Result()
 	require.NoError(t, err)
 	v, err := strconv.ParseFloat(s, 64)
 	require.NoError(t, err)
@@ -397,7 +397,7 @@ func getTat(t *testing.T, rdb *goredis.Client, key string) float64 {
 //	  返回值差异（granted 0 vs 1），方向恒为"改造版不亏"。
 func TestBestEffortAgainstOriginalScriptBaseline(t *testing.T) {
 	rdb := newRealRedis(t)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	const (
 		rate  = 3

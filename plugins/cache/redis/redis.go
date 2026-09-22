@@ -133,7 +133,7 @@ func (r *redis_store) GetMulti(ctx context.Context, keys ...string) (map[string]
 		return map[string][]byte{}, nil
 	}
 
-	var vals []interface{}
+	var vals []any
 	err := r.do(ctx, func(ctx context.Context) error {
 		var e error
 		vals, e = r.rdb.MGet(ctx, keys...).Result()
@@ -177,7 +177,7 @@ func (r *redis_store) SetMulti(ctx context.Context, items map[string][]byte, exp
 		return nil
 	}
 
-	pairs := make([]interface{}, 0, len(items)*2)
+	pairs := make([]any, 0, len(items)*2)
 	for key, val := range items {
 		pairs = append(pairs, key, val)
 	}

@@ -2,9 +2,9 @@ package idgenerator
 
 import "strconv"
 
-type Id int64
+type ID int64
 
-func (i Id) String() string {
+func (i ID) String() string {
 	if i == 0 {
 		return ""
 	}
@@ -12,6 +12,6 @@ func (i Id) String() string {
 	return strconv.FormatInt(int64(i), 10)
 }
 
-func (i Id) Int64() int64 {
+func (i ID) Int64() int64 {
 	return int64(i)
 }

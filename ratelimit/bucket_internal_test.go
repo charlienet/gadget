@@ -100,6 +100,7 @@ func TestTokenBucketClockRewindProtection(t *testing.T) {
 
 func TestMemoryBackendCtxPassthrough(t *testing.T) {
 	m := newMemoryBackend(newFakeClock())
+	// 保留：本用例测取消/超时语义（ctx 取消透传），不能用 t.Context()
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
@@ -116,7 +117,7 @@ func TestMemoryBackendIdleReset(t *testing.T) {
 	clock := newFakeClock()
 	m := newMemoryBackend(clock)
 	spec := testSpec() // IdleRetention = 1m
-	ctx := context.Background()
+	ctx := t.Context()
 
 	// 耗尽存量。
 	if g, _, _ := m.Wholesale(ctx, "k", 10, spec, GrantBestEffort); g != 10 {
@@ -145,7 +146,7 @@ func TestMemoryBackendSharedBetweenLimiters(t *testing.T) {
 	defer l2.Close()
 
 	// 两个 Limiter 共享同一 Memory 实例即共享配额：合计放行不超过桶量。
-	ctx := context.Background()
+	ctx := t.Context()
 	passed := 0
 	for i := 0; i < 15; i++ {
 		lim := l1

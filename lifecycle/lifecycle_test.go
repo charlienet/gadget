@@ -76,7 +76,7 @@ func TestShutdownReverseOrder(t *testing.T) {
 			return nil
 		}))
 	}
-	if err := m.Shutdown(context.Background()); err != nil {
+	if err := m.Shutdown(t.Context()); err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
 	want := []string{"c", "b", "a"}
@@ -108,7 +108,7 @@ func TestStepTimeout(t *testing.T) {
 	}))
 	m.Register("fast2", rec("fast2"))
 
-	err := m.Shutdown(context.Background())
+	err := m.Shutdown(t.Context())
 	if !errors.Is(err, ErrTimeout) {
 		t.Fatalf("聚合错误应含 ErrTimeout，实得 %v", err)
 	}
@@ -128,7 +128,7 @@ func TestBudgetExhaustedSkips(t *testing.T) {
 	// 逆序最先关 c3：永久阻塞，耗尽整个总预算后其步骤超时，剩余 c2/c1 应被跳过。
 	m.Register("c3", Func(func(context.Context) error { select {} }))
 
-	err := m.Shutdown(context.Background())
+	err := m.Shutdown(t.Context())
 	if !errors.Is(err, ErrBudgetExhausted) {
 		t.Fatalf("应含 ErrBudgetExhausted，实得 %v", err)
 	}
@@ -159,7 +159,7 @@ func TestPanicRecovered(t *testing.T) {
 	m.Register("boom", Func(func(context.Context) error { panic("kaboom") }))
 	m.Register("z", rec("z"))
 
-	err := m.Shutdown(context.Background())
+	err := m.Shutdown(t.Context())
 	if !errors.Is(err, ErrPanicked) {
 		t.Fatalf("应含 ErrPanicked，实得 %v", err)
 	}
@@ -181,11 +181,12 @@ func TestConcurrentRunAndShutdown(t *testing.T) {
 		return sentinel
 	}))
 
+	// 保留：本用例测取消/超时语义（Run ctx 取消与 Shutdown 竞态），不能用 t.Context()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	res := make(chan error, 2)
 	go func() { res <- m.Run(ctx) }()
-	go func() { res <- m.Shutdown(context.Background()) }()
+	go func() { res <- m.Shutdown(t.Context()) }()
 
 	time.Sleep(20 * time.Millisecond)
 	cancel() // 额外制造第三个触发源与 Shutdown 竞态
@@ -217,7 +218,7 @@ func TestSignalTriggersShutdown(t *testing.T) {
 	}))
 
 	done := make(chan error, 1)
-	go func() { done <- m.Run(context.Background()) }()
+	go func() { done <- m.Run(t.Context()) }()
 	sigCh := waitSigCh(t, m) // 句柄已注册：Run 确已把 sigCh 回写进 m.sigCh
 	if err := syscall.Kill(os.Getpid(), syscall.SIGWINCH); err != nil {
 		t.Fatalf("kill: %v", err)
@@ -231,7 +232,7 @@ func TestSignalTriggersShutdown(t *testing.T) {
 	if n := len(sigCh); n != 0 {
 		t.Fatalf("关闭结束后信号句柄仍有 %d 个未读信号", n)
 	}
-	e2 := m.Shutdown(context.Background())
+	e2 := m.Shutdown(t.Context())
 	if e1 != e2 {
 		t.Fatalf("信号与 Shutdown 应返回同一错误: %v vs %v", e1, e2)
 	}
@@ -269,7 +270,7 @@ func TestSignalHandleUnregisteredAfterShutdown(t *testing.T) {
 	}))
 
 	runDone := make(chan error, 1)
-	go func() { runDone <- m.Run(context.Background()) }()
+	go func() { runDone <- m.Run(t.Context()) }()
 	sigCh := waitSigCh(t, m)
 
 	obs := make(chan os.Signal, 4)
@@ -313,8 +314,8 @@ func TestRepeatedShutdownIdempotent(t *testing.T) {
 		count.Add(1)
 		return nil
 	}))
-	e1 := m.Shutdown(context.Background())
-	e2 := m.Shutdown(context.Background())
+	e1 := m.Shutdown(t.Context())
+	e2 := m.Shutdown(t.Context())
 	if e1 != e2 {
 		t.Fatalf("重复 Shutdown 应返回同一错误: %v vs %v", e1, e2)
 	}
@@ -349,6 +350,7 @@ func TestShutdownCtxCancelDoesNotAbortShutdown(t *testing.T) {
 	}))
 
 	// 首触发源就是 Shutdown：ctx 必须真的生效。
+	// 保留：本用例测取消/超时语义（Shutdown 超时提前返回），不能用 t.Context()
 	shCtx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 	if err := m.Shutdown(shCtx); !errors.Is(err, context.DeadlineExceeded) {
@@ -359,7 +361,7 @@ func TestShutdownCtxCancelDoesNotAbortShutdown(t *testing.T) {
 	<-entered
 
 	waiter := make(chan error, 1)
-	go func() { waiter <- m.Shutdown(context.Background()) }()
+	go func() { waiter <- m.Shutdown(t.Context()) }()
 	unblock()
 
 	got := <-waiter
@@ -387,7 +389,7 @@ func TestRegisterPanics(t *testing.T) {
 	mustPanic(t, "after shutdown", func() {
 		mm := New()
 		mm.Register("a", c)
-		_ = mm.Shutdown(context.Background())
+		_ = mm.Shutdown(t.Context())
 		mm.Register("late", c)
 	})
 }
@@ -446,7 +448,7 @@ func TestCompatibilityAdapters(t *testing.T) {
 	m.Register("http", Func(srv.Shutdown))
 	m.Register("store", Func(func(context.Context) error { return dep.Close() }))
 
-	if err := m.Shutdown(context.Background()); err != nil {
+	if err := m.Shutdown(t.Context()); err != nil {
 		t.Fatalf("关闭失败: %v", err)
 	}
 	if !dep.wasClosed() {
@@ -494,11 +496,13 @@ func TestRunListenerGoroutineExitsAfterShutdown(t *testing.T) {
 	m.Register("c", Func(func(context.Context) error { return nil }))
 
 	runDone := make(chan error, 1)
+	// 保留：本用例前提就是"Run 的 ctx 永不取消"（测 Shutdown 触发路径下的
+	// 监听 goroutine 退出），t.Context() 会在测试函数返回时取消、破坏前提
 	go func() { runDone <- m.Run(context.Background()) }()
 	_ = waitSigCh(t, m)   // 句柄已注册
 	waitListener(t, true) // 监听 goroutine 确已进入 select（确定性同步，非 sleep 竞速）
 
-	if err := m.Shutdown(context.Background()); err != nil {
+	if err := m.Shutdown(t.Context()); err != nil {
 		t.Fatalf("Shutdown 失败: %v", err)
 	}
 	if err := <-runDone; err != nil {
@@ -526,7 +530,7 @@ func TestCloserFunc(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			m := New()
 			m.Register("closer", CloserFunc(tc.fn))
-			err := m.Shutdown(context.Background())
+			err := m.Shutdown(t.Context())
 			if tc.wantErr == nil {
 				if err != nil {
 					t.Fatalf("err = %v, want nil", err)

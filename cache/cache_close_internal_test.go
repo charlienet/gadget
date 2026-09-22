@@ -132,6 +132,7 @@ func TestCloseConcurrentSameResult(t *testing.T) {
 	const n = 8
 	results := make([]error, n)
 	var wg sync.WaitGroup
+	// 动态计数（goroutine 数量 n 是变量），保留 Add/Done 模式
 	wg.Add(n)
 	for i := 0; i < n; i++ {
 		go func(i int) {

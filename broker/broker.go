@@ -1,18 +1,19 @@
 package broker
 
+import "context"
+
 // Asynchronous message broker
 type Broker interface {
-	Publish(topic string, m *Message) error
-	Subscribe(topic string, h Handler) (Subscriber, error)
+	Publish(ctx context.Context, topic string, m *Message) error
+	Subscribe(ctx context.Context, topic string, h Handler) (Subscriber, error)
 	Name() string
-	// Close 释放 broker 占用的资源（连接、订阅 goroutine 等）
-	Close() error
+	Close(ctx context.Context) error
 }
 
 // Subscriber is a convenience return type for the Subscribe method.
 type Subscriber interface {
 	Topic() string
-	Unsubscribe() error
+	Unsubscribe(ctx context.Context) error
 }
 
 // message send/received from the broker.

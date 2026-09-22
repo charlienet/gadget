@@ -62,6 +62,7 @@ func runOnRedis(t testing.TB, fn func(rdb redis.Client), url string, opts ...red
 			return nil, nil, err
 		}
 
+		// 测试夹具清理，关闭失败无需处理
 		return rdb, func() { _ = rdb.Close() }, nil
 	})
 }

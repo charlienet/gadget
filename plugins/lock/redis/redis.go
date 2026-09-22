@@ -48,7 +48,7 @@ type Backend struct {
 func (b *Backend) TryAcquire(ctx context.Context, key, token string, ttl time.Duration) (bool, error) {
 	ok, err := b.rdb.SetNX(ctx, key, token, ttl).Result()
 	if err != nil && redis.IsUnavailable(err) {
-		return false, fmt.Errorf("%w: %v", lock.ErrBackendUnavailable, err)
+		return false, fmt.Errorf("%w: %w", lock.ErrBackendUnavailable, err)
 	}
 	return ok, err
 }
@@ -67,7 +67,7 @@ var unlockScript = goredis.NewScript(`
 func (b *Backend) Release(ctx context.Context, key, token string) error {
 	_, err := unlockScript.Run(ctx, b.rdb, []string{key}, token).Int()
 	if err != nil && redis.IsUnavailable(err) {
-		return fmt.Errorf("%w: %v", lock.ErrBackendUnavailable, err)
+		return fmt.Errorf("%w: %w", lock.ErrBackendUnavailable, err)
 	}
 	return err
 }
@@ -86,7 +86,7 @@ func (b *Backend) Renew(ctx context.Context, key, token string, ttl time.Duratio
 	n, err := renewScript.Run(ctx, b.rdb, []string{key}, token, ttl.Milliseconds()).Int()
 	if err != nil {
 		if redis.IsUnavailable(err) {
-			return false, fmt.Errorf("%w: %v", lock.ErrBackendUnavailable, err)
+			return false, fmt.Errorf("%w: %w", lock.ErrBackendUnavailable, err)
 		}
 		return false, err
 	}

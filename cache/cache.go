@@ -520,8 +520,12 @@ func (c *cache) Getfn(ctx context.Context, key string, v any, fn LoadFn, expireS
 	fnkey := fmt.Sprintf("key:%s", key)
 	defer c.sg.Forget(fnkey)
 
-	item, err, shared := c.sg.Do(fnkey, func() (interface{}, error) {
-		data, exist, err := c.getFromCacheData(ctx, key, expireSeconds)
+	item, err, shared := c.sg.Do(fnkey, func() (any, error) {
+		// 用 WithoutCancel 断开取消链，确保 cache 查询/fn 回源完成，
+		// 消除 singleflight 共享路径的取消传染。
+		rctx := context.WithoutCancel(ctx)
+
+		data, exist, err := c.getFromCacheData(rctx, key, expireSeconds)
 		if err != nil {
 			return storeItem{}, err
 		}
@@ -536,7 +540,7 @@ func (c *cache) Getfn(ctx context.Context, key string, v any, fn LoadFn, expireS
 
 		// miss：只有第一个执行者调用 fn 回源
 		c.stats.IncrQuery()
-		exist, err = fn(ctx, key, v)
+		exist, err = fn(rctx, key, v)
 		if err != nil {
 			// loadFn 返回任何 error 一律视为真实失败：直接透传、不写占位不缓存
 			//（"未找到"须由应用层在 fn 内转换为 (false, nil)）
@@ -551,7 +555,7 @@ func (c *cache) Getfn(ctx context.Context, key string, v any, fn LoadFn, expireS
 			d, err = c.serializer.Marshal(v)
 			if err != nil {
 				// 序列化失败：记录 Warn 并跳过缓存写入，不阻断回源结果返回。
-				c.logger.WarnContext(ctx, "marshal loaded value failed, skip caching", "key", key, "err", err)
+				c.logger.WarnContext(rctx, "marshal loaded value failed, skip caching", "key", key, "err", err)
 				return storeItem{bytes: nil, exist: true}, nil
 			}
 		}
@@ -559,8 +563,8 @@ func (c *cache) Getfn(ctx context.Context, key string, v any, fn LoadFn, expireS
 		// Place to cache
 		// 回填失败仅记录 Warn（含占位符回填）：不阻断回源结果返回，
 		// 否则持续 miss → 每次穿透且零感知。
-		if err := c.putCache(ctx, key, d, expireSeconds); err != nil {
-			c.logger.WarnContext(ctx, "fill cache failed", "key", key, "err", err)
+		if err := c.putCache(rctx, key, d, expireSeconds); err != nil {
+			c.logger.WarnContext(rctx, "fill cache failed", "key", key, "err", err)
 		}
 		return storeItem{bytes: d, exist: exist}, nil
 	})
@@ -569,6 +573,10 @@ func (c *cache) Getfn(ctx context.Context, key string, v any, fn LoadFn, expireS
 		c.stats.IncrShared()
 	}
 
+	// 每个调用者独立检查自己的 ctx，消除取消传染。
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
 	if err != nil {
 		return err
 	}
@@ -625,7 +633,7 @@ func (c *cache) Invalidate(ctx context.Context, mutateFn MutateFn) error {
 		// 每 key 独立 singleflight（key:%s，与 Getfn 回源串行）。逐 key 顺序 Do：不嵌套、
 		// 不同时持多锁，每 key 处理完立即 Forget，故并发交叉 key 集不会交叉持锁 → 无死锁。
 		fnKey := fmt.Sprintf("key:%s", key)
-		_, _, shared := c.sg.Do(fnKey, func() (interface{}, error) {
+		_, _, shared := c.sg.Do(fnKey, func() (any, error) {
 			c.Delete(ctx, key)
 			c.scheduleDelayedSecondDelete(key)
 			return storeItem{}, nil
@@ -776,7 +784,7 @@ func (c *cache) noticeRemoved(ctx context.Context, keys ...string) {
 	}
 	if c.listener != nil && len(keys) > 0 {
 		for _, key := range keys {
-			if err := c.listener.Publish(key); err != nil {
+			if err := c.listener.Publish(ctx, key); err != nil {
 				c.logger.WarnContext(ctx, "publish removed key failed", "key", key, "err", err)
 			}
 		}
@@ -1100,8 +1108,11 @@ func (c *cache) getFromCache(ctx context.Context, key string, expireSeconds int)
 	fnKey := fmt.Sprintf("get-from-cache-%s", key)
 	defer c.sg.Forget(fnKey)
 
-	ret, err, shared := c.sg.Do(fnKey, func() (interface{}, error) {
-		data, exist, err := c.getFromCacheData(ctx, key, expireSeconds)
+	ret, err, shared := c.sg.Do(fnKey, func() (any, error) {
+		// 用 WithoutCancel 断开取消链，确保 cache 查询完成，
+		// 消除 singleflight 共享路径的取消传染。
+		rctx := context.WithoutCancel(ctx)
+		data, exist, err := c.getFromCacheData(rctx, key, expireSeconds)
 		if err != nil {
 			return storeItem{bytes: nil, exist: false}, err
 		}
@@ -1115,6 +1126,11 @@ func (c *cache) getFromCache(ctx context.Context, key string, expireSeconds int)
 
 	if shared {
 		c.stats.IncrShared()
+	}
+
+	// 每个调用者独立检查自己的 ctx，消除取消传染。
+	if ctx.Err() != nil {
+		return nil, false, ctx.Err()
 	}
 
 	if d, ok := ret.(storeItem); ok {
@@ -1384,6 +1400,9 @@ func (c *cache) hasPending(key string) bool {
 func (c *cache) startWatcher() {
 	defer c.watcherWG.Done()
 
+	wctx, wcancel := context.WithCancel(context.Background())
+	defer wcancel()
+
 	if c.listener != nil {
 		ch := c.listener.Subscribe()
 		for {
@@ -1393,7 +1412,7 @@ func (c *cache) startWatcher() {
 					c.closeListener()
 					return
 				}
-				c.removeFromStorage(context.Background(), c.localStore, key)
+				c.removeFromStorage(wctx, c.localStore, key)
 			case <-c.stopChan:
 				c.closeListener()
 				return

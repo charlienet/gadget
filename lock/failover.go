@@ -28,7 +28,7 @@ func wrapUnavailable(err error) error {
 	if errors.Is(err, ErrBackendUnavailable) {
 		return err
 	}
-	return fmt.Errorf("%w: %v", ErrBackendUnavailable, err)
+	return fmt.Errorf("%w: %w", ErrBackendUnavailable, err)
 }
 
 // fallbackBool 返回 FailOpen 下的放行值（true）。

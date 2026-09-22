@@ -108,7 +108,7 @@ func TestSyncBatchUpdatesStaleLocal(t *testing.T) {
 	local := newMemStore()
 	remote := newTestRemoteStore()
 
-	ctx := context.Background()
+	ctx := t.Context()
 	_ = local.Put(ctx, "key", makeVersionedData(100, []byte("old")), 60)
 	_ = remote.Put(ctx, "key", makeVersionedData(200, []byte("new")), 60)
 
@@ -132,7 +132,7 @@ func TestSyncBatchEvictsStaleLocalWhenRemoteGone(t *testing.T) {
 	local := newMemStore()
 	remote := newTestRemoteStore()
 
-	ctx := context.Background()
+	ctx := t.Context()
 	_ = local.Put(ctx, "gone", []byte("stale"), 60)
 	// remote does NOT have "gone"
 
@@ -154,8 +154,8 @@ func TestSyncBatchSkipsWhenDegraded(t *testing.T) {
 	local := newMemStore()
 	remote := newTestRemoteStore()
 
-	_ = local.Put(context.Background(), "k", makeVersionedData(100, []byte("v")), 60)
-	_ = remote.Put(context.Background(), "k", makeVersionedData(200, []byte("changed")), 60)
+	_ = local.Put(t.Context(), "k", makeVersionedData(100, []byte("v")), 60)
+	_ = remote.Put(t.Context(), "k", makeVersionedData(200, []byte("changed")), 60)
 
 	c := &cache{
 		localStore:  local,
@@ -167,7 +167,7 @@ func TestSyncBatchSkipsWhenDegraded(t *testing.T) {
 
 	c.syncBatch()
 
-	data, exist, _ := local.Get(context.Background(), "k")
+	data, exist, _ := local.Get(t.Context(), "k")
 	assert.True(t, exist)
 	assert.Equal(t, []byte("v"), payloadOf(data))
 }
@@ -201,7 +201,7 @@ func TestSyncBatchEmptyStore(t *testing.T) {
 
 	// 放入两个 key（remote 为空 → 本轮会把它们当作"远程已删"清本地，但采样与
 	// 游标推进逻辑照常执行：游标指向本批最后一个 key）。
-	ctx := context.Background()
+	ctx := t.Context()
 	_ = local.Put(ctx, "a", []byte("1"), 60)
 	_ = local.Put(ctx, "b", []byte("2"), 60)
 	c.syncBatch()
@@ -221,7 +221,7 @@ func TestVersionSyncLoop(t *testing.T) {
 	local := newMemStore()
 	remote := newTestRemoteStore()
 
-	ctx := context.Background()
+	ctx := t.Context()
 	_ = local.Put(ctx, "key", makeVersionedData(100, []byte("old")), 60)
 	_ = remote.Put(ctx, "key", makeVersionedData(200, []byte("new")), 60)
 
@@ -276,7 +276,7 @@ func TestVersionSyncLoopStopViaStopChan(t *testing.T) {
 
 func TestSampleKeysAndLen(t *testing.T) {
 	s := newMemStore()
-	ctx := context.Background()
+	ctx := t.Context()
 
 	// 空表：无 key，SampleKeys 返回 nil
 	assert.Equal(t, 0, s.Len())
@@ -312,7 +312,7 @@ func TestSampleKeysAndLen(t *testing.T) {
 
 func TestMemStoreDeletePattern(t *testing.T) {
 	s := newMemStore()
-	ctx := context.Background()
+	ctx := t.Context()
 
 	_ = s.Put(ctx, "user:1", []byte("a"), 60)
 	_ = s.Put(ctx, "user:2", []byte("b"), 60)
@@ -333,7 +333,7 @@ func TestMemStoreDeletePattern(t *testing.T) {
 
 func TestMemStoreDeletePatternInvalidPattern(t *testing.T) {
 	s := newMemStore()
-	ctx := context.Background()
+	ctx := t.Context()
 
 	_ = s.Put(ctx, "a", []byte("1"), 60)
 	// An invalid glob pattern should be silently skipped (continue)
@@ -353,7 +353,7 @@ func TestCacheDeletePattern(t *testing.T) {
 		logger:     slog.Default(),
 		stopChan:   make(chan struct{}),
 	}
-	ctx := context.Background()
+	ctx := t.Context()
 
 	_ = local.Put(ctx, "x:1", []byte("v1"), 60)
 	_ = local.Put(ctx, "x:2", []byte("v2"), 60)
@@ -375,7 +375,7 @@ func TestCacheDeletePatternNoRemote(t *testing.T) {
 		localStore: newMemStore(),
 		stopChan:   make(chan struct{}),
 	}
-	ctx := context.Background()
+	ctx := t.Context()
 	_ = c.localStore.Put(ctx, "k", []byte("v"), 60)
 	c.DeletePattern(ctx, "k")
 	_, exist, _ := c.localStore.Get(ctx, "k")
@@ -497,7 +497,7 @@ func TestHealthLoopStopsViaStopChan(t *testing.T) {
 
 func TestGetFromStoreSkipsRemoteWhenDegraded(t *testing.T) {
 	remote := newTestRemoteStore()
-	_ = remote.Put(context.Background(), "k", []byte("v"), 60)
+	_ = remote.Put(t.Context(), "k", []byte("v"), 60)
 
 	c := &cache{
 		remoteStore: remote,
@@ -507,7 +507,7 @@ func TestGetFromStoreSkipsRemoteWhenDegraded(t *testing.T) {
 	}
 	c.degraded.Store(true)
 
-	data, exist, err := c.getFromStore(context.Background(), remote, "k")
+	data, exist, err := c.getFromStore(t.Context(), remote, "k")
 	assert.Nil(t, err)
 	assert.False(t, exist)
 	assert.Equal(t, []byte{}, data)
@@ -526,11 +526,11 @@ func TestGetFromStoreRecordsRemoteError(t *testing.T) {
 		stopChan:         make(chan struct{}),
 	}
 
-	_, _, err := c.getFromStore(context.Background(), failRemote, "k")
+	_, _, err := c.getFromStore(t.Context(), failRemote, "k")
 	assert.Error(t, err)
 	assert.Equal(t, int64(1), c.degradeCount.Load())
 
-	_, _, err = c.getFromStore(context.Background(), failRemote, "k")
+	_, _, err = c.getFromStore(t.Context(), failRemote, "k")
 	assert.Error(t, err)
 	assert.True(t, c.isDegraded())
 }
@@ -556,7 +556,7 @@ func TestMemStoreEvictionCallsNoopMetrics(t *testing.T) {
 	// noopMetrics.CacheEviction is called during eviction; should not panic
 	s := newMemStore()
 	s.maxItems = 2
-	ctx := context.Background()
+	ctx := t.Context()
 
 	_ = s.Put(ctx, "a", []byte("1"), 60)
 	_ = s.Put(ctx, "b", []byte("2"), 60)
@@ -569,26 +569,26 @@ func TestMemStoreEvictionCallsNoopMetrics(t *testing.T) {
 
 func TestPutInStoreNil(t *testing.T) {
 	c := &cache{stopChan: make(chan struct{})}
-	err := c.putInStore(context.Background(), nil, "k", []byte("v"), 60)
+	err := c.putInStore(t.Context(), nil, "k", []byte("v"), 60)
 	assert.Nil(t, err)
 }
 
 func TestRemoveFromStorageNil(t *testing.T) {
 	c := &cache{stopChan: make(chan struct{})}
 	// Should not panic
-	c.removeFromStorage(context.Background(), nil, "k")
+	c.removeFromStorage(t.Context(), nil, "k")
 }
 
 func TestRemoveFromStorageDegradedRemote(t *testing.T) {
 	remote := newTestRemoteStore()
-	_ = remote.Put(context.Background(), "k", []byte("v"), 60)
+	_ = remote.Put(t.Context(), "k", []byte("v"), 60)
 
 	c := &cache{stopChan: make(chan struct{})}
 	c.degraded.Store(true)
 
 	// Should skip deletion on degraded remote
-	c.removeFromStorage(context.Background(), remote, "k")
-	_, exist, _ := remote.Get(context.Background(), "k")
+	c.removeFromStorage(t.Context(), remote, "k")
+	_, exist, _ := remote.Get(t.Context(), "k")
 	assert.True(t, exist, "remote should still have the key since degraded skips deletion")
 }
 
@@ -596,7 +596,7 @@ func TestRemoveFromStorageDegradedRemote(t *testing.T) {
 
 func TestGetFromStoreNil(t *testing.T) {
 	c := &cache{stopChan: make(chan struct{})}
-	data, exist, err := c.getFromStore(context.Background(), nil, "k")
+	data, exist, err := c.getFromStore(t.Context(), nil, "k")
 	assert.Nil(t, err)
 	assert.False(t, exist)
 	assert.Equal(t, []byte{}, data)
@@ -615,7 +615,7 @@ func TestFlushPendingWritesOnRecovery(t *testing.T) {
 		stopChan:    make(chan struct{}),
 	}
 	c.degraded.Store(true)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	// 降级期间写入：本地成功，remote 写入进入 pending 缓冲
 	err := c.putCache(ctx, "k", []byte("v"), 60)
@@ -649,7 +649,7 @@ func TestFlushPendingWritesFailureKeepsForRetry(t *testing.T) {
 		stopChan:         make(chan struct{}),
 	}
 	c.degraded.Store(true)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	_ = c.putCache(ctx, "k", []byte("v"), 60)
 	assert.Len(t, c.pendingWrites, 1)
@@ -703,7 +703,7 @@ func TestVerifyRemoteErrorKeepsLocal(t *testing.T) {
 		ttl:         60,
 		stopChan:    make(chan struct{}),
 	}
-	ctx := context.Background()
+	ctx := t.Context()
 	_ = local.Put(ctx, "k", makeVersionedData(100, []byte(`"local"`)), 60)
 
 	// verify 路径 remote 出错：不返回错误、保留并返回本地数据
@@ -734,7 +734,7 @@ func TestVerifyRemoteErrorNoLocalPropagates(t *testing.T) {
 		ttl:         60,
 		stopChan:    make(chan struct{}),
 	}
-	ctx := context.Background()
+	ctx := t.Context()
 
 	// 本地无数据时 remote 出错 → 错误向上传播
 	data, exist, err := c.getFromCache(ctx, "k", 0)
@@ -756,7 +756,7 @@ func TestPutInStoreRemoteErrorTriggersDegraded(t *testing.T) {
 		logger:           slog.Default(),
 		stopChan:         make(chan struct{}),
 	}
-	ctx := context.Background()
+	ctx := t.Context()
 
 	err := c.putCache(ctx, "k", []byte("v"), 60)
 	assert.Error(t, err, "remote Put failure should propagate")
@@ -778,7 +778,7 @@ func TestRemoveFromStorageRemoteErrorTriggersDegraded(t *testing.T) {
 		logger:           slog.Default(),
 		stopChan:         make(chan struct{}),
 	}
-	ctx := context.Background()
+	ctx := t.Context()
 
 	c.removeFromStorage(ctx, remote, "k")
 	assert.False(t, c.isDegraded())
@@ -811,7 +811,7 @@ func TestGetfnVerifyWriteBackUsesRequestTTL(t *testing.T) {
 		ttl:         60, // 固定 TTL，验证回写应被请求 TTL 覆盖
 		stopChan:    make(chan struct{}),
 	}
-	ctx := context.Background()
+	ctx := t.Context()
 
 	_ = local.Put(ctx, "k", makeVersionedData(100, []byte("old")), 60)
 	_ = remote.Put(ctx, "k", makeVersionedData(200, []byte("new")), 60)
@@ -821,9 +821,9 @@ func TestGetfnVerifyWriteBackUsesRequestTTL(t *testing.T) {
 	assert.Nil(t, err)
 	assert.True(t, exist)
 
-	local.RLock()
+	local.mu.RLock()
 	item, ok := local.items["k"]
-	local.RUnlock()
+	local.mu.RUnlock()
 	assert.True(t, ok)
 	remaining := item.Expiration - time.Now().UnixNano()
 	assert.InDelta(t, float64(100*time.Second), float64(remaining), float64(5*time.Second),
@@ -884,7 +884,7 @@ func TestRemoveFromStorageDeleteErrorWarns(t *testing.T) {
 		logger:      slog.New(ml),
 		stopChan:    make(chan struct{}),
 	}
-	ctx := context.Background()
+	ctx := t.Context()
 
 	c.removeFromStorage(ctx, remote, "k")
 	assert.Len(t, ml.warns, 1, "delete failure should be logged via Warn")
@@ -899,10 +899,10 @@ func TestRemoveFromStorageDeleteErrorWarns(t *testing.T) {
 // failListener 的 Publish 恒失败。
 type failListener struct{}
 
-func (f *failListener) Subscribe() chan string      { return make(chan string) }
-func (f *failListener) Publish(string) error        { return assert.AnError }
-func (f *failListener) Ready() <-chan struct{}      { return closedChan() }
-func (f *failListener) Close(context.Context) error { return nil }
+func (f *failListener) Subscribe() chan string                        { return make(chan string) }
+func (f *failListener) Publish(ctx context.Context, key string) error { return assert.AnError }
+func (f *failListener) Ready() <-chan struct{}                        { return closedChan() }
+func (f *failListener) Close(context.Context) error                   { return nil }
 
 // closedChan 返回一个已关闭的 channel（表示监听器立即可用）。
 func closedChan() <-chan struct{} {
@@ -918,7 +918,7 @@ func TestNoticeRemovedPublishErrorWarns(t *testing.T) {
 		logger:   slog.New(ml),
 		stopChan: make(chan struct{}),
 	}
-	c.noticeRemoved(context.Background(), "k")
+	c.noticeRemoved(t.Context(), "k")
 	assert.Len(t, ml.warns, 1, "publish failure should be logged via Warn")
 	assert.Contains(t, ml.warns[0], "publish removed key")
 }
@@ -936,7 +936,7 @@ func TestDegradedGetReturnsNotExist(t *testing.T) {
 		stopChan:    make(chan struct{}),
 	}
 	c.degraded.Store(true)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	var s string
 	err := c.Get(ctx, "missing", &s)
@@ -955,7 +955,7 @@ func TestDegradedGetfnCallsLoadFn(t *testing.T) {
 		stopChan:    make(chan struct{}),
 	}
 	c.degraded.Store(true)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	called := false
 	var s string
@@ -985,7 +985,7 @@ func TestPutMarshalError(t *testing.T) {
 		logger:     slog.Default(),
 		stopChan:   make(chan struct{}),
 	}
-	err := c.Put(context.Background(), "k", "v", 60)
+	err := c.Put(t.Context(), "k", "v", 60)
 	assert.Error(t, err)
 	assert.ErrorIs(t, err, assert.AnError, "marshal error should be wrapped with %w")
 }
@@ -998,7 +998,7 @@ func (unmarshalFailSerializer) Unmarshal(b []byte, v any) error { return assert.
 
 func TestGetUnmarshalError(t *testing.T) {
 	local := newMemStore()
-	_ = local.Put(context.Background(), "k", []byte("x"), 60)
+	_ = local.Put(t.Context(), "k", []byte("x"), 60)
 	c := &cache{
 		localStore: local,
 		serializer: unmarshalFailSerializer{},
@@ -1008,7 +1008,7 @@ func TestGetUnmarshalError(t *testing.T) {
 		stopChan:   make(chan struct{}),
 	}
 	var s string
-	err := c.Get(context.Background(), "k", &s)
+	err := c.Get(t.Context(), "k", &s)
 	assert.Error(t, err)
 	assert.ErrorIs(t, err, assert.AnError, "unmarshal error should be wrapped with %w")
 }
@@ -1023,7 +1023,7 @@ func TestGetfnMarshalErrorSkipsCaching(t *testing.T) {
 		logger:              slog.New(ml),
 		stopChan:            make(chan struct{}),
 	}
-	ctx := context.Background()
+	ctx := t.Context()
 
 	var s string
 	err := c.Getfn(ctx, "k", &s, func(ctx context.Context, key string, v any) (bool, error) {
@@ -1059,7 +1059,7 @@ func TestVerifyRemoteGoneClearsStaleLocal(t *testing.T) {
 		ttl:         60,
 		stopChan:    make(chan struct{}),
 	}
-	ctx := context.Background()
+	ctx := t.Context()
 	_ = local.Put(ctx, "k", makeVersionedData(100, []byte("old")), 60)
 	// remote 无该 key
 
@@ -1118,7 +1118,7 @@ func TestStatsClear(t *testing.T) {
 
 func TestMemStoreGetMultiDirect(t *testing.T) {
 	s := newMemStore()
-	ctx := context.Background()
+	ctx := t.Context()
 	_ = s.Put(ctx, "a", []byte("1"), 60)
 	_ = s.Put(ctx, "b", []byte("2"), 60)
 
@@ -1141,11 +1141,11 @@ func TestSetMultiFallbackPath(t *testing.T) {
 		ttl:        60,
 		stopChan:   make(chan struct{}),
 	}
-	err := c.SetMulti(context.Background(), map[string]any{"a": "1", "b": "2"}, 60)
+	err := c.SetMulti(t.Context(), map[string]any{"a": "1", "b": "2"}, 60)
 	assert.Nil(t, err)
 
 	var s string
-	assert.Nil(t, c.Get(context.Background(), "a", &s))
+	assert.Nil(t, c.Get(t.Context(), "a", &s))
 	assert.Equal(t, "1", s)
 }
 
@@ -1205,9 +1205,9 @@ type closableListener struct {
 	closeOnce sync.Once
 }
 
-func (l *closableListener) Subscribe() chan string { return l.ch }
-func (l *closableListener) Publish(string) error   { return nil }
-func (l *closableListener) Ready() <-chan struct{} { return closedChan() }
+func (l *closableListener) Subscribe() chan string                        { return l.ch }
+func (l *closableListener) Publish(ctx context.Context, key string) error { return nil }
+func (l *closableListener) Ready() <-chan struct{}                        { return closedChan() }
 func (l *closableListener) Close(context.Context) error {
 	l.closeOnce.Do(func() { close(l.ch) })
 	return nil
@@ -1240,7 +1240,7 @@ func TestGetPropagatesStoreError(t *testing.T) {
 		stopChan:   make(chan struct{}),
 	}
 	var s string
-	err := c.Get(context.Background(), "k", &s)
+	err := c.Get(t.Context(), "k", &s)
 	assert.Error(t, err)
 	assert.ErrorIs(t, err, assert.AnError, "store error should propagate through Get")
 }
@@ -1254,7 +1254,7 @@ func TestGetfnPropagatesStoreError(t *testing.T) {
 		stopChan:   make(chan struct{}),
 	}
 	var s string
-	err := c.Getfn(context.Background(), "k", &s, func(ctx context.Context, key string, v any) (bool, error) {
+	err := c.Getfn(t.Context(), "k", &s, func(ctx context.Context, key string, v any) (bool, error) {
 		return false, nil
 	}, 60)
 	assert.Error(t, err)
@@ -1269,13 +1269,13 @@ func TestGetMultiStoreError(t *testing.T) {
 		logger:     slog.Default(),
 		stopChan:   make(chan struct{}),
 	}
-	_, err := c.GetMulti(context.Background(), "a", "b")
+	_, err := c.GetMulti(t.Context(), "a", "b")
 	assert.Error(t, err)
 }
 
 func TestGetMultiRawBytesFallback(t *testing.T) {
 	local := newMemStore()
-	_ = local.Put(context.Background(), "k", makeVersionedData(100, []byte("rawdata")), 60)
+	_ = local.Put(t.Context(), "k", makeVersionedData(100, []byte("rawdata")), 60)
 	c := &cache{
 		localStore: local,
 		serializer: jsonSerializer{},
@@ -1285,7 +1285,7 @@ func TestGetMultiRawBytesFallback(t *testing.T) {
 		ttl:        60,
 		stopChan:   make(chan struct{}),
 	}
-	res, err := c.GetMulti(context.Background(), "k")
+	res, err := c.GetMulti(t.Context(), "k")
 	assert.Nil(t, err)
 	assert.Equal(t, "rawdata", res["k"], "non-JSON bytes should fall back to raw string")
 }
@@ -1299,7 +1299,7 @@ func TestSetMultiBulkError(t *testing.T) {
 		logger:     slog.Default(),
 		stopChan:   make(chan struct{}),
 	}
-	err := c.SetMulti(context.Background(), map[string]any{"a": "1"}, 60)
+	err := c.SetMulti(t.Context(), map[string]any{"a": "1"}, 60)
 	assert.Error(t, err)
 }
 
@@ -1312,7 +1312,7 @@ func TestSetMultiBulkMarshalError(t *testing.T) {
 		logger:     slog.Default(),
 		stopChan:   make(chan struct{}),
 	}
-	err := c.SetMulti(context.Background(), map[string]any{"a": "1"}, 60)
+	err := c.SetMulti(t.Context(), map[string]any{"a": "1"}, 60)
 	assert.Error(t, err)
 	assert.ErrorIs(t, err, assert.AnError)
 }
@@ -1326,7 +1326,7 @@ func TestSetMultiFallbackPutError(t *testing.T) {
 		logger:     slog.Default(),
 		stopChan:   make(chan struct{}),
 	}
-	err := c.SetMulti(context.Background(), map[string]any{"a": "1"}, 60)
+	err := c.SetMulti(t.Context(), map[string]any{"a": "1"}, 60)
 	assert.Error(t, err, "per-key fallback Put failure should propagate")
 }
 
@@ -1339,7 +1339,7 @@ func TestSetMultiFallbackMarshalError(t *testing.T) {
 		logger:     slog.Default(),
 		stopChan:   make(chan struct{}),
 	}
-	err := c.SetMulti(context.Background(), map[string]any{"a": "1"}, 60)
+	err := c.SetMulti(t.Context(), map[string]any{"a": "1"}, 60)
 	assert.Error(t, err)
 	assert.ErrorIs(t, err, assert.AnError)
 }
@@ -1352,7 +1352,7 @@ func TestPreLoadPutError(t *testing.T) {
 		logger:     slog.Default(),
 		stopChan:   make(chan struct{}),
 	}
-	err := c.PreLoad(context.Background(), func(ctx context.Context) (map[string]any, error) {
+	err := c.PreLoad(t.Context(), func(ctx context.Context) (map[string]any, error) {
 		return map[string]any{"a": "1"}, nil
 	}, 60)
 	assert.Error(t, err)
@@ -1368,7 +1368,7 @@ func TestPutCacheLocalError(t *testing.T) {
 		logger:     slog.Default(),
 		stopChan:   make(chan struct{}),
 	}
-	err := c.Put(context.Background(), "k", "v", 60)
+	err := c.Put(t.Context(), "k", "v", 60)
 	assert.Error(t, err, "local store failure should propagate from Put")
 }
 
@@ -1383,7 +1383,7 @@ func (s *mockLocalPutFailStore) Put(_ context.Context, _ string, _ []byte, _ int
 
 func TestSyncBatchRemoteGetError(t *testing.T) {
 	local := newMemStore()
-	_ = local.Put(context.Background(), "k", []byte("v"), 60)
+	_ = local.Put(t.Context(), "k", []byte("v"), 60)
 	c := &cache{
 		localStore:       local,
 		remoteStore:      &failStore{},
@@ -1393,7 +1393,7 @@ func TestSyncBatchRemoteGetError(t *testing.T) {
 	}
 	// remote Get 出错 → continue，不 panic，本地数据保留
 	c.syncBatch()
-	_, exist, _ := local.Get(context.Background(), "k")
+	_, exist, _ := local.Get(t.Context(), "k")
 	assert.True(t, exist)
 }
 
@@ -1405,7 +1405,7 @@ func TestRemoveFromStorageRemoteSuccess(t *testing.T) {
 		logger:      slog.Default(),
 		stopChan:    make(chan struct{}),
 	}
-	ctx := context.Background()
+	ctx := t.Context()
 	_ = remote.Put(ctx, "k", []byte("v"), 60)
 
 	c.degradeCount.Store(7)
@@ -1460,7 +1460,7 @@ func TestWatcherExitsOnChannelClose(t *testing.T) {
 	}()
 
 	time.Sleep(20 * time.Millisecond)   // 等待 watcher 订阅
-	_ = lis.Close(context.Background()) // 关闭 channel → watcher 退出
+	_ = lis.Close(t.Context()) // 关闭 channel → watcher 退出
 
 	select {
 	case <-done:
@@ -1474,16 +1474,16 @@ func TestWatcherExitsOnChannelClose(t *testing.T) {
 func TestMemStoreSlidingWindow(t *testing.T) {
 	s := newMemStore()
 	s.slidingWindow = 5 * time.Second
-	ctx := context.Background()
+	ctx := t.Context()
 	_ = s.Put(ctx, "k", []byte("v"), 1) // 1s TTL
 
 	time.Sleep(600 * time.Millisecond) // remaining ≈ 0.4s < 5s → 延长 TTL
 	_, exist, _ := s.Get(ctx, "k")
 	assert.True(t, exist)
 
-	s.RLock()
+	s.mu.RLock()
 	item, _ := s.items["k"]
-	s.RUnlock()
+	s.mu.RUnlock()
 	assert.Greater(t, item.Expiration-time.Now().UnixNano(), int64(700*time.Millisecond),
 		"sliding window should extend the TTL")
 }
@@ -1491,11 +1491,11 @@ func TestMemStoreSlidingWindow(t *testing.T) {
 func TestMemStorePutTTLJitter(t *testing.T) {
 	s := newMemStore()
 	s.ttlJitter = 100 * time.Millisecond
-	_ = s.Put(context.Background(), "k", []byte("v"), 60)
+	_ = s.Put(t.Context(), "k", []byte("v"), 60)
 
-	s.RLock()
+	s.mu.RLock()
 	item, _ := s.items["k"]
-	s.RUnlock()
+	s.mu.RUnlock()
 	remaining := item.Expiration - time.Now().UnixNano()
 	// jitter 加在 TTL 之上：60s ≤ remaining < 60s+100ms
 	assert.Greater(t, remaining, int64(59*time.Second))
@@ -1505,7 +1505,7 @@ func TestMemStorePutTTLJitter(t *testing.T) {
 func TestEvictIfNeededRemovesExpired(t *testing.T) {
 	s := newMemStore()
 	s.maxItems = 2
-	ctx := context.Background()
+	ctx := t.Context()
 	_ = s.Put(ctx, "a", []byte("1"), 1)  // 1s TTL
 	time.Sleep(1100 * time.Millisecond)  // 过期
 	_ = s.Put(ctx, "b", []byte("2"), 60) // 触发 evictIfNeeded → 清理过期的 a
@@ -1515,7 +1515,7 @@ func TestEvictIfNeededRemovesExpired(t *testing.T) {
 func TestEvictIfNeededMaxBytes(t *testing.T) {
 	s := newMemStore()
 	s.maxBytes = 20
-	ctx := context.Background()
+	ctx := t.Context()
 	_ = s.Put(ctx, "a", []byte("12345678901234567890"), 60) // 20 bytes
 	_ = s.Put(ctx, "b", []byte("12345678901234567890"), 60) // 40 > 20 → 淘汰 a
 	assert.Equal(t, 1, s.Len())
@@ -1525,28 +1525,28 @@ func TestEvictIfNeededMaxBytes(t *testing.T) {
 
 func TestMemStoreSetMultiOverwrite(t *testing.T) {
 	s := newMemStore()
-	ctx := context.Background()
+	ctx := t.Context()
 	_ = s.Put(ctx, "a", []byte("old"), 60)
 	_ = s.SetMulti(ctx, map[string][]byte{"a": []byte("new")}, 60)
 
-	s.RLock()
+	s.mu.RLock()
 	item, _ := s.items["a"]
-	s.RUnlock()
+	s.mu.RUnlock()
 	assert.Equal(t, []byte("new"), item.Value)
 }
 
 func TestMemStoreGetExpiredRemoves(t *testing.T) {
 	s := newMemStore()
-	ctx := context.Background()
+	ctx := t.Context()
 	_ = s.Put(ctx, "k", []byte("v"), 1)
 	time.Sleep(1100 * time.Millisecond)
 
 	_, exist, _ := s.Get(ctx, "k")
 	assert.False(t, exist)
 
-	s.RLock()
+	s.mu.RLock()
 	_, ok := s.items["k"]
-	s.RUnlock()
+	s.mu.RUnlock()
 	assert.False(t, ok, "expired entry should be removed on access")
 }
 
@@ -1561,7 +1561,7 @@ func TestWithLoggerInjection(t *testing.T) {
 	)
 
 	// 触发 Warn：remote Delete 失败
-	c.Delete(context.Background(), "k")
+	c.Delete(t.Context(), "k")
 	assert.Len(t, ml.warns, 1, "injected logger must receive the Warn call")
 	assert.Contains(t, ml.warns[0], "delete from store")
 
@@ -1572,7 +1572,7 @@ func TestWithLoggerInjection(t *testing.T) {
 
 func TestPutBytesGetStringRoundTrip(t *testing.T) {
 	c := New(WithMemStore())
-	ctx := context.Background()
+	ctx := t.Context()
 
 	// Marshal 对 []byte 裸存 → Get(*string) 应回退原始字节串
 	_ = c.Put(ctx, "k", []byte("abc"), 60)
@@ -1631,7 +1631,7 @@ func TestGetMultiDispatchesToBulkStore(t *testing.T) {
 		stopChan:   make(chan struct{}),
 	}
 
-	res, err := c.GetMulti(context.Background(), "a", "miss")
+	res, err := c.GetMulti(t.Context(), "a", "miss")
 	assert.Nil(t, err)
 	assert.True(t, local.getMultiCalled, "GetMulti should dispatch to BulkStore")
 	assert.Equal(t, "va", res["a"], "version prefix should be stripped")
@@ -1650,7 +1650,7 @@ func TestSetMultiBulkWrapsVersion(t *testing.T) {
 		stopChan:   make(chan struct{}),
 	}
 
-	err := c.SetMulti(context.Background(), map[string]any{"a": "va"}, 60)
+	err := c.SetMulti(t.Context(), map[string]any{"a": "va"}, 60)
 	assert.Nil(t, err)
 	assert.True(t, local.setMultiCalled)
 
@@ -1676,7 +1676,7 @@ func TestVerifySkipsEvictionForPendingKey(t *testing.T) {
 		ttl:         60,
 		stopChan:    make(chan struct{}),
 	}
-	ctx := context.Background()
+	ctx := t.Context()
 	_ = local.Put(ctx, "k", makeVersionedData(100, []byte(`"v"`)), 60)
 
 	// 模拟降级期间的 pending 写入
@@ -1716,32 +1716,29 @@ func TestInvalidateConcurrentGetfnSharesSingleflight(t *testing.T) {
 		ttl:        60,
 		stopChan:   make(chan struct{}),
 	}
-	ctx := context.Background()
+	ctx := t.Context()
 
 	var mu sync.Mutex
 	mutateRuns := 0
 
 	var wg sync.WaitGroup
 	for i := 0; i < 50; i++ {
-		wg.Add(2)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			_ = c.Getfn(ctx, "k", new(string), func(_ context.Context, _ string, v any) (bool, error) {
 				if pv, ok := v.(*string); ok {
 					*pv = "x"
 				}
 				return true, nil
 			}, 60)
-		}()
-		go func() {
-			defer wg.Done()
+		})
+		wg.Go(func() {
 			_ = c.Invalidate(ctx, func(_ context.Context) ([]string, error) {
 				mu.Lock()
 				mutateRuns++
 				mu.Unlock()
 				return []string{"k"}, nil
 			})
-		}()
+		})
 	}
 
 	done := make(chan struct{})
@@ -1804,7 +1801,7 @@ func TestGetMultiBulkGetError(t *testing.T) {
 		ttl:        60,
 		stopChan:   make(chan struct{}),
 	}
-	_, err := c.GetMulti(context.Background(), "a")
+	_, err := c.GetMulti(t.Context(), "a")
 	assert.Error(t, err, "BulkStore GetMulti error should propagate")
 }
 
@@ -1824,7 +1821,7 @@ func TestGetMultiBulkDispatchBranches(t *testing.T) {
 		ttl:                 60,
 		stopChan:            make(chan struct{}),
 	}
-	_, err := c.GetMulti(context.Background(), "a", "p", "miss")
+	_, err := c.GetMulti(t.Context(), "a", "p", "miss")
 	assert.Error(t, err, "missed key fallback should propagate single-path store error")
 }
 
@@ -1844,7 +1841,7 @@ func TestGetMultiBulkDispatchFallbackHit(t *testing.T) {
 		ttl:         60,
 		stopChan:    make(chan struct{}),
 	}
-	res, err := c.GetMulti(context.Background(), "a", "only-remote")
+	res, err := c.GetMulti(t.Context(), "a", "only-remote")
 	assert.Nil(t, err)
 	assert.Equal(t, "va", res["a"])
 	assert.Equal(t, "rv", res["only-remote"], "missed key should be filled via single-path fallback")
@@ -1865,7 +1862,7 @@ func TestGetMultiBulkDispatchFallbackRawBytes(t *testing.T) {
 		ttl:         60,
 		stopChan:    make(chan struct{}),
 	}
-	res, err := c.GetMulti(context.Background(), "raw")
+	res, err := c.GetMulti(t.Context(), "raw")
 	assert.Nil(t, err)
 	assert.Equal(t, "rawdata", res["raw"], "bare bytes should fall back to raw string in fallback loop")
 }
@@ -1884,7 +1881,7 @@ func TestGetMultiFallbackLoop(t *testing.T) {
 		ttl:        60,
 		stopChan:   make(chan struct{}),
 	}
-	res, err := c.GetMulti(context.Background(), "a", "b", "miss")
+	res, err := c.GetMulti(t.Context(), "a", "b", "miss")
 	assert.Nil(t, err)
 	assert.Equal(t, "va", res["a"])
 	assert.Equal(t, "rawdata", res["b"], "bare bytes should fall back to raw string")
@@ -1899,7 +1896,7 @@ func TestDeletePatternErrorWarns(t *testing.T) {
 		logger:     slog.New(ml),
 		stopChan:   make(chan struct{}),
 	}
-	c.DeletePattern(context.Background(), "x:*")
+	c.DeletePattern(t.Context(), "x:*")
 	assert.Len(t, ml.warns, 1, "pattern delete failure should be logged via Warn")
 	assert.Contains(t, ml.warns[0], "delete pattern")
 }
@@ -1914,7 +1911,7 @@ func TestPendingWritesLimit(t *testing.T) {
 		stopChan:    make(chan struct{}),
 	}
 	c.degraded.Store(true)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	// 填满 pending 上限
 	c.pendingMu.Lock()
@@ -1948,7 +1945,7 @@ func TestDegradedDeleteFlushedAfterRecovery(t *testing.T) {
 		logger:      slog.Default(),
 		stopChan:    make(chan struct{}),
 	}
-	ctx := context.Background()
+	ctx := t.Context()
 
 	// remote 已有数据（模拟其它实例写入）
 	_ = remote.Put(ctx, "k", makeVersionedData(100, []byte("v")), 60)
@@ -1979,7 +1976,7 @@ func TestDegradedPutThenDeleteFlushesDelete(t *testing.T) {
 		stopChan:    make(chan struct{}),
 	}
 	c.degraded.Store(true)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	// 降级期 Put → pendingWrites["k"]
 	assert.Nil(t, c.Put(ctx, "k", "v", 60))
@@ -2010,7 +2007,7 @@ func TestFlushBackoffSkipsFrequentRetries(t *testing.T) {
 		stopChan:    make(chan struct{}),
 	}
 	c.degraded.Store(true)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	_ = c.putCache(ctx, "k", []byte("v"), 60)
 	c.recordRemoteSuccess() // 转换点强制 flush → 失败 → pending 保留 + lastFlush 更新
@@ -2061,13 +2058,13 @@ func TestRecordRemoteErrorCountsDeadlineExceeded(t *testing.T) {
 func TestMemStoreSetMultiTTLJitter(t *testing.T) {
 	s := newMemStore()
 	s.ttlJitter = 100 * time.Millisecond
-	ctx := context.Background()
+	ctx := t.Context()
 	_ = s.SetMulti(ctx, map[string][]byte{"a": []byte("1"), "b": []byte("2")}, 60)
 
-	s.RLock()
+	s.mu.RLock()
 	ia := s.items["a"]
 	ib := s.items["b"]
-	s.RUnlock()
+	s.mu.RUnlock()
 
 	// jitter 生效：每个 key 独立 jitter，TTL 位于 [60s, 60s+100ms) 有效域
 	for _, exp := range []int64{ia.Expiration, ib.Expiration} {
@@ -2108,7 +2105,7 @@ func TestDeleteEmptyKeysNoOp(t *testing.T) {
 		logger:      slog.New(ml),
 		stopChan:    make(chan struct{}),
 	}
-	c.Delete(context.Background()) // 空参数
+	c.Delete(t.Context()) // 空参数
 	assert.Equal(t, 0, remote.deletes, "no store delete should be issued for empty keys")
 	assert.Empty(t, ml.warns, "no warn noise for empty delete")
 }
@@ -2119,7 +2116,7 @@ func TestDeleteEmptyKeysNoOp(t *testing.T) {
 
 func TestPutNilAndEmptyBytes(t *testing.T) {
 	c := New(WithMemStore())
-	ctx := context.Background()
+	ctx := t.Context()
 
 	// Put nil → 存空数据；Get 成功返回（v 保持零值）
 	assert.Nil(t, c.Put(ctx, "nil-key", nil, 60))
@@ -2149,7 +2146,7 @@ func TestGetMultiFallbackFiltersPlaceholder(t *testing.T) {
 		ttl:                 60,
 		stopChan:            make(chan struct{}),
 	}
-	res, err := c.GetMulti(context.Background(), "p")
+	res, err := c.GetMulti(t.Context(), "p")
 	assert.Nil(t, err)
 	_, ok := res["p"]
 	assert.False(t, ok, "placeholder should be filtered from GetMulti results")
@@ -2166,7 +2163,7 @@ func TestFlushPendingDeleteFailureKeepsForRetry(t *testing.T) {
 		stopChan:    make(chan struct{}),
 	}
 	c.degraded.Store(true)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	c.Delete(ctx, "k") // 降级 → pendingDeletes["k"]
 
@@ -2208,7 +2205,7 @@ func TestWriteBackFailureWarns(t *testing.T) {
 		ttl:                 60,
 		stopChan:            make(chan struct{}),
 	}
-	ctx := context.Background()
+	ctx := t.Context()
 	_ = remote.Put(ctx, "k", makeVersionedData(200, []byte(`"v"`)), 60)
 
 	var s string
@@ -2233,7 +2230,7 @@ func TestGetfnFillFailureWarns(t *testing.T) {
 		ttl:                 60,
 		stopChan:            make(chan struct{}),
 	}
-	ctx := context.Background()
+	ctx := t.Context()
 
 	var s string
 	err := c.Getfn(ctx, "k", &s, func(ctx context.Context, key string, v any) (bool, error) {
@@ -2266,11 +2263,11 @@ func TestTTLJitterDefaultEnabled(t *testing.T) {
 	assert.Equal(t, defaultTTLJitter, ms.ttlJitter, "anti-avalanche jitter should be on by default")
 
 	// 行为验证：Put 后条目过期时间落在 [TTL, TTL+defaultTTLJitter] 区间
-	ctx := context.Background()
+	ctx := t.Context()
 	_ = c.Put(ctx, "k", "v", 60)
-	ms.RLock()
+	ms.mu.RLock()
 	item, ok := ms.items["k"]
-	ms.RUnlock()
+	ms.mu.RUnlock()
 	assert.True(t, ok)
 	remaining := item.Expiration - time.Now().UnixNano()
 	assert.GreaterOrEqual(t, remaining, int64(59*time.Second))
@@ -2287,11 +2284,11 @@ func TestTTLJitterExplicitZeroDisables(t *testing.T) {
 	assert.Equal(t, time.Duration(0), ms.ttlJitter, "explicit WithTTLJitter(0) must disable jitter")
 
 	// 行为验证：过期时间为精确 TTL（无叠加）
-	ctx := context.Background()
+	ctx := t.Context()
 	_ = c.Put(ctx, "k", "v", 60)
-	ms.RLock()
+	ms.mu.RLock()
 	item, _ := ms.items["k"]
-	ms.RUnlock()
+	ms.mu.RUnlock()
 	remaining := item.Expiration - time.Now().UnixNano()
 	assert.GreaterOrEqual(t, remaining, int64(59*time.Second))
 	assert.LessOrEqual(t, remaining, int64(60*time.Second)+int64(100*time.Millisecond))
@@ -2314,7 +2311,7 @@ func TestGetfnZeroExpireUsesGlobalTTL(t *testing.T) {
 	c := New(WithMemStore(), WithTTL(120))
 	ms, ok := c.localStore.(*mem_store)
 	assert.True(t, ok)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	var s string
 	assert.Nil(t, c.Getfn(ctx, "k", &s, func(ctx context.Context, key string, v any) (bool, error) {
@@ -2326,9 +2323,9 @@ func TestGetfnZeroExpireUsesGlobalTTL(t *testing.T) {
 	assert.Equal(t, "v", s)
 
 	// 回填 TTL 应为 120s（全局 WithTTL），而非默认 60s 或永不过期
-	ms.RLock()
+	ms.mu.RLock()
 	item, ok := ms.items["k"]
-	ms.RUnlock()
+	ms.mu.RUnlock()
 	assert.True(t, ok)
 	remaining := item.Expiration - time.Now().UnixNano()
 	assert.GreaterOrEqual(t, remaining, int64(119*time.Second), "fill TTL should use global TTL (120s)")
@@ -2342,9 +2339,9 @@ func TestGetfnZeroExpireUsesGlobalTTL(t *testing.T) {
 		}
 		return true, nil
 	}, -1))
-	ms.RLock()
+	ms.mu.RLock()
 	item2, ok := ms.items["k2"]
-	ms.RUnlock()
+	ms.mu.RUnlock()
 	assert.True(t, ok)
 	remaining2 := item2.Expiration - time.Now().UnixNano()
 	assert.GreaterOrEqual(t, remaining2, int64(119*time.Second))
@@ -2382,7 +2379,7 @@ func TestSetMultiDegradedRemoteBulkBuffers(t *testing.T) {
 		stopChan:    make(chan struct{}),
 	}
 	c.degraded.Store(true)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	err := c.SetMulti(ctx, map[string]any{"a": "1", "b": "2"}, 60)
 	assert.Nil(t, err)
@@ -2450,7 +2447,7 @@ func TestSetMultiBulkRemoteErrorDrivesDegrade(t *testing.T) {
 		logger:           slog.Default(),
 		stopChan:         make(chan struct{}),
 	}
-	ctx := context.Background()
+	ctx := t.Context()
 
 	// 第 1 次：recordRemoteError(1) < 2，不降级
 	err := c.SetMulti(ctx, map[string]any{"a": "1"}, 60)
@@ -2474,7 +2471,7 @@ func TestSetMultiBulkRemoteSuccessResetsDegrade(t *testing.T) {
 		logger:           slog.Default(),
 		stopChan:         make(chan struct{}),
 	}
-	ctx := context.Background()
+	ctx := t.Context()
 
 	// 计数推进但未降级（非降级状态才走 bulk 路径）
 	c.degradeCount.Store(5)
@@ -2496,7 +2493,7 @@ func TestSetMultiLocalBulkErrorDoesNotCount(t *testing.T) {
 		logger:           slog.Default(),
 		stopChan:         make(chan struct{}),
 	}
-	ctx := context.Background()
+	ctx := t.Context()
 
 	err := c.SetMulti(ctx, map[string]any{"a": "1"}, 60)
 	assert.Error(t, err)
@@ -2517,7 +2514,7 @@ func TestPendingDeletesLimit(t *testing.T) {
 		stopChan:    make(chan struct{}),
 	}
 	c.degraded.Store(true)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	// 填满 pendingDeletes 上限
 	c.pendingMu.Lock()
@@ -2569,7 +2566,7 @@ func TestFlushWindowKeepsPendingProtection(t *testing.T) {
 		stopChan:    make(chan struct{}),
 	}
 	c.degraded.Store(true)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	// 降级期写入 pending
 	_ = c.putCache(ctx, "k", []byte("v"), 60)
@@ -2608,7 +2605,7 @@ func TestRemoteOnlyMode(t *testing.T) {
 	assert.Nil(t, c.localStore, "remote-only mode must not inject local store")
 	assert.NotNil(t, c.remoteStore)
 
-	ctx := context.Background()
+	ctx := t.Context()
 	// Put/Get 走 remote
 	assert.Nil(t, c.Put(ctx, "k", "v", 60))
 	var s string
@@ -2652,7 +2649,7 @@ func TestExplicitLocalStoreNoInjection(t *testing.T) {
 // 回填条目在 mem_store 中 Expiration==0 且持续可读；未调用 WithTTL 时保持默认
 // defaultExpiresSeconds（60s）。
 func TestTTLZeroMeansNoExpiry(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 
 	c := New(WithMemStore(), WithTTL(0))
 	assert.Equal(t, 0, c.ttl, "WithTTL(0) 应覆盖默认 ttl")

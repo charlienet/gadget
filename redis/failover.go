@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"strings"
 )
 
 // FailPolicy 定义 Redis 服务失效时的兜底策略。
@@ -50,15 +49,10 @@ func IsUnavailable(err error) bool {
 	}
 
 	// 连接池故障（internal/pool.ErrPoolTimeout / ErrClosed 的文本形态）
-	msg := err.Error()
-	if strings.Contains(msg, "redis: connection pool timeout") ||
-		strings.Contains(msg, "redis: client is closed") {
-		return true
-	}
-
 	// 集群整体不可用（cluster_state:fail）；go-redis 重试耗尽后透传，
 	// 触发应用层重试/熔断/兜底是期望行为；子串匹配对包装链有弹性
-	if strings.Contains(msg, "CLUSTERDOWN ") {
+	// 文本判据集中维护在 textmatch.isUnavailableText，此处直接调用。
+	if isUnavailableText(err) {
 		return true
 	}
 
@@ -88,7 +82,7 @@ var ErrRedisUnavailable = errors.New("redis: server unavailable")
 // fallbackErr 包装原始错误为兜底哨兵错误：errors.Is(err, ErrRedisUnavailable)
 // 可命中，同时保留原始错误信息（err.Error() 含底层原因，便于排查）。
 func fallbackErr(err error) error {
-	return fmt.Errorf("%w: %v", ErrRedisUnavailable, err)
+	return fmt.Errorf("%w: %w", ErrRedisUnavailable, err)
 }
 
 // failPolicyConfig 内嵌于各扩展的 config（BloomOption/CuckooOption 等对应的

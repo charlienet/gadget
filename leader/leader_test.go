@@ -206,6 +206,7 @@ func TestOptionsIgnoreInvalid(t *testing.T) {
 func TestRun_AcquireCancelled(t *testing.T) { // T5
 	f := &fakeLocker{} // tryLockResult 默认 false：恒被他人持有
 	e := newTestElector(f, Callbacks{OnStartedLeading: startedBlockUntilDone(f)})
+	// 保留：本用例测取消/超时语义，不能用 t.Context()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go func() {
@@ -231,6 +232,7 @@ func TestRun_AcquireCancelled(t *testing.T) { // T5
 func TestRun_AcquireErrorKeepsRetrying(t *testing.T) { // T6
 	f := &fakeLocker{tryLockErr: fmt.Errorf("%w: connection refused", lock.ErrBackendUnavailable)}
 	e := newTestElector(f, Callbacks{OnStartedLeading: startedBlockUntilDone(f)})
+	// 保留：需测试中途主动 cancel 终止 Run 并断言 context.Canceled，t.Context() 要到测试函数返回后才取消
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go func() {
@@ -254,6 +256,7 @@ func TestRun_FailOpenGuard_TryLock(t *testing.T) { // T12
 		tryLockErr:    fmt.Errorf("%w: failopen passthrough", lock.ErrBackendUnavailable),
 	}
 	e := newTestElector(f, Callbacks{OnStartedLeading: startedBlockUntilDone(f)})
+	// 保留：需测试中途主动 cancel 终止 Run 并断言 context.Canceled，t.Context() 要到测试函数返回后才取消
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go func() {
@@ -287,6 +290,7 @@ func TestRun_ElectedGracefulExit(t *testing.T) { // T7
 		},
 		OnStoppedLeading: func() { f.record("stopped") },
 	})
+	// 保留：本用例测取消/超时语义（cancel 触发优雅让位事件序），不能用 t.Context()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	runDone := runAsync(e, ctx)
@@ -330,6 +334,7 @@ func TestRun_CancelledAtAcquireMoment(t *testing.T) { // T8
 	// 使"取消先于 TryLock 返回"完全确定（fake 无视取消照常成功）。
 	f := &fakeLocker{tryLockResult: true, tryLockHold: make(chan struct{}), tryLockHoldResult: true}
 	e := newTestElector(f, Callbacks{OnStartedLeading: startedBlockUntilDone(f)})
+	// 保留：本用例测取消/超时语义（当选瞬间取消），不能用 t.Context()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	runDone := runAsync(e, ctx)
@@ -361,7 +366,7 @@ func TestRun_ResignOnStartedReturn(t *testing.T) { // T14
 		OnStartedLeading: func(context.Context, uint64) { f.record("started") }, // 立即返回=主动让位
 		OnStoppedLeading: func() { f.record("stopped") },
 	})
-	err := e.Run(context.Background())
+	err := e.Run(t.Context())
 	if err != nil {
 		t.Fatalf("主动让位应返回 nil，got %v", err)
 	}
@@ -381,7 +386,7 @@ func TestRun_NilOnStoppedLeadingSkipped(t *testing.T) { // S8
 		OnStartedLeading: func(context.Context, uint64) { f.record("started") },
 		// OnStoppedLeading 为 nil：跳过，其余行为不变
 	})
-	err := e.Run(context.Background())
+	err := e.Run(t.Context())
 	if err != nil {
 		t.Fatalf("err = %v, want nil", err)
 	}
@@ -405,6 +410,7 @@ func TestRun_StartedLeadingDoesNotBlockRenew(t *testing.T) { // T18
 		},
 		OnStoppedLeading: func() { f.record("stopped") },
 	})
+	// 保留：本用例测取消/超时语义（cancel 后 Run 须立即返回），不能用 t.Context()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	runDone := runAsync(e, ctx)
@@ -433,7 +439,7 @@ func TestRun_LostOnRenewFalse(t *testing.T) { // T9
 		OnStoppedLeading: func() { f.record("stopped") },
 	})
 	start := time.Now()
-	err := e.Run(context.Background())
+	err := e.Run(t.Context())
 	elapsed := time.Since(start)
 	if !errors.Is(err, ErrLeadershipLost) {
 		t.Fatalf("err = %v, want ErrLeadershipLost", err)
@@ -462,7 +468,7 @@ func TestRun_LostOnRenewDeadline(t *testing.T) { // T10（阻塞续约变体：d
 		OnStoppedLeading: func() { f.record("stopped") },
 	})
 	start := time.Now()
-	err := e.Run(context.Background())
+	err := e.Run(t.Context())
 	elapsed := time.Since(start)
 	if !errors.Is(err, ErrLeadershipLost) {
 		t.Fatalf("err = %v, want ErrLeadershipLost", err)
@@ -488,7 +494,7 @@ func TestRun_LostOnRenewPersistentError(t *testing.T) { // T10 主体：恒 err 
 		OnStoppedLeading: func() { f.record("stopped") },
 	})
 	start := time.Now()
-	err := e.Run(context.Background())
+	err := e.Run(t.Context())
 	elapsed := time.Since(start)
 	if !errors.Is(err, ErrLeadershipLost) {
 		t.Fatalf("err = %v, want ErrLeadershipLost", err)
@@ -513,6 +519,7 @@ func TestRun_RenewFlapThenRecover(t *testing.T) { // T11（S4：前 1 次失败�
 		OnStartedLeading: startedBlockUntilDone(f),
 		OnStoppedLeading: func() { f.record("stopped") },
 	})
+	// 保留：需测试中途主动 cancel 终止 Run 并断言 context.Canceled，t.Context() 要到测试函数返回后才取消
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	runDone := runAsync(e, ctx)
@@ -548,7 +555,7 @@ func TestRun_FailOpenGuard_Renew(t *testing.T) { // T13
 		OnStartedLeading: startedBlockUntilDone(f),
 		OnStoppedLeading: func() { f.record("stopped") },
 	})
-	err := e.Run(context.Background())
+	err := e.Run(t.Context())
 	if !errors.Is(err, ErrLeadershipLost) {
 		t.Fatalf("err = %v, want ErrLeadershipLost", err)
 	}
@@ -564,7 +571,7 @@ func TestRun_RenewUnsupported(t *testing.T) { // T15
 		OnStoppedLeading: func() { f.record("stopped") },
 	})
 	start := time.Now()
-	err := e.Run(context.Background())
+	err := e.Run(t.Context())
 	elapsed := time.Since(start)
 	if !errors.Is(err, ErrLeadershipLost) {
 		t.Fatalf("err = %v, want 命中 ErrLeadershipLost", err)
@@ -600,10 +607,11 @@ func TestRun_TermIncrementsAcrossRuns(t *testing.T) { // T16
 		},
 		OnStoppedLeading: func() { f.record("stopped") },
 	})
-	if err := e.Run(context.Background()); err != nil {
+	if err := e.Run(t.Context()); err != nil {
 		t.Fatalf("run1 err = %v, want nil", err)
 	}
 	// run2：竞选成功即当选，外层 ctx 取消走优雅退出（run2 干净结束）
+	// 保留：本用例测取消/超时语义（优雅退出路径），不能用 t.Context()
 	ctx2, cancel2 := context.WithCancel(context.Background())
 	defer cancel2()
 	runDone := runAsync(e, ctx2)
@@ -629,6 +637,7 @@ func TestRun_TermIncrementsAcrossRuns(t *testing.T) { // T16
 func TestRun_ConcurrentRunPanics(t *testing.T) { // T17
 	f := &fakeLocker{tryLockResult: false, tryLockBlock: make(chan struct{})}
 	e := newTestElector(f, Callbacks{OnStartedLeading: startedBlockUntilDone(f)})
+	// 保留：需测试中途主动 cancel 终止阻塞中的 Run A，t.Context() 要到测试函数返回后才取消
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	aDone := runAsync(e, ctx)
@@ -676,6 +685,7 @@ func TestNextRetry_Bounds(t *testing.T) { // T19
 func TestIsLeader_RaceSmoke(t *testing.T) { // T20
 	f := &fakeLocker{tryLockResult: true}
 	e := newTestElector(f, Callbacks{OnStartedLeading: startedBlockUntilDone(f)})
+	// 保留：需测试中途主动 cancel 终止 Run 并断言 context.Canceled，t.Context() 要到测试函数返回后才取消
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	runDone := runAsync(e, ctx)
@@ -683,15 +693,13 @@ func TestIsLeader_RaceSmoke(t *testing.T) { // T20
 
 	var wg sync.WaitGroup
 	for i := 0; i < 8; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for j := 0; j < 200; j++ {
 				_ = e.IsLeader()
 				_ = e.Term()
 				_ = e.Identity()
 			}
-		}()
+		})
 	}
 	time.Sleep(10 * time.Millisecond)
 	cancel()
@@ -709,7 +717,7 @@ func TestRun_UnlockErrorStillCompletes(t *testing.T) { // T21（R5）
 		OnStartedLeading: func(context.Context, uint64) { f.record("started") },
 		OnStoppedLeading: func() { f.record("stopped") },
 	})
-	err := e.Run(context.Background())
+	err := e.Run(t.Context())
 	if err != nil {
 		t.Fatalf("Unlock 失败不得改变返回值: err = %v, want nil（与 T14 成功路径一致）", err)
 	}
@@ -721,7 +729,7 @@ func TestRun_UnlockErrorStillCompletes(t *testing.T) { // T21（R5）
 	// 变体：第二轮 Run 在 TryLock 前 N 次 false（模拟等待上一轮锁 TTL 自然
 	// 过期）后成功当选。
 	f.tryLockSeq = []bool{false, false, false, true}
-	if err := e.Run(context.Background()); err != nil {
+	if err := e.Run(t.Context()); err != nil {
 		t.Fatalf("run2 err = %v, want nil", err)
 	}
 	if e.Term() != 2 {

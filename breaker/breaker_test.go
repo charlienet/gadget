@@ -106,15 +106,13 @@ func TestBreakerHalfOpenSingleFlight(t *testing.T) {
 	var mu sync.Mutex
 
 	for i := 0; i < concurrency; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			if err := b.Allow(); err == nil {
 				mu.Lock()
 				allowed++
 				mu.Unlock()
 			}
-		}()
+		})
 	}
 	wg.Wait()
 
@@ -130,9 +128,7 @@ func TestBreakerConcurrentMixed(t *testing.T) {
 
 	var wg sync.WaitGroup
 	for i := 0; i < 8; i++ {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
+		wg.Go(func() {
 			for j := 0; j < 50; j++ {
 				switch (i + j) % 4 {
 				case 0:
@@ -151,7 +147,7 @@ func TestBreakerConcurrentMixed(t *testing.T) {
 					b.Success()
 				}
 			}
-		}(i)
+		})
 	}
 	wg.Wait()
 }

@@ -302,8 +302,9 @@ func (rdb redisClient) AddPrefix(prefixes ...string) Client {
 	rdb.state.mu.Lock()
 	if rdb.state.closed {
 		// 父连接池已关闭：新建的子连接池无人管理，立即关闭避免泄漏。
-		// 紧急清理路径：刻意使用无 deadline 的 Background，不受调用方上下文影响。
 		rdb.state.mu.Unlock()
+		// 紧急清理路径：刻意使用无 deadline 的 Background，不受调用方上下文影响。
+		// 豁免：接口契约（紧急清理无 ctx 入口），此处为背景决策记录（README v0.9.0 同级）。
 		_ = child.GracefulClose(context.Background())
 		return child
 	}
@@ -361,6 +362,8 @@ func (rdb redisClient) Capability() *Capability {
 // 本方法是无 ctx 的接口兼容形态：内部以 Background 无限等待级联关闭；
 // 需要超时/取消控制时使用 GracefulClose(ctx)。
 func (rdb redisClient) Close() error {
+	// 需要超时/取消控制时使用 GracefulClose(ctx)。
+	// 豁免：接口契约（io.Closer）无 ctx 入口，此处为背景决策记录（README v0.9.0 同级）。
 	return rdb.GracefulClose(context.Background())
 }
 
@@ -467,10 +470,7 @@ func classifyLuaError(err error) luaVerdict {
 	if IsUnavailable(err) {
 		return luaVerdictUnavailable
 	}
-	msg := err.Error()
-	if strings.Contains(msg, "unknown command") ||
-		strings.Contains(msg, "ERR unknown") ||
-		strings.Contains(msg, "not allowed") {
+	if isUnknownCommandText(err) || isNotAllowedText(err) {
 		return luaVerdictUnsupported
 	}
 	return luaVerdictDataError

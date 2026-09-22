@@ -41,7 +41,7 @@ func cancelledSleep() func(context.Context, time.Duration) error {
 
 func TestDoFirstSuccess(t *testing.T) {
 	calls := 0
-	err := Do(context.Background(), func(context.Context) error {
+	err := Do(t.Context(), func(context.Context) error {
 		calls++
 		return nil
 	})
@@ -57,7 +57,7 @@ func TestDoSuccessOnNthAttempt(t *testing.T) {
 	sleeps := withFakeSleep(t, 0)
 	calls := 0
 	wantErr := errors.New("boom")
-	err := Do(context.Background(), func(context.Context) error {
+	err := Do(t.Context(), func(context.Context) error {
 		calls++
 		if calls < 3 {
 			return wantErr
@@ -84,6 +84,7 @@ func TestDoInterAttemptCtxCheckBranch(t *testing.T) {
 	sleepFunc = func(context.Context, time.Duration) error { return nil }
 	t.Cleanup(func() { sleepFunc = old })
 
+	// 保留：本用例测取消/超时语义（尝试间 ctx 检查），不能用 t.Context()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	calls := 0
@@ -105,7 +106,7 @@ func TestDoInterAttemptCtxCheckBranch(t *testing.T) {
 func TestDoNonRetryableReturnsImmediately(t *testing.T) {
 	calls := 0
 	sentinel := errors.New("permanent")
-	err := Do(context.Background(), func(context.Context) error {
+	err := Do(t.Context(), func(context.Context) error {
 		calls++
 		return fmt.Errorf("wrap: %w", sentinel)
 	}, WithRetryable(func(error) bool { return false }))
@@ -124,7 +125,7 @@ func TestDoAttemptsExhaustedReturnsLastErr(t *testing.T) {
 	withFakeSleep(t, 0)
 	calls := 0
 	errs := []error{errors.New("e1"), errors.New("e2"), errors.New("e3")}
-	err := Do(context.Background(), func(context.Context) error {
+	err := Do(t.Context(), func(context.Context) error {
 		defer func() { calls++ }()
 		return errs[calls]
 	}, WithMaxAttempts(3), WithBackoff(Fixed(time.Millisecond)))
@@ -143,7 +144,7 @@ func TestDoAttemptsExhaustedReturnsLastErr(t *testing.T) {
 func TestDoDefaultAttemptsIsFive(t *testing.T) {
 	withFakeSleep(t, 0)
 	calls := 0
-	err := Do(context.Background(), func(context.Context) error {
+	err := Do(t.Context(), func(context.Context) error {
 		calls++
 		return errors.New("always")
 	})
@@ -161,7 +162,7 @@ func TestDoSleepCancelledReturnsCtxErr(t *testing.T) {
 	t.Cleanup(func() { sleepFunc = old })
 
 	calls := 0
-	err := Do(context.Background(), func(context.Context) error {
+	err := Do(t.Context(), func(context.Context) error {
 		calls++
 		return errors.New("boom")
 	}, WithMaxAttempts(10))
@@ -175,6 +176,7 @@ func TestDoSleepCancelledReturnsCtxErr(t *testing.T) {
 
 func TestDoSuccessWinsOverCancelledCtx(t *testing.T) {
 	// 规则 1：fn 返回 nil → 即使 ctx 已取消也返回成功。
+	// 保留：本用例测取消/超时语义（预取消 ctx），不能用 t.Context()
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	err := Do(ctx, func(context.Context) error { return nil })
@@ -186,6 +188,7 @@ func TestDoSuccessWinsOverCancelledCtx(t *testing.T) {
 func TestDoCanceledCtxAfterFailedFnReturnsLastErr(t *testing.T) {
 	// 规则 1/2 与规则 3 的优先级：fn 返回时（无论取消是否发生于 fn 内），
 	// nil→成功优先；不可重试错误→原始错误优先于 ctx.Err()。
+	// 保留：本用例测取消/超时语义（预取消 ctx），不能用 t.Context()
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	sentinel := errors.New("sentinel")
@@ -199,6 +202,7 @@ func TestDoCanceledCtxAfterFailedFnReturnsLastErr(t *testing.T) {
 func TestDoFnSeesLiveCtx(t *testing.T) {
 	// 规则 4：fn 执行中 ctx 取消不中断 fn，fn 可感知取消并自行返回，
 	// 其错误按规则 2 原样返回（此时不做尝试间 ctx 检查）。
+	// 保留：本用例测取消/超时语义（fn 执行中取消），不能用 t.Context()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	sentinel := errors.New("fn-self-decided")
@@ -225,7 +229,7 @@ func TestDoAttemptsWinsBeforeElapsed(t *testing.T) {
 	sleeps := withFakeSleep(t, 0)
 	calls := 0
 	last := errors.New("last")
-	err := Do(context.Background(), func(context.Context) error {
+	err := Do(t.Context(), func(context.Context) error {
 		calls++
 		return last
 	}, WithMaxAttempts(2), WithMaxElapsed(time.Hour), WithBackoff(Fixed(time.Second)))
@@ -244,7 +248,7 @@ func TestDoElapsedWinsBeforeAttempts(t *testing.T) {
 	sleeps := withFakeSleep(t, 30*time.Millisecond)
 	calls := 0
 	e1, e2 := errors.New("e1"), errors.New("e2")
-	err := Do(context.Background(), func(context.Context) error {
+	err := Do(t.Context(), func(context.Context) error {
 		calls++
 		if calls == 1 {
 			return e1
@@ -270,7 +274,7 @@ func TestDoElapsedIsSoftLimit(t *testing.T) {
 	sleeps := withFakeSleep(t, time.Millisecond)
 	calls := 0
 	e := errors.New("x")
-	err := Do(context.Background(), func(context.Context) error {
+	err := Do(t.Context(), func(context.Context) error {
 		calls++
 		return e
 	}, WithMaxAttempts(100), WithMaxElapsed(500*time.Microsecond), WithBackoff(Fixed(200*time.Millisecond)))
@@ -295,7 +299,7 @@ func TestDoPanicPropagates(t *testing.T) {
 			t.Fatalf("panic 值 = %v, want boom-panic", r)
 		}
 	}()
-	_ = Do(context.Background(), func(context.Context) error {
+	_ = Do(t.Context(), func(context.Context) error {
 		panic("boom-panic")
 	})
 }
@@ -306,7 +310,7 @@ func TestDoNonPositiveBackoffMeansImmediateRetry(t *testing.T) {
 	e := errors.New("x")
 	// 自定义 Backoff 返回 0/负值：Do 内 clamp 为 0 → 立即重试，
 	// 每次仍经过 sleep 路径（给 ctx 检查机会）。
-	err := Do(context.Background(), func(context.Context) error {
+	err := Do(t.Context(), func(context.Context) error {
 		calls++
 		return e
 	}, WithMaxAttempts(3), WithBackoff(&seqBackoff{values: []time.Duration{0, -5, 1, 1}}))
@@ -330,8 +334,8 @@ func TestDoSharedBackoffResetEachCall(t *testing.T) {
 
 	// 顺序两次 Do（各失败一次触发一次退避），中间穿插一次成功 Do
 	// 消耗底层序列；第二次 Do 首步仍应为 100ms（Reset 生效）。
-	_ = Do(context.Background(), failOnce, WithBackoff(b), WithMaxAttempts(2))
-	_ = Do(context.Background(), noop, WithBackoff(b))
+	_ = Do(t.Context(), failOnce, WithBackoff(b), WithMaxAttempts(2))
+	_ = Do(t.Context(), noop, WithBackoff(b))
 
 	old := sleepFunc
 	sleepFunc = func(ctx context.Context, d time.Duration) error {
@@ -340,7 +344,7 @@ func TestDoSharedBackoffResetEachCall(t *testing.T) {
 		}
 		return old(ctx, d)
 	}
-	_ = Do(context.Background(), failOnce, WithBackoff(b), WithMaxAttempts(2))
+	_ = Do(t.Context(), failOnce, WithBackoff(b), WithMaxAttempts(2))
 }
 
 func TestOptionsIgnoreNilAndInvalid(t *testing.T) {
@@ -370,7 +374,7 @@ func TestDoNilOptionIgnored(t *testing.T) {
 	withFakeSleep(t, 0)
 	calls := 0
 	e := errors.New("x")
-	err := Do(context.Background(), func(context.Context) error {
+	err := Do(t.Context(), func(context.Context) error {
 		calls++
 		return e
 	}, nil, WithMaxAttempts(2))
@@ -390,9 +394,10 @@ func TestDoConcurrentDefaultConfigRace(t *testing.T) {
 	var wg sync.WaitGroup
 	errCh := make(chan error, n)
 	for i := 0; i < n; i++ {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
+
+		i := i
+
+		wg.Go(func() {
 			defer func() {
 				if r := recover(); r != nil {
 					errCh <- fmt.Errorf("goroutine %d panic: %v", i, r)
@@ -402,7 +407,7 @@ func TestDoConcurrentDefaultConfigRace(t *testing.T) {
 			if i%2 == 0 {
 				// 默认配置（共享工厂闭包 + 每 Do 新建 Exponential 实例）
 				calls := 0
-				err = Do(context.Background(), func(context.Context) error {
+				err = Do(t.Context(), func(context.Context) error {
 					calls++
 					if calls < 3 {
 						return errors.New("transient")
@@ -411,7 +416,7 @@ func TestDoConcurrentDefaultConfigRace(t *testing.T) {
 				})
 			} else {
 				calls := 0
-				err = Do(context.Background(), func(context.Context) error {
+				err = Do(t.Context(), func(context.Context) error {
 					calls++
 					if calls < 3 {
 						return errors.New("transient")
@@ -420,7 +425,7 @@ func TestDoConcurrentDefaultConfigRace(t *testing.T) {
 				}, WithBackoff(Fixed(time.Duration(i)*time.Millisecond)))
 			}
 			errCh <- err
-		}(i)
+		})
 	}
 	wg.Wait()
 	close(errCh)
@@ -434,6 +439,7 @@ func TestDoConcurrentDefaultConfigRace(t *testing.T) {
 func TestDefaultSleepInterruptedByCtx(t *testing.T) {
 	// 生产路径 defaultSleep 本体：长睡眠期间 ctx 取消应立即返回
 	// ctx.Err()（time.Timer + select，禁止 time.Sleep 语义）。
+	// 保留：本用例测取消/超时语义（睡眠中被取消），不能用 t.Context()
 	ctx, cancel := context.WithCancel(context.Background())
 	old := sleepFunc
 	sleepFunc = defaultSleep
@@ -459,12 +465,13 @@ func TestDefaultSleepInterruptedByCtx(t *testing.T) {
 func TestDefaultSleepNonPositiveReturnsCtxErr(t *testing.T) {
 	t.Parallel()
 	// retry.go defaultSleep d<=0 分支：零等待也如实反馈 ctx 状态。
-	if err := defaultSleep(context.Background(), 0); err != nil {
+	if err := defaultSleep(t.Context(), 0); err != nil {
 		t.Fatalf("存活 ctx d=0 = %v, want nil", err)
 	}
-	if err := defaultSleep(context.Background(), -time.Second); err != nil {
+	if err := defaultSleep(t.Context(), -time.Second); err != nil {
 		t.Fatalf("存活 ctx d<0 = %v, want nil", err)
 	}
+	// 保留：本用例测取消/超时语义（已取消 ctx 的状态反馈），不能用 t.Context()
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	if err := defaultSleep(ctx, 0); !errors.Is(err, context.Canceled) {
@@ -478,6 +485,7 @@ func TestDefaultSleepNonPositiveReturnsCtxErr(t *testing.T) {
 func TestDefaultSleepZeroWaitStillChecksTimeout(t *testing.T) {
 	t.Parallel()
 	// d<=0 快速路径同样覆盖超时态：返回 DeadlineExceeded 而非 nil。
+	// 保留：本用例测取消/超时语义（超时 ctx），不能用 t.Context()
 	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
 	defer cancel()
 	<-ctx.Done() // 等待超时落地，确定化

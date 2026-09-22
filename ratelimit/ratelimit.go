@@ -51,8 +51,9 @@
 // Limiter 全部方法并发安全。锁纪律：per-key 账本条目各自持一把互斥锁，
 // 临界区内只做三件事——判存量、判静默期、登记/消费 pending，**绝不做
 // 网络等待**；批发在途期间，同 key 存量充足的热路径请求与其他 key 的
-// 请求均不被阻塞。批发用内部 ctx（context.WithTimeout(context.Background(),
-// WithBackendTimeout)），不随单个请求 ctx 取消而殃及同批共享者。
+// 请求均不被阻塞。批发用内部 ctx（context.WithTimeout(context.WithoutCancel(...),
+// WithBackendTimeout)），保留上游值/trace 传播但断开取消链——不随单个请求
+// ctx 取消而殃及同批共享者。
 // Backend 在 Wholesale 中 panic 时 panic 继续穿透（本包不 recover）；
 // panic 中断当次批发前，leader 路径会清理在途状态并向等待者广播错误
 // （等待者收到"批发被中断"错误原样透传，不死等）。
@@ -161,8 +162,7 @@ func New(b Backend, opts ...Option) *Limiter {
 	// WaitGroup（Close 即停，防 goroutine 泄漏），不加 recover。
 	_, memBackend := l.backend.(*memoryBackend)
 	if l.localLease || (memBackend && l.spec.IdleRetention > 0) {
-		l.wg.Add(1)
-		go l.sweepLoop()
+	l.wg.Go(l.sweepLoop)
 	}
 	return l
 }
@@ -230,12 +230,11 @@ func (l *Limiter) Wait(ctx context.Context, key string, n int) error {
 	for {
 		ok, err := l.Allow(ctx, key, n)
 
-		var xe *ExceededError
-		switch {
-		case ok && err == nil:
+		if ok && err == nil {
 			return nil
+		}
 
-		case errors.As(err, &xe):
+		if xe, ok := errors.AsType[*ExceededError](err); ok {
 			// 唯一可续循环的出口：被拒后按建议时长等待。
 			wait := xe.RetryAfter
 			if wait <= 0 {
@@ -257,12 +256,12 @@ func (l *Limiter) Wait(ctx context.Context, key string, n int) error {
 				return &ExceededError{Key: key, N: n}
 			}
 
-		case err != nil:
+		} else if err != nil {
 			// ctx 取消、ErrClosed、命令级错误、后端不可用（Open/Closed
 			// 皆然）——立即返回，不继续循环等待。
 			return err
 
-		default:
+		} else {
 			// 防御：(false, nil) 按契约不可达，按超限语义错误返回避免死循环。
 			return &ExceededError{Key: key, N: n}
 		}

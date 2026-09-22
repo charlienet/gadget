@@ -22,12 +22,12 @@ var benchData = benchUser{
 // BenchmarkSerializerMarshal 对比标准库 encoding/json 与 sonic（默认序列化器）的序列化性能。
 func BenchmarkSerializerMarshal(b *testing.B) {
 	b.Run("std-json", func(b *testing.B) {
-		for i := 0; i < b.N; i++ {
+		for b.Loop() {
 			_, _ = json.Marshal(benchData)
 		}
 	})
 	b.Run("sonic", func(b *testing.B) {
-		for i := 0; i < b.N; i++ {
+		for b.Loop() {
 			_, _ = sonic.ConfigStd.Marshal(benchData)
 		}
 	})
@@ -38,13 +38,13 @@ func BenchmarkSerializerUnmarshal(b *testing.B) {
 	raw, _ := json.Marshal(benchData)
 
 	b.Run("std-json", func(b *testing.B) {
-		for i := 0; i < b.N; i++ {
+		for b.Loop() {
 			var u benchUser
 			_ = json.Unmarshal(raw, &u)
 		}
 	})
 	b.Run("sonic", func(b *testing.B) {
-		for i := 0; i < b.N; i++ {
+		for b.Loop() {
 			var u benchUser
 			_ = sonic.ConfigStd.Unmarshal(raw, &u)
 		}

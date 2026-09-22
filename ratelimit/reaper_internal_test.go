@@ -1,7 +1,6 @@
 package ratelimit
 
 import (
-	"context"
 	"fmt"
 	"sync"
 	"testing"
@@ -27,7 +26,7 @@ func TestMemoryBackendReapIdleShrinksEntries(t *testing.T) {
 	clock := newFakeClock()
 	m := newMemoryBackend(clock)
 	spec := reaperSpec()
-	ctx := context.Background()
+	ctx := t.Context()
 
 	const n = 500
 	for i := 0; i < n; i++ {
@@ -62,7 +61,7 @@ func TestMemoryBackendReapRebuildEqualsFreshBucket(t *testing.T) {
 	clock := newFakeClock()
 	m := newMemoryBackend(clock)
 	spec := reaperSpec()
-	ctx := context.Background()
+	ctx := t.Context()
 
 	// 耗尽存量。
 	if g, _, _ := m.Wholesale(ctx, "k", 10, spec, GrantBestEffort); g != 10 {
@@ -96,7 +95,7 @@ func TestLimiterSweepOnceReapsMemoryEntries(t *testing.T) {
 	clock := newFakeClock()
 	mem := newMemoryBackend(clock)
 	spec := reaperSpec()
-	ctx := context.Background()
+	ctx := t.Context()
 
 	l := New(mem, WithClock(clock), WithRate(10, time.Second), WithBurst(10), WithIdleRetention(time.Minute))
 	defer l.Close()
@@ -124,14 +123,13 @@ func TestMemoryBackendReapIdleConcurrentNoPanic(t *testing.T) {
 	clock := newFakeClock()
 	m := newMemoryBackend(clock)
 	spec := reaperSpec()
-	ctx := context.Background()
+	ctx := t.Context()
 
 	var wg sync.WaitGroup
 	// 并发写入方（不同 key 空间重叠）。
 	for w := 0; w < 8; w++ {
-		wg.Add(1)
-		go func(base int) {
-			defer wg.Done()
+		base := w // 捕获循环变量（wg.Go 立即求值闭包）
+		wg.Go(func() {
 			for j := 0; j < 300; j++ {
 				key := fmt.Sprintf("c:%d", (base*300+j)%1000)
 				if _, _, err := m.Wholesale(ctx, key, 1, spec, GrantBestEffort); err != nil {
@@ -139,27 +137,23 @@ func TestMemoryBackendReapIdleConcurrentNoPanic(t *testing.T) {
 					return
 				}
 			}
-		}(w)
+		})
 	}
 	// 并发清扫方。
 	for r := 0; r < 4; r++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for j := 0; j < 200; j++ {
 				m.reapIdle(clock.Now(), spec.IdleRetention)
 				_ = m.bucketCount()
 			}
-		}()
+		})
 	}
 	// 并发推进时钟方（模拟闲置期滚动）。
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		for j := 0; j < 200; j++ {
 			clock.Advance(time.Second)
 		}
-	}()
+	})
 
 	wg.Wait()
 }
@@ -169,7 +163,7 @@ func TestMemoryBackendReapIdleConcurrentNoPanic(t *testing.T) {
 func TestMemoryBackendReapIdleDisabledOnZeroRetention(t *testing.T) {
 	clock := newFakeClock()
 	m := newMemoryBackend(clock)
-	ctx := context.Background()
+	ctx := t.Context()
 	spec := reaperSpec()
 
 	for i := 0; i < 10; i++ {

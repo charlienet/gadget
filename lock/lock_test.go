@@ -14,12 +14,12 @@ func TestTryLock_Mutex(t *testing.T) {
 	l1 := New("test-key", WithBackend(b))
 	l2 := New("test-key", WithBackend(b))
 
-	ok1, err := l1.TryLock(context.Background())
+	ok1, err := l1.TryLock(t.Context())
 	if err != nil || !ok1 {
 		t.Fatalf("l1.TryLock: ok=%v, err=%v", ok1, err)
 	}
 
-	ok2, err := l2.TryLock(context.Background())
+	ok2, err := l2.TryLock(t.Context())
 	if err != nil {
 		t.Fatalf("l2.TryLock unexpected error: %v", err)
 	}
@@ -33,16 +33,16 @@ func TestTryLock_AfterUnlock(t *testing.T) {
 	l1 := New("test-key", WithBackend(b))
 	l2 := New("test-key", WithBackend(b))
 
-	ok1, err := l1.TryLock(context.Background())
+	ok1, err := l1.TryLock(t.Context())
 	if err != nil || !ok1 {
 		t.Fatalf("l1.TryLock: ok=%v, err=%v", ok1, err)
 	}
 
-	if err := l1.Unlock(context.Background()); err != nil {
+	if err := l1.Unlock(t.Context()); err != nil {
 		t.Fatalf("l1.Unlock: %v", err)
 	}
 
-	ok2, err := l2.TryLock(context.Background())
+	ok2, err := l2.TryLock(t.Context())
 	if err != nil || !ok2 {
 		t.Fatalf("l2.TryLock after unlock: ok=%v, err=%v", ok2, err)
 	}
@@ -55,18 +55,18 @@ func TestUnlock_NonOwner(t *testing.T) {
 	owner := New("test-key", WithBackend(b))
 	other := New("test-key", WithBackend(b))
 
-	ok, err := owner.TryLock(context.Background())
+	ok, err := owner.TryLock(t.Context())
 	if err != nil || !ok {
 		t.Fatalf("owner.TryLock: ok=%v, err=%v", ok, err)
 	}
 
 	// 非持有者尝试释放 — 后端静默返回 nil
-	if err := other.Unlock(context.Background()); err != nil {
+	if err := other.Unlock(t.Context()); err != nil {
 		t.Fatalf("non-owner Unlock should be nil, got: %v", err)
 	}
 
 	// 锁仍然存在
-	ok2, err := owner.TryLock(context.Background())
+	ok2, err := owner.TryLock(t.Context())
 	if err != nil {
 		t.Fatalf("owner re-try after non-owner unlock: err=%v", err)
 	}
@@ -79,17 +79,17 @@ func TestUnlock_OwnerReacquire(t *testing.T) {
 	b := newFakeBackend()
 	l := New("test-key", WithBackend(b))
 
-	ok, err := l.TryLock(context.Background())
+	ok, err := l.TryLock(t.Context())
 	if err != nil || !ok {
 		t.Fatalf("TryLock: ok=%v, err=%v", ok, err)
 	}
 
-	if err := l.Unlock(context.Background()); err != nil {
+	if err := l.Unlock(t.Context()); err != nil {
 		t.Fatalf("Unlock: %v", err)
 	}
 
 	// 持有者释放后可再获取
-	ok2, err := l.TryLock(context.Background())
+	ok2, err := l.TryLock(t.Context())
 	if err != nil || !ok2 {
 		t.Fatalf("re-acquire after unlock: ok=%v, err=%v", ok2, err)
 	}
@@ -101,7 +101,7 @@ func TestLock_BlockedThenReleased(t *testing.T) {
 	b := newFakeBackend()
 	hold := New("test-key", WithBackend(b))
 
-	ok, err := hold.TryLock(context.Background())
+	ok, err := hold.TryLock(t.Context())
 	if err != nil || !ok {
 		t.Fatalf("hold.TryLock: ok=%v, err=%v", ok, err)
 	}
@@ -112,14 +112,14 @@ func TestLock_BlockedThenReleased(t *testing.T) {
 	go func() {
 		defer close(done)
 		waiter := New("test-key", WithBackend(b), WithRetryInterval(10*time.Millisecond))
-		gotErr = waiter.Lock(context.Background())
+		gotErr = waiter.Lock(t.Context())
 	}()
 
 	// 等待 waiter 进入阻塞状态
 	time.Sleep(30 * time.Millisecond)
 
 	// 释放锁
-	if err := hold.Unlock(context.Background()); err != nil {
+	if err := hold.Unlock(t.Context()); err != nil {
 		t.Fatalf("hold.Unlock: %v", err)
 	}
 
@@ -139,11 +139,12 @@ func TestLock_ContextCancelled(t *testing.T) {
 	b := newFakeBackend()
 	hold := New("test-key", WithBackend(b))
 
-	ok, err := hold.TryLock(context.Background())
+	ok, err := hold.TryLock(t.Context())
 	if err != nil || !ok {
 		t.Fatalf("hold.TryLock: ok=%v, err=%v", ok, err)
 	}
 
+	// 保留：本用例测取消/超时语义（Lock 等待中被取消），不能用 t.Context()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 
@@ -171,7 +172,7 @@ func TestLock_Timeout(t *testing.T) {
 	b := newFakeBackend()
 	hold := New("test-key", WithBackend(b))
 
-	ok, err := hold.TryLock(context.Background())
+	ok, err := hold.TryLock(t.Context())
 	if err != nil || !ok {
 		t.Fatalf("hold.TryLock: ok=%v, err=%v", ok, err)
 	}
@@ -181,7 +182,7 @@ func TestLock_Timeout(t *testing.T) {
 		WithTimeout(50*time.Millisecond),
 	)
 
-	gotErr := waiter.Lock(context.Background())
+	gotErr := waiter.Lock(t.Context())
 	if !errors.Is(gotErr, context.DeadlineExceeded) {
 		t.Fatalf("expected context.DeadlineExceeded, got: %v", gotErr)
 	}
@@ -193,12 +194,12 @@ func TestRenew_Owner(t *testing.T) {
 	b := newFakeBackend()
 	l := New("test-key", WithBackend(b))
 
-	ok, err := l.TryLock(context.Background())
+	ok, err := l.TryLock(t.Context())
 	if err != nil || !ok {
 		t.Fatalf("TryLock: ok=%v, err=%v", ok, err)
 	}
 
-	renewed, err := l.Renew(context.Background(), 30*time.Second)
+	renewed, err := l.Renew(t.Context(), 30*time.Second)
 	if err != nil {
 		t.Fatalf("Renew error: %v", err)
 	}
@@ -212,12 +213,12 @@ func TestRenew_NonOwner(t *testing.T) {
 	owner := New("test-key", WithBackend(b))
 	other := New("test-key", WithBackend(b))
 
-	ok, err := owner.TryLock(context.Background())
+	ok, err := owner.TryLock(t.Context())
 	if err != nil || !ok {
 		t.Fatalf("owner.TryLock: ok=%v, err=%v", ok, err)
 	}
 
-	renewed, err := other.Renew(context.Background(), 30*time.Second)
+	renewed, err := other.Renew(t.Context(), 30*time.Second)
 	if err != nil {
 		t.Fatalf("non-owner Renew error: %v", err)
 	}
@@ -230,7 +231,7 @@ func TestRenew_TTLNegative(t *testing.T) {
 	b := newFakeBackend()
 	l := New("test-key", WithBackend(b))
 
-	renewed, err := l.Renew(context.Background(), 0)
+	renewed, err := l.Renew(t.Context(), 0)
 	if err == nil {
 		t.Fatal("expected error for ttl <= 0")
 	}
@@ -238,7 +239,7 @@ func TestRenew_TTLNegative(t *testing.T) {
 		t.Fatal("expected false for invalid ttl")
 	}
 
-	renewed, err = l.Renew(context.Background(), -1*time.Second)
+	renewed, err = l.Renew(t.Context(), -1*time.Second)
 	if err == nil {
 		t.Fatal("expected error for negative ttl")
 	}
@@ -249,12 +250,12 @@ func TestRenew_NoRenewer(t *testing.T) {
 	b := &noRenewBackend{inner}
 	l := New("test-key", WithBackend(b))
 
-	ok, err := l.TryLock(context.Background())
+	ok, err := l.TryLock(t.Context())
 	if err != nil || !ok {
 		t.Fatalf("TryLock: ok=%v, err=%v", ok, err)
 	}
 
-	renewed, err := l.Renew(context.Background(), 30*time.Second)
+	renewed, err := l.Renew(t.Context(), 30*time.Second)
 	if !errors.Is(err, ErrRenewUnsupported) {
 		t.Fatalf("expected ErrRenewUnsupported, got: %v", err)
 	}

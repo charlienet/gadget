@@ -27,7 +27,7 @@ func rateKey(t *testing.T, rdb goredis.Cmdable, base string) string {
 	id := atomic.AddUint64(&keyCounter, 1)
 	key := fmt.Sprintf("{gadget-rlredis-test}:%s:%d:%d", base, time.Now().UnixNano(), id)
 	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 		defer cancel()
 		_ = rdb.Del(ctx, key)
 	})
@@ -62,7 +62,7 @@ func newTestClient(t *testing.T) goredis.Cmdable {
 	rdb := goredis.NewClient(opt)
 	t.Cleanup(func() { _ = rdb.Close() })
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
 	require.NoErrorf(t, rdb.Ping(ctx).Err(), "无法连接真实 Redis（%s），测试失败以避免假绿", url)
 
@@ -75,7 +75,7 @@ func TestAllOrNothingSemantics(t *testing.T) {
 	backend := redislimit.New(goredis.NewClient(mustParseURL(t))).(*redislimit.Backend)
 	t.Cleanup(func() { _ = backend.Close() })
 
-	ctx := context.Background()
+	ctx := t.Context()
 	spec := ratelimit.Spec{Rate: 100, Per: time.Second, Burst: 5, IdleRetention: time.Minute}
 
 	t.Run("冷启动满桶无死角", func(t *testing.T) {
@@ -140,7 +140,7 @@ func mustParseURL(t *testing.T) *goredis.Options {
 
 func getTatTTL(t *testing.T, rdb goredis.Cmdable, key string) (float64, time.Duration) {
 	t.Helper()
-	ctx := context.Background()
+	ctx := t.Context()
 	v, err := rdb.Get(ctx, key).Result()
 	require.NoError(t, err)
 	tat, err := strconv.ParseFloat(v, 64)
@@ -158,9 +158,9 @@ func TestCommandErrorPassThrough(t *testing.T) {
 	t.Cleanup(func() { _ = backend.Close() })
 
 	key := rateKey(t, rdb, "cmderr")
-	require.NoError(t, rdb.Set(context.Background(), backendKey(key), "not-a-number", time.Minute).Err())
+	require.NoError(t, rdb.Set(t.Context(), backendKey(key), "not-a-number", time.Minute).Err())
 
-	_, _, err := backend.Wholesale(context.Background(), key, 1,
+	_, _, err := backend.Wholesale(t.Context(), key, 1,
 		ratelimit.Spec{Rate: 10, Per: time.Second, Burst: 10}, ratelimit.GrantBestEffort)
 	require.Error(t, err, "TAT 值损坏应触发 Lua 运行错误")
 	assert.NotErrorIs(t, err, ratelimit.ErrBackendUnavailable, "命令级错误不得包装为不可用")
@@ -175,7 +175,7 @@ func TestWithCoreLimiter(t *testing.T) {
 
 	ns := fmt.Sprintf("{gadget-rlredis-test}:core:%d:", time.Now().UnixNano())
 	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 		defer cancel()
 		keys, err := rdb.Keys(ctx, ns+"*").Result()
 		if err == nil && len(keys) > 0 {
@@ -189,7 +189,7 @@ func TestWithCoreLimiter(t *testing.T) {
 		ratelimit.WithBackendTimeout(3*time.Second),
 	)
 
-	ctx := context.Background()
+	ctx := t.Context()
 
 	// 冷启动桶满 100：want=clamp(round(100×1s/1s)×0.5,1,100)=50，
 	// 反复批发直至拒绝——总放行量应等于桶理论量 100（±1，GCRA 浮点截断）。

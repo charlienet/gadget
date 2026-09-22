@@ -113,7 +113,7 @@ func (b *Backend) Wholesale(ctx context.Context, key string, want int, spec rate
 			return 0, 0, e
 		}
 		if redis.IsUnavailable(err) {
-			return 0, 0, fmt.Errorf("%w: %v", ratelimit.ErrBackendUnavailable, err)
+			return 0, 0, fmt.Errorf("%w: %w", ratelimit.ErrBackendUnavailable, err)
 		}
 		return 0, 0, err // 命令级错误（含 Lua 运行错误）原样透传，不兜底
 	}

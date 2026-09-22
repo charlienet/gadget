@@ -45,13 +45,14 @@ func benchConcurrentGet(b *testing.B, goroutines int) {
 	b.ResetTimer()
 	var wg sync.WaitGroup
 	for g := 0; g < goroutines; g++ {
-		wg.Add(1)
-		go func(g int) {
-			defer wg.Done()
+
+		g := g
+
+		wg.Go(func() {
 			for i := 0; i < per; i++ {
 				_, _, _ = s.Get(ctx, keyList[(g*131+i)%keys]) // 直接取预生成 key：热循环零分配
 			}
-		}(g)
+		})
 	}
 	wg.Wait()
 	b.StopTimer()

@@ -2,6 +2,7 @@ package logger
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -282,12 +283,12 @@ func (l *slogLogger) close(timeout time.Duration) error {
 
 		if a != nil {
 			if e := a.Close(timeout); e != nil {
-				err = e
+				err = errors.Join(err, e)
 			}
 		}
 		if fc != nil {
 			if e := fc.Close(); e != nil {
-				err = e
+				err = errors.Join(err, e)
 			}
 		}
 	})

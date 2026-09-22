@@ -42,7 +42,7 @@ func TestSweeperReclaimsIdleEntries(t *testing.T) {
 	clock := newFakeClock()
 	l := newSweeperLimiter(t, clock)
 
-	ctx := context.Background()
+	ctx := t.Context()
 	if _, err := l.Allow(ctx, "a", 1); err != nil {
 		t.Fatal(err)
 	}
@@ -100,9 +100,7 @@ func TestSweeperConcurrentWithAllow(t *testing.T) {
 
 	var wg sync.WaitGroup
 	stop := make(chan struct{})
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		for {
 			select {
 			case <-stop:
@@ -112,15 +110,13 @@ func TestSweeperConcurrentWithAllow(t *testing.T) {
 			clock.Advance(30 * time.Second)
 			l.sweepOnce(clock.Now())
 		}
-	}()
+	})
 	for i := 0; i < 8; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for j := 0; j < 200; j++ {
-				_, _ = l.Allow(context.Background(), "hot", 1)
+				_, _ = l.Allow(t.Context(), "hot", 1)
 			}
-		}()
+		})
 	}
 	time.Sleep(50 * time.Millisecond)
 	close(stop)
@@ -153,7 +149,7 @@ func TestBackendPanicAbortsBatchFollowersSurvive(t *testing.T) {
 	leaderDone := make(chan any, 1)
 	go func() {
 		defer func() { leaderDone <- recover() }()
-		_, _ = l.Allow(context.Background(), "k", 1)
+		_, _ = l.Allow(t.Context(), "k", 1)
 		leaderDone <- nil
 	}()
 	<-entered
@@ -161,7 +157,7 @@ func TestBackendPanicAbortsBatchFollowersSurvive(t *testing.T) {
 	// follower：挂在共享 done 上等 leader 的广播。
 	followerErr := make(chan error, 1)
 	go func() {
-		_, err := l.Allow(context.Background(), "k", 1)
+		_, err := l.Allow(t.Context(), "k", 1)
 		followerErr <- err
 	}()
 	time.Sleep(20 * time.Millisecond)
@@ -185,7 +181,7 @@ func TestBackendPanicAbortsBatchFollowersSurvive(t *testing.T) {
 	}
 
 	// key 必须恢复：pending 已清理，下一次 Allow 重新批发走正常授予。
-	ok, err := l.Allow(context.Background(), "k", 1)
+	ok, err := l.Allow(t.Context(), "k", 1)
 	if !ok || err != nil {
 		t.Fatalf("panic 清理后该 key 应恢复正常批发: %v %v", ok, err)
 	}
@@ -215,7 +211,7 @@ func TestFailOpenDoesNotTouchLedger(t *testing.T) {
 	defer l.Close()
 
 	for i := 0; i < 5; i++ {
-		ok, err := l.Allow(context.Background(), "k", 1)
+		ok, err := l.Allow(t.Context(), "k", 1)
 		if !ok || err == nil {
 			t.Fatalf("FailOpen 应放行带错: %v %v", ok, err)
 		}
@@ -244,12 +240,12 @@ func TestWholesaleErrorLeavesNoSilence(t *testing.T) {
 	defer l.Close()
 
 	unavailable.set(true)
-	if _, err := l.Allow(context.Background(), "k", 1); !errors.Is(err, ErrBackendUnavailable) {
+	if _, err := l.Allow(t.Context(), "k", 1); !errors.Is(err, ErrBackendUnavailable) {
 		t.Fatalf("应透传不可用错误（Closed 拒绝），got %v", err)
 	}
 	// 错误路径不得设置静默期：恢复后下一次 Allow 应立刻重新批发。
 	unavailable.set(false)
-	if ok, err := l.Allow(context.Background(), "k", 1); !ok || err != nil {
+	if ok, err := l.Allow(t.Context(), "k", 1); !ok || err != nil {
 		t.Fatalf("后端恢复应立即放行: %v %v", ok, err)
 	}
 }

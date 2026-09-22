@@ -27,8 +27,8 @@ import (
 func checkListInvariants(t *testing.T, s *mem_store) {
 	t.Helper()
 
-	s.RLock()
-	defer s.RUnlock()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 
 	seen := make(map[string]bool, len(s.items))
 	var sumBytes int64
@@ -68,7 +68,7 @@ func TestMemStoreLRUEvictionOrder(t *testing.T) {
 	s := newMemStore()
 	s.ttlJitter = 0
 	s.maxItems = 3
-	ctx := context.Background()
+	ctx := t.Context()
 
 	_ = s.Put(ctx, "a", []byte("1"), 0)
 	_ = s.Put(ctx, "b", []byte("2"), 0)
@@ -93,7 +93,7 @@ func TestMemStoreLRUEvictionOrder(t *testing.T) {
 func TestMemStoreDeleteKeepsListConsistent(t *testing.T) {
 	s := newMemStore()
 	s.ttlJitter = 0
-	ctx := context.Background()
+	ctx := t.Context()
 
 	for _, k := range []string{"u:1", "u:2", "x:1"} {
 		_ = s.Put(ctx, k, []byte("v"), 0)
@@ -113,7 +113,7 @@ func TestMemStoreDeleteKeepsListConsistent(t *testing.T) {
 func TestMemStoreExpiredGetRemovesNotPromotes(t *testing.T) {
 	s := newMemStore()
 	s.ttlJitter = 0
-	ctx := context.Background()
+	ctx := t.Context()
 
 	_ = s.Put(ctx, "a", []byte("1"), 1) // 1s TTL
 	_ = s.Put(ctx, "b", []byte("2"), 0)
@@ -124,9 +124,9 @@ func TestMemStoreExpiredGetRemovesNotPromotes(t *testing.T) {
 
 	// 过期条目被惰性摘除、不参与提升
 	checkListInvariants(t, s)
-	s.RLock()
+	s.mu.RLock()
 	_, ok := s.items["a"]
-	s.RUnlock()
+	s.mu.RUnlock()
 	assert.False(t, ok, "过期条目应从 map 摘除")
 	assert.Equal(t, []string{"b"}, s.SampleKeys("", 10))
 }
@@ -138,7 +138,7 @@ func TestMemStoreRandomizedInvariants(t *testing.T) {
 	s.ttlJitter = 0
 	s.maxItems = 20
 	s.hotKeyThreshold = 2 // 同时压测豁免路径下的链表一致性
-	ctx := context.Background()
+	ctx := t.Context()
 	rng := rand.New(rand.NewSource(42))
 
 	keys := make([]string, 50)
@@ -181,14 +181,14 @@ func TestHotKeyThresholdZeroIsPureLRU(t *testing.T) {
 	s.ttlJitter = 0
 	s.maxItems = 3
 	// hotKeyThreshold 默认 0
-	ctx := context.Background()
+	ctx := t.Context()
 
 	_ = s.Put(ctx, "a", []byte("1"), 0)
 	_ = s.Put(ctx, "b", []byte("2"), 0)
 	_ = s.Put(ctx, "c", []byte("3"), 0)
-	s.Lock()
+	s.mu.Lock()
 	s.items["a"].hits = 100 // 即便 a 很热，未开豁免也不应生效
-	s.Unlock()
+	s.mu.Unlock()
 	// head→tail: c, b, a（a 在 tail）
 	_ = s.Put(ctx, "d", []byte("4"), 0) // 纯 LRU → 逐 tail=a
 
@@ -203,15 +203,15 @@ func TestHotKeyExemptionKeepsHotEvictsCold(t *testing.T) {
 	s.ttlJitter = 0
 	s.maxItems = 3
 	s.hotKeyThreshold = 2
-	ctx := context.Background()
+	ctx := t.Context()
 
 	_ = s.Put(ctx, "a", []byte("1"), 0)
 	_ = s.Put(ctx, "b", []byte("2"), 0)
 	_ = s.Put(ctx, "c", []byte("3"), 0)
 	// head→tail: c, b, a；把 a 标为热（模拟上周期高频命中，当前漂在 LRU 端）
-	s.Lock()
+	s.mu.Lock()
 	s.items["a"].hits = 5
-	s.Unlock()
+	s.mu.Unlock()
 
 	_ = s.Put(ctx, "d", []byte("4"), 0) // len4>3, budget=1：跳过热的 a，逐冷的 b
 
@@ -230,7 +230,7 @@ func TestHotKeyExemptionDegradesUnderPressure(t *testing.T) {
 	s.maxItems = 10
 	s.hotKeyThreshold = 1
 	s.metrics = spy
-	ctx := context.Background()
+	ctx := t.Context()
 
 	for i := 0; i < 100; i++ {
 		k := fmt.Sprintf("k%d", i)
@@ -253,20 +253,20 @@ func TestHotKeyHitsClearedEachCycle(t *testing.T) {
 	s := newMemStore()
 	s.ttlJitter = 0
 	s.hotKeyThreshold = 1
-	ctx := context.Background()
+	ctx := t.Context()
 
 	_ = s.Put(ctx, "a", []byte("1"), 0)
 	_, _, _ = s.Get(ctx, "a")
 	_, _, _ = s.Get(ctx, "a")
-	s.RLock()
+	s.mu.RLock()
 	h0 := s.items["a"].hits
-	s.RUnlock()
+	s.mu.RUnlock()
 	assert.Equal(t, int64(2), h0)
 
 	s.evictExpired() // 模拟一个清理周期
-	s.RLock()
+	s.mu.RLock()
 	h1 := s.items["a"].hits
-	s.RUnlock()
+	s.mu.RUnlock()
 	assert.Equal(t, int64(0), h1, "清理周期应清零热度（热度窗口 = cleanupInterval）")
 }
 
@@ -275,14 +275,14 @@ func TestHitsNotClearedWhenExemptionOff(t *testing.T) {
 	s := newMemStore()
 	s.ttlJitter = 0
 	// hotKeyThreshold = 0
-	ctx := context.Background()
+	ctx := t.Context()
 
 	_ = s.Put(ctx, "a", []byte("1"), 0)
 	_, _, _ = s.Get(ctx, "a")
 	s.evictExpired()
-	s.RLock()
+	s.mu.RLock()
 	h := s.items["a"].hits
-	s.RUnlock()
+	s.mu.RUnlock()
 	assert.Equal(t, int64(1), h, "豁免关闭时不清零 hits")
 }
 
@@ -292,19 +292,19 @@ func TestHotKeyExemptionDoesNotPreventTTLExpiry(t *testing.T) {
 	s.ttlJitter = 0
 	s.maxItems = 1000
 	s.hotKeyThreshold = 1
-	ctx := context.Background()
+	ctx := t.Context()
 
 	_ = s.Put(ctx, "a", []byte("1"), 1) // 1s TTL
 	_, _, _ = s.Get(ctx, "a")
-	s.Lock()
+	s.mu.Lock()
 	s.items["a"].hits = 100 // 极热
-	s.Unlock()
+	s.mu.Unlock()
 	time.Sleep(1100 * time.Millisecond)
 
 	s.evictExpired() // 后台过期清理：无视热度
-	s.RLock()
+	s.mu.RLock()
 	_, ok := s.items["a"]
-	s.RUnlock()
+	s.mu.RUnlock()
 	assert.False(t, ok, "热 key 过期仍应被后台清理摘除")
 	checkListInvariants(t, s)
 }
@@ -314,12 +314,12 @@ func TestHotKeyExemptionDoesNotBlockDelete(t *testing.T) {
 	s := newMemStore()
 	s.ttlJitter = 0
 	s.hotKeyThreshold = 1
-	ctx := context.Background()
+	ctx := t.Context()
 
 	_ = s.Put(ctx, "a", []byte("1"), 0)
-	s.Lock()
+	s.mu.Lock()
 	s.items["a"].hits = 100
-	s.Unlock()
+	s.mu.Unlock()
 
 	_ = s.Delete(ctx, "a")
 	_, ok := s.peek("a")
@@ -334,16 +334,16 @@ func TestHotKeyExemptionMaxBytesOnlyBudget(t *testing.T) {
 	s.maxItems = 0
 	s.maxBytes = 30
 	s.hotKeyThreshold = 1
-	ctx := context.Background()
+	ctx := t.Context()
 
 	val := []byte("0123456789") // 每项 10 字节 → 上限 3 项
 	for i := 0; i < 50; i++ {
 		k := fmt.Sprintf("k%d", i)
 		_ = s.Put(ctx, k, val, 0)
 		_, _, _ = s.Get(ctx, k) // 全热
-		s.RLock()
+		s.mu.RLock()
 		ub := s.usedBytes
-		s.RUnlock()
+		s.mu.RUnlock()
 		assert.LessOrEqual(t, ub, int64(30), "第 %d 次：maxBytes-only 预算须保证 usedBytes 收敛", i)
 	}
 	checkListInvariants(t, s)
@@ -365,7 +365,7 @@ func TestEvictionMetricCountsOnlyRealEvictions(t *testing.T) {
 	s.maxItems = 3
 	s.hotKeyThreshold = 2
 	s.metrics = spy
-	ctx := context.Background()
+	ctx := t.Context()
 
 	_ = s.Put(ctx, "a", []byte("1"), 0)
 	_, _, _ = s.Get(ctx, "a")
@@ -396,14 +396,12 @@ func TestMemStoreConcurrentMixedOps(t *testing.T) {
 	s.cleanupInterval = 5 * time.Millisecond
 	s.startEviction()
 	defer s.Close()
-	ctx := context.Background()
+	ctx := t.Context()
 
 	const keySpace = 300
 	var wg sync.WaitGroup
 	for g := 0; g < 8; g++ {
-		wg.Add(1)
-		go func(g int) {
-			defer wg.Done()
+		wg.Go(func() {
 			for i := 0; i < 2000; i++ {
 				k := fmt.Sprintf("k%d", (g*97+i)%keySpace)
 				switch (g + i) % 6 {
@@ -421,7 +419,7 @@ func TestMemStoreConcurrentMixedOps(t *testing.T) {
 					_ = s.SetMulti(ctx, map[string][]byte{k: []byte("x")}, 0)
 				}
 			}
-		}(g)
+		})
 	}
 	wg.Wait()
 
@@ -436,16 +434,14 @@ func TestCloseDuringEvictionDoesNotBlockOrPanic(t *testing.T) {
 	s.maxItems = 10
 	s.cleanupInterval = 2 * time.Millisecond
 	s.startEviction()
-	ctx := context.Background()
+	ctx := t.Context()
 
 	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		for i := 0; i < 5000; i++ {
 			_ = s.Put(ctx, fmt.Sprintf("k%d", i), []byte("v"), 0)
 		}
-	}()
+	})
 
 	done := make(chan struct{})
 	go func() { s.Close(); close(done) }()
@@ -467,7 +463,7 @@ func TestCloseDuringEvictionDoesNotBlockOrPanic(t *testing.T) {
 func TestSampleKeysPeekCoverageNoStarvation(t *testing.T) {
 	s := newMemStore()
 	s.ttlJitter = 0
-	ctx := context.Background()
+	ctx := t.Context()
 
 	total := 20
 	keys := make([]string, total)
@@ -545,7 +541,7 @@ func TestSyncBatchCoversAllKeysDespiteHotUserReads(t *testing.T) {
 	local := newMemStore()
 	local.ttlJitter = 0
 	remote := newRecordingRemoteStore()
-	ctx := context.Background()
+	ctx := t.Context()
 
 	total := 30
 	for i := 0; i < total; i++ {
@@ -591,7 +587,7 @@ func TestHotKeyExemptionHardModeRescan(t *testing.T) {
 	s.ttlJitter = 0
 	s.hotKeyThreshold = 1 // 全热即可触发豁免路径
 	s.metrics = spy
-	ctx := context.Background()
+	ctx := t.Context()
 
 	const hot = 60
 	originals := make([]string, 0, hot)
@@ -645,16 +641,16 @@ func TestHotKeyExemptionDoesNotBlockVersionSyncEviction(t *testing.T) {
 	local.ttlJitter = 0
 	local.hotKeyThreshold = 1 // 开启豁免
 	remote := newRecordingRemoteStore()
-	ctx := context.Background()
+	ctx := t.Context()
 
 	v := makeVersionedData(1, []byte("p"))
 	_ = local.Put(ctx, "hot", v, 0)
 	_ = remote.Put(ctx, "hot", v, 0) // 远程先持有同版本副本
 
 	// 把 "hot" 抬成远超阈值的热 key（同包特权直设 hits）
-	local.Lock()
+	local.mu.Lock()
 	local.items["hot"].hits = 1000
-	local.Unlock()
+	local.mu.Unlock()
 
 	// 远程侧删除该 key
 	_ = remote.Delete(ctx, "hot")

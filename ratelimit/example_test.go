@@ -24,6 +24,7 @@ func ExampleLimiter_Allow() {
 	)
 	defer limiter.Close()
 
+	// 保留：示例函数无 testing.T，不能用 t.Context()（规则 4）
 	ctx := context.Background()
 	for i := 0; i < 7; i++ {
 		ok, err := limiter.Allow(ctx, "user:42", 1)
@@ -77,12 +78,11 @@ func ExampleLimiter_wholesaleMerge() {
 	var wg sync.WaitGroup
 	passes := make(chan bool, 10)
 	for i := 0; i < 10; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
+			// 保留：示例函数无 testing.T，不能用 t.Context()（规则 4）
 			ok, _ := limiter.Allow(context.Background(), "api", 1)
 			passes <- ok
-		}()
+		})
 	}
 	wg.Wait()
 	close(passes)
@@ -110,6 +110,7 @@ func ExampleLimiter_Wait() {
 	)
 	defer limiter.Close()
 
+	// 保留：示例函数无 testing.T，不能用 t.Context()（规则 4）
 	ctx := context.Background()
 	// 先耗尽初始满桶的 5 个令牌。
 	for i := 0; i < 5; i++ {

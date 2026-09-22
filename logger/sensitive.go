@@ -1,9 +1,10 @@
 package logger
 
 import (
+	"cmp"
 	"context"
 	"log/slog"
-	"sort"
+	"slices"
 	"strings"
 )
 
@@ -194,28 +195,124 @@ func SensitiveString(s string) string {
 
 // maskText 将文本中匹配 keys（大小写不敏感子串）的部分替换为 mask。
 // 较长词优先处理，避免短词先命中破坏长词匹配（如 token 与 auth_token）。
+// 实现：按词优先序扫描收集互不重叠的命中区间（原文坐标），
+// 最后用 strings.Builder 单次分段重建，避免每个命中整体重建字符串（O(n×m) 分配）。
 func maskText(s string, keys []string, mask string) string {
 	sorted := make([]string, len(keys))
 	copy(sorted, keys)
-	sort.Slice(sorted, func(i, j int) bool { return len(sorted[i]) > len(sorted[j]) })
+	slices.SortFunc(sorted, func(a, b string) int { return cmp.Compare(len(b), len(a)) })
 
-	ls := strings.ToLower(s)
+	// maskedIntervals 记录已收集的命中区间 [start, end)，按收集顺序即词优先序。
+	// 相交判断与原实现"命中区间不得含空格占位（已掩区域）"语义等价：
+	// 占位模式下候选命中与任一已掩区间相交即不可能命中。
+	type interval struct{ start, end int }
+	var masked []interval
+	intersects := func(a, b interval) bool { return a.start < b.end && b.start < a.end }
+
 	for _, kw := range sorted {
 		if kw == "" {
 			continue
 		}
 		lk := strings.ToLower(kw)
-		for {
-			i := strings.Index(ls, lk)
+		for pos := 0; pos+len(kw) <= len(s); {
+			i := indexFold(s, lk, pos)
 			if i < 0 {
 				break
 			}
-			s = s[:i] + mask + s[i+len(kw):]
-			// 已替换区域以空格占位，保持后续索引与原文一致
-			ls = ls[:i] + strings.Repeat(" ", len(kw)) + ls[i+len(kw):]
+			cand := interval{i, i + len(kw)}
+			overlap := -1
+			for j, m := range masked {
+				if intersects(cand, m) {
+					overlap = j
+					break
+				}
+			}
+			if overlap >= 0 {
+				pos = i + 1 // 严格前进，避免同一相交命中反复触发
+				continue
+			}
+			masked = append(masked, cand)
+			pos = cand.end
 		}
 	}
-	return s
+
+	if len(masked) == 0 {
+		return s
+	}
+	slices.SortFunc(masked, func(a, b interval) int { return cmp.Compare(a.start, b.start) })
+
+	var b strings.Builder
+	b.Grow(len(s))
+	pos := 0
+	for _, m := range masked {
+		b.WriteString(s[pos:m.start])
+		b.WriteString(mask)
+		pos = m.end
+	}
+	b.WriteString(s[pos:])
+
+	return b.String()
+}
+
+// indexFold 从 from 起在 s 中大小写不敏感地查找 pattern 首次出现的位置；未找到返回 -1。
+// ASCII 大小写快速折叠 + strings.EqualFold 兜底非 ASCII（如 'İ' fold 后长度为 2，不能按字节切片比较）。
+func indexFold(s, pattern string, from int) int {
+	if pattern == "" {
+		return from
+	}
+	for i := from; i+len(pattern) <= len(s); i++ {
+		if !asCIEqual(s[i], pattern[0]) {
+			continue
+		}
+		if len(pattern) == 1 {
+			return i
+		}
+		sub := s[i : i+len(pattern)]
+		if isASCII(sub) && isASCII(pattern) {
+			if equalFoldASCII(sub, pattern) {
+				return i
+			}
+			continue
+		}
+		if strings.EqualFold(sub, pattern) {
+			return i
+		}
+	}
+
+	return -1
+}
+
+// asCIEqual 单字节大小写不敏感比较（仅折叠 ASCII 大小写）
+func asCIEqual(a, b byte) bool {
+	if a == b {
+		return true
+	}
+	const lowerMask = byte(1) << 5 // 'a'-'A'
+	if a|lowerMask >= 'a' && a|lowerMask <= 'z' && b|lowerMask >= 'a' && b|lowerMask <= 'z' {
+		return a|lowerMask == b|lowerMask
+	}
+
+	return false
+}
+
+func isASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] >= 0x80 {
+			return false
+		}
+	}
+
+	return true
+}
+
+func equalFoldASCII(a, b string) bool {
+	for i := 0; i < len(a); i++ {
+		if !asCIEqual(a[i], b[i]) {
+			return false
+		}
+	}
+
+	return true
 }
 
 // WithAttrs 派生实例：预设属性同样打码后透传，避免 With 绕过过滤

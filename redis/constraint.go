@@ -20,6 +20,8 @@ type Constraint func(Client) error
 // 公开 API 内刻意使用 Background"的决策记录见 README v0.9.0 节。
 func Ping() Constraint {
 	return func(rc Client) error {
+		// 探测被固定 3s deadline 收窄、不向下游传播。
+		// 豁免：接口契约（启动期约束检查）无 ctx 入口，此处为背景决策记录（README v0.9.0 同级）。
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second*3)
 		defer cancel()
 
@@ -48,7 +50,7 @@ func Version(expended string) Constraint {
 		}
 
 		if !constraint.Check(current) {
-			return fmt.Errorf("the desired version is %v, which does not match the expected version %v", current, expended)
+			return fmt.Errorf("redis: server version %v does not match expected constraint %q", current, expended)
 		}
 
 		return nil

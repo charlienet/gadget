@@ -406,9 +406,13 @@ func TestSensitiveGroupAllClean(t *testing.T) {
 
 // --- slogLogger.close：fileCloser 出错向上传播 ---
 
+// errCloserError sentinel：供 errCloser.Close() 与跨文件测试共享同一实例，
+// 使 errors.Is 能跨文件匹配（errors.New 每次返回不同实例，errors.Is 无法跨调用匹配）。
+var errCloserError = errors.New("closer boom")
+
 type errCloser struct{}
 
-func (errCloser) Close() error { return errors.New("closer boom") }
+func (errCloser) Close() error { return errCloserError }
 
 func TestSlogLoggerCloseErrorPropagation(t *testing.T) {
 	sl := &slogLogger{fileCloser: errCloser{}}

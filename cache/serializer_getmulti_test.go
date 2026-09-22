@@ -1,7 +1,6 @@
 package cache
 
 import (
-	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -15,7 +14,7 @@ import (
 func TestGetMultiUsesSerializerConsistently(t *testing.T) {
 	c := New(WithMemStore())
 	defer c.Close()
-	ctx := context.Background()
+	ctx := t.Context()
 
 	type item struct {
 		Name string `json:"name"`

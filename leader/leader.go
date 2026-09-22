@@ -192,9 +192,10 @@ func New(opts ...Option) *Elector {
 // 多让位信号同时就绪（如 ctx 取消与续约失败同瞬）时 select 随机选取，
 // Run 返回值的分类边界存在二义，但均为合法让位，回调成对不变量不受影响。
 //
-// 锁释放为尽力而为（以 context.Background 为父脱离取消传播 + 独立 5s
-// 超时，见 releaseTimeout），失败不影响返回值——锁最迟在
-// LeaseDuration 后自然过期（自最后一次成功续约起算）。
+// 锁释放为尽力而为（以 context.WithoutCancel(ctx) 为父、独立 5s
+// 超时，见 releaseTimeout），即使原 ctx 已取消也能在兜底窗口内完成
+// Unlock；失败不影响返回值——锁最迟在 LeaseDuration 后自然过期
+//（自最后一次成功续约起算）。
 //
 // 注意：若让位清理中的回调（OnStoppedLeading）panic 穿透，stepDown
 // 顺序保证此时锁已释放、业务 ctx 已取消，残渣仅为本应执行的
@@ -215,7 +216,7 @@ func (e *Elector) Run(ctx context.Context) error {
 	// 尽力释放刚获得的锁并返回，零回调、零 term 消耗（never started,
 	// never stopped），不做"启动后立即停止"的抖动回调。
 	if err := ctx.Err(); err != nil {
-		e.releaseLock()
+		e.releaseLock(ctx)
 		return err
 	}
 	term := e.term.Add(1)
@@ -232,7 +233,7 @@ func (e *Elector) Run(ctx context.Context) error {
 	}()
 
 	err := e.renew(leadCtx, startedDone)
-	e.stepDown(cancelLead)
+	e.stepDown(ctx, cancelLead)
 	if err != nil {
 		// 丢失/优雅退出：保留 renew 给出的原因（含 errors.Join 的
 		// 多错误链），消息记录在清理之后、返回之前。
@@ -349,22 +350,21 @@ func (e *Elector) renew(ctx context.Context, startedDone <-chan struct{}) error 
 // cancelLead 之后不等待 OnStartedLeading 返回即释放锁（与 client-go
 // 的 defer 顺序一致）：业务对取消的响应时延构成理论双写窗口，以 term
 // 贯通缓解，见 package doc。
-func (e *Elector) stepDown(cancelLead context.CancelFunc) {
+func (e *Elector) stepDown(ctx context.Context, cancelLead context.CancelFunc) {
 	e.isLeader.Store(false)
 	cancelLead()
-	e.releaseLock()
+	e.releaseLock(ctx)
 	if e.callbacks.OnStoppedLeading != nil {
 		e.callbacks.OnStoppedLeading()
 	}
 }
 
-// releaseLock 尽力而为释放锁：原 ctx 此时通常已取消，直接传入会让
-// Release 立即失败、锁残留至 TTL，故以 context.Background 为父脱离
-// 取消传播——不继承原 ctx values（Unlock 不需要），独立超时
-// releaseTimeout 防后端挂起时无限阻塞。结果不检查——失败
-// 由 TTL 兜底（自最后一次成功续约起 ≤ LeaseDuration 自然过期）。
-func (e *Elector) releaseLock() {
-	ctx, cancel := context.WithTimeout(context.Background(), releaseTimeout)
+// releaseLock 尽力而为释放锁：原 ctx 此时通常已取消，用 WithoutCancel
+// 脱离取消传播（不继承原 ctx values，Unlock 不需要），以独立 5s 超时
+// 兜底，防止后端挂起时无限阻塞。结果不检查——失败由 TTL 兜底（自最后
+// 一次成功续约起 ≤ LeaseDuration 自然过期）。
+func (e *Elector) releaseLock(ctx context.Context) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), releaseTimeout)
 	defer cancel()
 	_ = e.locker.Unlock(ctx)
 }
@@ -376,7 +376,7 @@ func errLost(cause error) error {
 	if cause == nil {
 		return fmt.Errorf("%w: renew confirmed lock lost", ErrLeadershipLost)
 	}
-	return fmt.Errorf("%w: %v", ErrLeadershipLost, cause)
+	return fmt.Errorf("%w: %w", ErrLeadershipLost, cause)
 }
 
 // nextRetry 返回带抖动的重试间隔：d + rand[0, d/4)，即 [1.0, 1.25)×d

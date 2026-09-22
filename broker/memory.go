@@ -1,11 +1,15 @@
 package broker
 
 import (
+	"context"
 	"errors"
+	"strconv"
 	"sync"
-
-	"github.com/google/uuid"
+	"sync/atomic"
 )
+
+// subIDCounter 用于生成进程内唯一的订阅 id
+var subIDCounter atomic.Uint64
 
 var _ Broker = &memoryBroker{}
 
@@ -15,7 +19,7 @@ type memoryBroker struct {
 }
 
 type memorySubscriber struct {
-	exit      chan bool
+	exit      chan struct{}
 	handler   Handler
 	id        string
 	topic     string
@@ -32,7 +36,7 @@ type memoryEvent struct {
 // 所有 handler 在 Publish 返回前同步执行完毕（异步化属于 broker v0.2.0 接口重设计范畴，当前版本不提供）。
 // 每个订阅者收到独立的 Event 拷贝（Body 相同，Ack 与错误等元数据互相隔离）。
 // 返回值聚合全部 handler 错误（errors.Join），单个 handler 报错不影响对其余订阅者的投递。
-func (m *memoryBroker) Publish(topic string, msg *Message) error {
+func (m *memoryBroker) Publish(ctx context.Context, topic string, msg *Message) error {
 	m.mu.RLock()
 	subs, ok := m.subscribers[topic]
 	m.mu.RUnlock()
@@ -55,10 +59,10 @@ func (m *memoryBroker) Publish(topic string, msg *Message) error {
 	return errors.Join(errs...)
 }
 
-func (m *memoryBroker) Subscribe(topic string, handler Handler) (Subscriber, error) {
+func (m *memoryBroker) Subscribe(ctx context.Context, topic string, handler Handler) (Subscriber, error) {
 	sub := &memorySubscriber{
-		exit:    make(chan bool),
-		id:      uuid.New().String(),
+		exit:    make(chan struct{}),
+		id:      "sub-" + strconv.FormatUint(subIDCounter.Add(1), 10),
 		topic:   topic,
 		handler: handler,
 	}
@@ -87,7 +91,7 @@ func (m *memoryBroker) Subscribe(topic string, handler Handler) (Subscriber, err
 func (m *memoryBroker) Name() string { return "memory" }
 
 // Close 关闭 broker：通知所有 subscriber 退出并清空订阅
-func (m *memoryBroker) Close() error {
+func (m *memoryBroker) Close(ctx context.Context) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -107,7 +111,7 @@ func (m *memorySubscriber) Topic() string {
 	return m.topic
 }
 
-func (m *memorySubscriber) Unsubscribe() error {
+func (m *memorySubscriber) Unsubscribe(ctx context.Context) error {
 	// 通过关闭 exit 通知 goroutine 退出（幂等，避免在无缓冲 channel 上阻塞发送）
 	m.closeOnce.Do(func() {
 		close(m.exit)
@@ -116,12 +120,8 @@ func (m *memorySubscriber) Unsubscribe() error {
 }
 
 func (m *memoryEvent) Message() *Message {
-	switch v := m.message.(type) {
-	case *Message:
-		return v
-	}
-
-	return nil
+	v, _ := m.message.(*Message)
+	return v
 }
 
 func (m *memoryEvent) Topic() string { return m.topic }

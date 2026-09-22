@@ -232,7 +232,7 @@ func TestH1RateRegression(t *testing.T) {
 	drain := func() int {
 		passed := 0
 		for {
-			ok, err := l.Allow(context.Background(), "k", 1)
+			ok, err := l.Allow(t.Context(), "k", 1)
 			if !ok {
 				if !errors.Is(err, ErrExceeded) {
 					t.Fatalf("非超限错误: %v", err)
@@ -275,11 +275,12 @@ func TestWholesaleMergeFollowersShare(t *testing.T) {
 	const goroutines = 100
 	var wg sync.WaitGroup
 	passed := atomic.Int64{}
+	// 动态计数（goroutines 是变量），保留 Add/Done 模式
 	wg.Add(goroutines)
 	for i := 0; i < goroutines; i++ {
 		go func() {
 			defer wg.Done()
-			ok, err := l.Allow(context.Background(), "hot", 1)
+			ok, err := l.Allow(t.Context(), "hot", 1)
 			if ok && err == nil {
 				passed.Add(1)
 			}
@@ -317,7 +318,7 @@ func TestN1HotPathNotBlockedDuringWholesale(t *testing.T) {
 	defer release()
 
 	// 触发 key "a" 的在途批发（leader 阻塞在 gate 上）。
-	go func() { _, _ = l.Allow(context.Background(), "a", 500) }()
+	go func() { _, _ = l.Allow(t.Context(), "a", 500) }()
 	<-entered
 
 	// 预置 a 的存量（模拟此前批发注入），再验证热路径不被在途批发阻塞。
@@ -328,11 +329,11 @@ func TestN1HotPathNotBlockedDuringWholesale(t *testing.T) {
 
 	done := make(chan [2]bool, 2)
 	go func() {
-		ok, _ := l.Allow(context.Background(), "a", 10) // 同 key 存量充足的热路径
+		ok, _ := l.Allow(t.Context(), "a", 10) // 同 key 存量充足的热路径
 		done <- [2]bool{ok, true}
 	}()
 	go func() {
-		ok, _ := l.Allow(context.Background(), "b", 1) // 其他 key 不被牵连阻塞
+		ok, _ := l.Allow(t.Context(), "b", 1) // 其他 key 不被牵连阻塞
 		done <- [2]bool{ok, false}
 	}()
 
@@ -364,6 +365,7 @@ func TestLeaderCtxCancelNotAffectFollowers(t *testing.T) {
 	release := func() { releaseOnce.Do(func() { close(gate) }) }
 	defer release()
 
+	// 保留：本用例测取消/超时语义（leader ctx 取消不殃及 followers），不能用 t.Context()
 	leaderCtx, cancel := context.WithCancel(context.Background())
 	type res struct {
 		ok  bool
@@ -378,7 +380,7 @@ func TestLeaderCtxCancelNotAffectFollowers(t *testing.T) {
 
 	followerDone := make(chan res, 1)
 	go func() {
-		ok, err := l.Allow(context.Background(), "k", 1)
+		ok, err := l.Allow(t.Context(), "k", 1)
 		followerDone <- res{ok, err}
 	}()
 	time.Sleep(20 * time.Millisecond) // 让 follower 入队共享
@@ -408,7 +410,7 @@ func TestSilencePeriod(t *testing.T) {
 	defer l.Close()
 
 	// 第 1 次：触发批发，granted==0 → 进入静默期。
-	ok, err := l.Allow(context.Background(), "k", 1)
+	ok, err := l.Allow(t.Context(), "k", 1)
 	var xe *ExceededError
 	if ok || !errors.As(err, &xe) || xe.RetryAfter <= 0 {
 		t.Fatalf("首次应超限且带 RetryAfter，got ok=%v err=%v", ok, err)
@@ -419,7 +421,7 @@ func TestSilencePeriod(t *testing.T) {
 
 	// 静默期内：直接超限，不再触发批发。
 	for i := 0; i < 5; i++ {
-		if ok, err := l.Allow(context.Background(), "k", 1); ok || !errors.Is(err, ErrExceeded) {
+		if ok, err := l.Allow(t.Context(), "k", 1); ok || !errors.Is(err, ErrExceeded) {
 			t.Fatalf("静默期内应直接超限，got ok=%v err=%v", ok, err)
 		}
 	}
@@ -429,7 +431,7 @@ func TestSilencePeriod(t *testing.T) {
 
 	// 静默期过：允许再次批发。
 	clock.Advance(6 * time.Second)
-	if _, err := l.Allow(context.Background(), "k", 1); !errors.Is(err, ErrExceeded) {
+	if _, err := l.Allow(t.Context(), "k", 1); !errors.Is(err, ErrExceeded) {
 		t.Fatalf("静默期后应重新批发仍超限，err=%v", err)
 	}
 	if calls := fb.count(); calls != 2 {
@@ -447,7 +449,7 @@ func TestTriageExceeded(t *testing.T) {
 	l := New(fb, WithClock(clock), WithRate(10, time.Second), WithBurst(10))
 	defer l.Close()
 
-	ok, err := l.Allow(context.Background(), "key1", 3)
+	ok, err := l.Allow(t.Context(), "key1", 3)
 	if ok {
 		t.Fatal("被拒请求 ok 应为 false")
 	}
@@ -467,6 +469,7 @@ func TestTriageCtxCancelPassthroughNoFailPolicy(t *testing.T) {
 	unavailable := func(context.Context, string, int, Spec, GrantMode) (int, time.Duration, error) {
 		return 0, 0, fmt.Errorf("%w: down", ErrBackendUnavailable)
 	}
+	// 保留：本用例测取消/超时语义（预取消 ctx 的透传分诊），不能用 t.Context()
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
@@ -496,7 +499,7 @@ func TestTriageUnavailableFailOpen(t *testing.T) {
 	l := New(fb, WithFailPolicy(FailOpen), WithRate(10, time.Second), WithBurst(10))
 	defer l.Close()
 
-	ok, err := l.Allow(context.Background(), "k", 1)
+	ok, err := l.Allow(t.Context(), "k", 1)
 	if !ok {
 		t.Fatalf("FailOpen 兜底应放行，got ok=%v", ok)
 	}
@@ -515,7 +518,7 @@ func TestTriageUnavailableFailClosed(t *testing.T) {
 	l := New(fb, WithFailPolicy(FailClosed), WithRate(10, time.Second), WithBurst(10))
 	defer l.Close()
 
-	ok, err := l.Allow(context.Background(), "k", 1)
+	ok, err := l.Allow(t.Context(), "k", 1)
 	if ok {
 		t.Fatal("FailClosed 不得放行")
 	}
@@ -536,7 +539,7 @@ func TestTriageCommandErrorNoFallback(t *testing.T) {
 	l := New(fb, WithFailPolicy(FailOpen), WithRate(10, time.Second), WithBurst(10))
 	defer l.Close()
 
-	ok, err := l.Allow(context.Background(), "k", 1)
+	ok, err := l.Allow(t.Context(), "k", 1)
 	if ok {
 		t.Fatal("命令级错误不得被 FailOpen 兜底放行")
 	}
@@ -555,11 +558,11 @@ func TestTriageAfterClose(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	ok, err := l.Allow(context.Background(), "k", 1)
+	ok, err := l.Allow(t.Context(), "k", 1)
 	if ok || !errors.Is(err, ErrClosed) {
 		t.Fatalf("Close 后 Allow 应返回 ErrClosed，got ok=%v err=%v", ok, err)
 	}
-	if err := l.Wait(context.Background(), "k", 1); !errors.Is(err, ErrClosed) {
+	if err := l.Wait(t.Context(), "k", 1); !errors.Is(err, ErrClosed) {
 		t.Fatalf("Close 后 Wait 应返回 ErrClosed，got %v", err)
 	}
 	if calls := fb.count(); calls != 0 {
@@ -575,7 +578,7 @@ func TestAllOrNothingNoEvaporation(t *testing.T) {
 	l := New(mem, WithoutLocalLease(), WithClock(clock), WithRate(10, time.Second), WithBurst(10))
 	defer l.Close()
 
-	ctx := context.Background()
+	ctx := t.Context()
 	if ok, err := l.Allow(ctx, "k", 4); !ok || err != nil {
 		t.Fatalf("满桶扣 4 应放行: %v %v", ok, err)
 	}
@@ -608,10 +611,10 @@ func TestStrictModeUsesAllOrNothingMode(t *testing.T) {
 	l := New(fb, WithoutLocalLease(), WithRate(10, time.Second), WithBurst(10))
 	defer l.Close()
 
-	if _, err := l.Allow(context.Background(), "k", 2); err != nil {
+	if _, err := l.Allow(t.Context(), "k", 2); err != nil {
 		t.Fatal(err)
 	}
-	if ok, err := l.Allow(context.Background(), "k", 2); !ok || err != nil {
+	if ok, err := l.Allow(t.Context(), "k", 2); !ok || err != nil {
 		t.Fatalf("grantAll 下应放行: %v %v", ok, err)
 	}
 	for _, m := range fb.modes() {
@@ -640,11 +643,11 @@ func TestParamContract(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			ok, err := l.Allow(context.Background(), tc.key, tc.n)
+			ok, err := l.Allow(t.Context(), tc.key, tc.n)
 			if ok || !errors.Is(err, ErrInvalidArgument) {
 				t.Fatalf("应返回 ErrInvalidArgument，got ok=%v err=%v", ok, err)
 			}
-			if err := l.Wait(context.Background(), tc.key, tc.n); !errors.Is(err, ErrInvalidArgument) {
+			if err := l.Wait(t.Context(), tc.key, tc.n); !errors.Is(err, ErrInvalidArgument) {
 				t.Fatalf("Wait 应同规则，got %v", err)
 			}
 		})
@@ -661,7 +664,7 @@ func TestSingleAllowAtMostOneWholesale(t *testing.T) {
 
 	// n=200 > want=50：批发一次注入后仍不足，必须直接超限返回而非
 	// 循环补批发（至多一次）。
-	ok, err := l.Allow(context.Background(), "k", 200)
+	ok, err := l.Allow(t.Context(), "k", 200)
 	if ok || !errors.Is(err, ErrExceeded) {
 		t.Fatalf("仍不足时应返回超限，got ok=%v err=%v", ok, err)
 	}
@@ -677,7 +680,7 @@ func TestWaitSuccess(t *testing.T) {
 	l := New(newMemoryBackend(clock), WithClock(clock), WithRate(100, time.Second), WithBurst(100))
 	defer l.Close()
 
-	if err := l.Wait(context.Background(), "k", 10); err != nil {
+	if err := l.Wait(t.Context(), "k", 10); err != nil {
 		t.Fatalf("存量充足 Wait 应立即成功，got %v", err)
 	}
 }
@@ -691,6 +694,7 @@ func TestWaitCtxCancel(t *testing.T) {
 	l.after = clock.after // 等待走可控时钟（不真睡）
 	defer l.Close()
 
+	// 保留：本用例测取消/超时语义（Wait 等待中被取消），不能用 t.Context()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- l.Wait(ctx, "k", 1) }()
@@ -725,7 +729,7 @@ func TestWaitMaxWaitExceeded(t *testing.T) {
 		}
 	}()
 
-	err := l.Wait(context.Background(), "k", 1)
+	err := l.Wait(t.Context(), "k", 1)
 	if !errors.Is(err, ErrExceeded) {
 		t.Fatalf("超出 WithMaxWait 应返回 ErrExceeded 语义错误，got %v", err)
 	}
@@ -741,7 +745,7 @@ func TestWaitBackendUnavailableStops(t *testing.T) {
 			return 0, 0, fmt.Errorf("%w: down", ErrBackendUnavailable)
 		}}
 		l := New(fb, WithFailPolicy(policy), WithRate(10, time.Second), WithBurst(10))
-		err := l.Wait(context.Background(), "k", 1)
+		err := l.Wait(t.Context(), "k", 1)
 		if err == nil {
 			t.Fatalf("policy=%v 后端不可用必须返回错误（防吞错死循环）", policy)
 		}
@@ -777,7 +781,7 @@ func TestCloseIdempotentAndBackendCloser(t *testing.T) {
 	if got := closes.Load(); got != 1 {
 		t.Fatalf("Backend io.Closer 应恰好调用 1 次，got %d", got)
 	}
-	if _, err := l.Allow(context.Background(), "k", 1); !errors.Is(err, ErrClosed) {
+	if _, err := l.Allow(t.Context(), "k", 1); !errors.Is(err, ErrClosed) {
 		t.Fatalf("Close 后 Allow 应 ErrClosed，got %v", err)
 	}
 }
@@ -800,7 +804,7 @@ func TestExecutePassThrough(t *testing.T) {
 	l := New(newMemoryBackend(clock), WithClock(clock), WithRate(100, time.Second), WithBurst(5))
 	defer l.Close()
 
-	v, err := Execute(context.Background(), l, "k", func(context.Context) (int, error) { return 42, nil })
+	v, err := Execute(t.Context(), l, "k", func(context.Context) (int, error) { return 42, nil })
 	if v != 42 || err != nil {
 		t.Fatalf("放行时应透传结果，got %v/%v", v, err)
 	}
@@ -812,7 +816,7 @@ func TestExecuteBusinessError(t *testing.T) {
 	defer l.Close()
 
 	myErr := errors.New("boom")
-	v, err := Execute(context.Background(), l, "k", func(context.Context) (int, error) { return 7, myErr })
+	v, err := Execute(t.Context(), l, "k", func(context.Context) (int, error) { return 7, myErr })
 	if v != 7 || !errors.Is(err, myErr) {
 		t.Fatalf("fn 错误应原样透传，got %v/%v", v, err)
 	}
@@ -824,14 +828,14 @@ func TestExecuteExceededSkipsFn(t *testing.T) {
 	defer l.Close()
 
 	var fnCalled bool
-	if _, err := Execute(context.Background(), l, "k", func(context.Context) (int, error) {
+	if _, err := Execute(t.Context(), l, "k", func(context.Context) (int, error) {
 		fnCalled = true
 		return 1, nil
 	}); err != nil {
 		t.Fatal(err)
 	}
 	// 桶已耗尽：fn 不得执行，返回零值 + 超限错误。
-	v, err := Execute(context.Background(), l, "k", func(context.Context) (int, error) {
+	v, err := Execute(t.Context(), l, "k", func(context.Context) (int, error) {
 		fnCalled = false
 		panic("不应执行")
 	})
@@ -850,7 +854,7 @@ func TestExecuteFailOpenRunsFnButPerceivable(t *testing.T) {
 	l := New(fb, WithFailPolicy(FailOpen), WithRate(10, time.Second), WithBurst(10))
 	defer l.Close()
 
-	v, err := Execute(context.Background(), l, "k", func(context.Context) (string, error) { return "ok", nil })
+	v, err := Execute(t.Context(), l, "k", func(context.Context) (string, error) { return "ok", nil })
 	if v != "ok" {
 		t.Fatalf("FailOpen 下 fn 应执行且结果透传，got %v", v)
 	}
@@ -921,7 +925,7 @@ func TestFailOpenLogsOncePerMergedBatch(t *testing.T) {
 	dones := make(chan res, 3)
 	for i := 0; i < 3; i++ {
 		go func() {
-			ok, err := l.Allow(context.Background(), "k", 1)
+			ok, err := l.Allow(t.Context(), "k", 1)
 			dones <- res{ok, err}
 		}()
 		if i == 0 {
@@ -951,7 +955,7 @@ func TestFailOpenLogsOncePerStrictWholesale(t *testing.T) {
 	defer l.Close()
 
 	for i := 0; i < 3; i++ {
-		ok, err := l.Allow(context.Background(), "k", 1)
+		ok, err := l.Allow(t.Context(), "k", 1)
 		if !ok || !errors.Is(err, ErrFailOpen) {
 			t.Fatalf("strict FailOpen 应放行可判: %v %v", ok, err)
 		}
@@ -965,7 +969,7 @@ func TestFailOpenLogsOncePerStrictWholesale(t *testing.T) {
 	fb2 := &fakeBackend{fn: unavailableFn}
 	l2 := New(fb2, WithLogger(slog.New(h2)), WithRate(10, time.Second), WithBurst(10), WithFailPolicy(FailClosed))
 	defer l2.Close()
-	if _, err := l2.Allow(context.Background(), "k", 1); errors.Is(err, ErrFailOpen) {
+	if _, err := l2.Allow(t.Context(), "k", 1); errors.Is(err, ErrFailOpen) {
 		t.Fatal("FailClosed 不得放行")
 	}
 	if n := h2.count(); n != 0 {

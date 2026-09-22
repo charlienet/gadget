@@ -46,14 +46,14 @@ func TestJsonSerialize(t *testing.T) {
 func BenchmarkMarshal(b *testing.B) {
 	b.Run("string", func(b *testing.B) {
 		v := "abc"
-		for i := 0; i < b.N; i++ {
+		for b.Loop() {
 			j := &jsonSerializer{}
 			_, _ = j.Marshal(v)
 		}
 	})
 
 	b.Run("struct", func(b *testing.B) {
-		for i := 0; i < b.N; i++ {
+		for b.Loop() {
 			j := &jsonSerializer{}
 			_, _ = j.Marshal(u)
 		}

@@ -41,6 +41,7 @@ func ExampleElector() {
 			OnStoppedLeading: func() { fmt.Println("stopped") },
 		}))
 
+	// 保留：示例函数无 testing.T，不能用 t.Context()（规则 4）
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan error, 1)

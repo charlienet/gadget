@@ -24,6 +24,7 @@ func delayRemoteHas(s *testRemoteStore, key string) bool {
 }
 
 // localHas 报告底层 store 是否仍持有 key。
+// 保留：helper 无 *testing.T 参数，签名不改动，内部无法使用 t.Context()。
 func localHas(s Store, key string) bool {
 	_, exist, err := s.Get(context.Background(), key)
 	return err == nil && exist
@@ -52,7 +53,7 @@ type delayRecordingListener struct {
 }
 
 func (l *delayRecordingListener) Subscribe() chan string { return make(chan string, 16) }
-func (l *delayRecordingListener) Publish(key string) error {
+func (l *delayRecordingListener) Publish(ctx context.Context, key string) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.published = append(l.published, key)
@@ -103,7 +104,7 @@ func TestDelayedSecondDeleteDisabledByDefault(t *testing.T) {
 
 	assert.Nil(t, c.delayedTimers, "关闭时不应分配 delayedTimers")
 
-	ctx := context.Background()
+	ctx := t.Context()
 	assert.NoError(t, c.Put(ctx, "k", "v", 60))
 	assert.NoError(t, c.Invalidate(ctx, mutateKeys("k")))
 
@@ -120,7 +121,7 @@ func TestDelayedSecondDeleteDisabledByDefault(t *testing.T) {
 func TestDelayedSecondDeleteClearsStaleL2(t *testing.T) {
 	remote := newTestRemoteStore()
 	c := newDelayCache(t, 30*time.Millisecond, remote)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	assert.NoError(t, c.Invalidate(ctx, mutateKeys("k")))
 
@@ -137,7 +138,7 @@ func TestDelayedSecondDeleteClearsStaleL2(t *testing.T) {
 func TestDelayedSecondDeleteClearsWindowWriteAndSelfHeals(t *testing.T) {
 	remote := newTestRemoteStore()
 	c := newDelayCache(t, 40*time.Millisecond, remote)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	assert.NoError(t, c.Invalidate(ctx, mutateKeys("k"))) // 调度一次无条件二次删
 
@@ -167,7 +168,7 @@ func TestDelayedSecondDeleteClearsWindowWriteAndSelfHeals(t *testing.T) {
 func TestDelayedSecondDeleteClearsL1(t *testing.T) {
 	remote := newTestRemoteStore()
 	c := newDelayCache(t, 30*time.Millisecond, remote)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	assert.NoError(t, c.Invalidate(ctx, mutateKeys("k")))
 
@@ -187,7 +188,7 @@ func TestDelayedSecondDeleteSkipsRemoteWhenDegraded(t *testing.T) {
 	remote := newTestRemoteStore()
 	lis := &delayRecordingListener{}
 	c := newDelayCache(t, 40*time.Millisecond, remote, WithListener(lis))
-	ctx := context.Background()
+	ctx := t.Context()
 
 	// 首次失效在正常态完成：双删走 remote，不进 pendingDeletes。
 	assert.NoError(t, c.Invalidate(ctx, mutateKeys("k")))
@@ -225,7 +226,7 @@ func TestDelayedSecondDeleteSkipsRemoteWhenDegraded(t *testing.T) {
 func TestDelayedSecondDeleteReplacesTimer(t *testing.T) {
 	remote := newTestRemoteStore()
 	c := newDelayCache(t, 50*time.Millisecond, remote) // delay 足够长，检查期间不触发
-	ctx := context.Background()
+	ctx := t.Context()
 
 	assert.NoError(t, c.Invalidate(ctx, mutateKeys("k")))
 	c.delayedMu.Lock()
@@ -252,7 +253,7 @@ func TestDelayedSecondDeleteReplacesTimer(t *testing.T) {
 func TestDelayedSecondDeleteSchedulesPerKey(t *testing.T) {
 	remote := newTestRemoteStore()
 	c := newDelayCache(t, 40*time.Millisecond, remote)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	// 3 个有效 key + 重复项 a + 空串：去重后应恰好调度 a/b/c 三个。
 	assert.NoError(t, c.Invalidate(ctx, mutateKeys("a", "b", "c", "a", "")))
@@ -285,7 +286,7 @@ func TestDelayedSecondDeleteSchedulesPerKey(t *testing.T) {
 func TestDelayedSecondDeleteStoppedOnClose(t *testing.T) {
 	remote := newTestRemoteStore()
 	c := newDelayCache(t, 120*time.Millisecond, remote)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	assert.NoError(t, c.Invalidate(ctx, mutateKeys("k")))
 	// 调度后向 L1/L2 写入脏值；若 timer 触发则会被无条件清除。

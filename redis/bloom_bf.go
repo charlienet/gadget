@@ -3,7 +3,6 @@ package redis
 import (
 	"context"
 	"fmt"
-	"strings"
 
 	goredis "github.com/redis/go-redis/v9"
 )
@@ -54,7 +53,7 @@ func (b *bfCmdImpl) classifyConnectErr(key string, err error) error {
 	switch {
 	case err == nil:
 		return nil // 新建：键已按当前配置建立
-	case strings.Contains(err.Error(), "item exists") || strings.Contains(err.Error(), "already exists"):
+	case isItemExistsText(err):
 		return nil // 复用：既有真 bloom 键（参数不改写；fp 不可核验）
 	case IsUnavailable(err):
 		return fallbackErr(err)
@@ -265,7 +264,7 @@ func (b *bfCmdImpl) Info(ctx context.Context) (*BloomInfo, error) {
 				// Info 非关键：兜底返回空结构体 + 哨兵错误（errors.Is 可感知）
 				return &BloomInfo{}, fallbackErr(err)
 			}
-			if emptyShardOK && strings.Contains(err.Error(), "not found") {
+			if emptyShardOK && isNotFoundByText(err) {
 				continue // 零值分片：该分片从未写入过，贡献 0
 			}
 			return nil, err

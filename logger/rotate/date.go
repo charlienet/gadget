@@ -12,6 +12,13 @@ import (
 )
 
 // RotateDateWriter 按日期轮换的文件 writer：切换日期时自动滚动到新文件。
+//
+// # 使用约束
+//
+// RotateDateWriter 包含同步原语，不得按值拷贝或按值传参；
+// 必须通过指针使用（如 logger 包内 &rotate.RotateDateWriter{...} 构造，
+// 本包暂无独立构造函数）。
+//
 // Compress=true 时对上一日文件 gzip 压缩（压缩后删除原文件）；
 // MaxAge>0 时清理超过保留天数的历史日期文件（含 .gz）。
 // 跨日压缩与过期清理在后台 goroutine 串行执行（m-1，对齐 lumberjack 做法），

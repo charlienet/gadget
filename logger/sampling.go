@@ -3,6 +3,7 @@ package logger
 import (
 	"context"
 	"log/slog"
+	"maps"
 	"sync"
 	"time"
 )
@@ -104,11 +105,9 @@ func (h *samplingHandler) Handle(ctx context.Context, r slog.Record) error {
 
 // gcCounters 清理窗口已过期的 counter（调用方须持有 h.mu）
 func (h *samplingHandler) gcCounters(now time.Time) {
-	for k, c := range h.counters {
-		if now.Sub(c.start) >= h.window {
-			delete(h.counters, k)
-		}
-	}
+	maps.DeleteFunc(h.counters, func(_ string, c *samplerCounter) bool {
+		return now.Sub(c.start) >= h.window
+	})
 }
 
 // WithAttrs 派生实例：共享计数与锁（同父实例采样统计）

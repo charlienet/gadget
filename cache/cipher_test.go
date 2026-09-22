@@ -43,7 +43,7 @@ func TestPutGetWithCipher(t *testing.T) {
 		func(o *cache.Options) { o.WithStore(remote) },
 		cache.WithCipher(xorCipher{}),
 	)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	assert.Nil(t, c.Put(ctx, "k", "secret", 60))
 
@@ -69,7 +69,7 @@ func TestGetfnWithCipher(t *testing.T) {
 		func(o *cache.Options) { o.WithStore(remote) },
 		cache.WithCipher(xorCipher{}),
 	)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	var s string
 	assert.Nil(t, c.Getfn(ctx, "k", &s, func(ctx context.Context, key string, v any) (bool, error) {
@@ -96,7 +96,7 @@ func TestGetfnSourceNotFoundWithCipher(t *testing.T) {
 		func(o *cache.Options) { o.WithStore(remote) },
 		cache.WithCipher(xorCipher{}),
 	)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	var s string
 	err := c.Getfn(ctx, "missing", &s, func(ctx context.Context, key string, v any) (bool, error) {
@@ -115,7 +115,7 @@ func TestConcurrentGetfnWithCipher(t *testing.T) {
 		cache.WithMemStore(),
 		cache.WithCipher(xorCipher{}),
 	)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	var mu sync.Mutex
 	loadCount := 0
@@ -133,14 +133,12 @@ func TestConcurrentGetfnWithCipher(t *testing.T) {
 	start := make(chan struct{})
 	var wg sync.WaitGroup
 	for i := 0; i < 8; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			<-start
 			var result string
 			assert.Nil(t, c.Getfn(ctx, "ckey", &result, loadFn, 60))
 			assert.Equal(t, "concurrent", result)
-		}()
+		})
 	}
 	close(start)
 	wg.Wait()
@@ -149,7 +147,7 @@ func TestConcurrentGetfnWithCipher(t *testing.T) {
 }
 
 func TestSetMultiGetMultiWithCipher(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 
 	// bulk 路径（mem_store 实现 BulkStore）
 	bulkCache := cache.New(
@@ -189,7 +187,7 @@ func TestCipherErrorPropagates(t *testing.T) {
 		cache.WithMemStore(),
 		cache.WithCipher(failCipher{}),
 	)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	// Put：seal（Encrypt）失败 → 返回错误
 	err := c.Put(ctx, "k", "v", 60)
@@ -223,7 +221,7 @@ func TestNilCipherIgnored(t *testing.T) {
 		cache.WithMemStore(),
 		cache.WithCipher(nil),
 	)
-	ctx := context.Background()
+	ctx := t.Context()
 	assert.Nil(t, c.Put(ctx, "k", "v", 60))
 	var s string
 	assert.Nil(t, c.Get(ctx, "k", &s))
@@ -253,12 +251,12 @@ func (s *bulkReadStore) SetMulti(_ context.Context, _ map[string][]byte, _ int) 
 func TestGetMultiBulkUnsealError(t *testing.T) {
 	// GetMulti 分派路径：store 中坏密文 → unseal 失败传播
 	local := &bulkReadStore{mockStore: newMockStore("local", false)}
-	_ = local.Put(context.Background(), "k", []byte{0xFB, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10}, 60) // 版本前缀 + 坏密文
+	_ = local.Put(t.Context(), "k", []byte{0xFB, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10}, 60) // 版本前缀 + 坏密文
 	c := cache.New(
 		func(o *cache.Options) { o.WithStore(local) },
 		cache.WithCipher(failCipher{}),
 	)
-	_, err := c.GetMulti(context.Background(), "k")
+	_, err := c.GetMulti(t.Context(), "k")
 	assert.ErrorContains(t, err, "decrypt boom")
 }
 
@@ -268,7 +266,7 @@ func TestSetMultiSealError(t *testing.T) {
 		cache.WithMemStore(),
 		cache.WithCipher(failCipher{}),
 	)
-	err := c.SetMulti(context.Background(), map[string]any{"a": "1"}, 60)
+	err := c.SetMulti(t.Context(), map[string]any{"a": "1"}, 60)
 	assert.ErrorContains(t, err, "encrypt boom")
 
 	// fallback 分支（mockStore 非 BulkStore）：seal 失败传播
@@ -277,20 +275,20 @@ func TestSetMultiSealError(t *testing.T) {
 		func(o *cache.Options) { o.WithStore(local) },
 		cache.WithCipher(failCipher{}),
 	)
-	err = c2.SetMulti(context.Background(), map[string]any{"b": "2"}, 60)
+	err = c2.SetMulti(t.Context(), map[string]any{"b": "2"}, 60)
 	assert.ErrorContains(t, err, "encrypt boom")
 }
 
 func TestGetfnUnsealError(t *testing.T) {
 	// Getfn 缓存命中 → unseal 失败传播
 	local := newMockStore("local", false)
-	_ = local.Put(context.Background(), "k", []byte{0xFB, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10}, 60) // 版本前缀 + 坏密文
+	_ = local.Put(t.Context(), "k", []byte{0xFB, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10}, 60) // 版本前缀 + 坏密文
 	c := cache.New(
 		func(o *cache.Options) { o.WithStore(local) },
 		cache.WithCipher(failCipher{}),
 	)
 	var s string
-	err := c.Getfn(context.Background(), "k", &s, func(ctx context.Context, key string, v any) (bool, error) {
+	err := c.Getfn(t.Context(), "k", &s, func(ctx context.Context, key string, v any) (bool, error) {
 		return true, nil
 	}, 60)
 	assert.ErrorContains(t, err, "decrypt boom")
@@ -306,20 +304,18 @@ func TestConcurrentGetShared(t *testing.T) {
 		func(o *cache.Options) { o.WithStore(remote) },
 		cache.WithVerifyEvery(1),
 	)
-	ctx := context.Background()
+	ctx := t.Context()
 	_ = c.Put(ctx, "k", "v", 60) // local + remote 均有数据
 
 	start := make(chan struct{})
 	var wg sync.WaitGroup
 	for i := 0; i < 8; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			<-start
 			var s string
 			assert.Nil(t, c.Get(ctx, "k", &s))
 			assert.Equal(t, "v", s)
-		}()
+		})
 	}
 	close(start)
 	wg.Wait()

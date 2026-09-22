@@ -7,6 +7,7 @@ package stream
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"sync"
 	"time"
@@ -116,11 +117,9 @@ func NewStreamListener(rdb redis.Client, opts ...Option) cache.Listener {
 	// XAdd/XReadGroup 使用的 key 不一致。改为在 Initialize 中创建，
 	// 并以 watch 首次读取时的 NOGROUP 检测兜底。
 
-	s.wg.Add(1)
-	go func() {
-		defer s.wg.Done()
+	s.wg.Go(func() {
 		s.watch()
-	}()
+	})
 
 	return s
 }
@@ -145,7 +144,7 @@ func (s *streamListener) Initialize(opt cache.Options) {
 
 	// 用最终 client 创建 consumer group（若 stream 尚不存在则失败忽略，
 	// 由 watch 首次读取时按需创建）
-	_ = rdb.XGroupCreate(context.Background(), s.stream, s.group, "0").Err()
+	_ = rdb.XGroupCreate(context.TODO(), s.stream, s.group, "0").Err()
 }
 
 func (s *streamListener) Subscribe() chan string {
@@ -176,8 +175,8 @@ func (s *streamListener) Ready() <-chan struct{} {
 // 不会从 stream 中删除条目；若 XAdd 不设上限，已 ACK 的历史条目会随
 // 失效消息量无限累积，导致 Redis 内存持续增长。MAXLEN 确保 stream
 // 只保留最近的 maxStreamLen 条（超出部分在追加时自动裁剪）。
-func (s *streamListener) Publish(key string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), s.publishTimeout)
+func (s *streamListener) Publish(ctx context.Context, key string) error {
+	ctx, cancel := context.WithTimeout(ctx, s.publishTimeout)
 	defer cancel()
 
 	s.mu.RLock()
@@ -187,7 +186,7 @@ func (s *streamListener) Publish(key string) error {
 	return rdb.XAdd(ctx, &goredis.XAddArgs{
 		Stream: s.stream,
 		MaxLen: maxStreamLen,
-		Values: map[string]interface{}{"key": key},
+		Values: map[string]any{"key": key},
 	}).Err()
 }
 
@@ -231,7 +230,7 @@ func (s *streamListener) watch() {
 		rdb := s.rdb
 		s.mu.RUnlock()
 
-		result, err := rdb.XReadGroup(context.Background(), &goredis.XReadGroupArgs{
+		result, err := rdb.XReadGroup(context.TODO(), &goredis.XReadGroupArgs{
 			Group:    s.group,
 			Consumer: s.consumer,
 			Streams:  []string{s.stream, ">"},
@@ -243,7 +242,7 @@ func (s *streamListener) watch() {
 			// group 可能尚未创建（例如直接使用 listener 未经过 Initialize），
 			// 检测 NOGROUP 后按需创建（MKSTREAM 确保 stream 存在）
 			if redis.IsNoGroup(err) {
-				if cerr := rdb.XGroupCreateMkStream(context.Background(), s.stream, s.group, "0").Err(); cerr == nil {
+				if cerr := rdb.XGroupCreateMkStream(context.TODO(), s.stream, s.group, "0").Err(); cerr == nil {
 					// group/stream 已按需建立：消费链路可用，触发就绪
 					s.markReady()
 					retryDelay = retryBaseDelay
@@ -278,8 +277,12 @@ func (s *streamListener) watch() {
 
 				select {
 				case s.msgChan <- key:
-					// Acknowledge after delivering to channel
-					rdb.XAck(context.Background(), s.stream, s.group, msg.ID)
+					// Acknowledge after delivering to channel. XAck 失败非致命：
+					// 条目留在 PEL，at-least-once 语义下会被重投，故仅记 Warn 不中断消费。
+					if err := rdb.XAck(context.TODO(), s.stream, s.group, msg.ID).Err(); err != nil {
+						slog.Warn("cache/redis stream: XAck failed, entry will be redelivered",
+							"stream", s.stream, "group", s.group, "id", msg.ID, "error", err)
+					}
 				case <-s.close:
 					return
 				}

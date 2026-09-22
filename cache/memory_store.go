@@ -30,9 +30,12 @@ type entry struct {
 // 参与的连接）的 prev/next 在链表内均非 nil，故 remove/moveToFront/pushFront 可直接
 // 解引用无需判空。所有指针变更必须经由这三个助手，禁止在业务代码中手写 prev/next。
 type mem_store struct {
-	items map[string]*entry
-	sync.RWMutex
-	stopClean       chan struct{}
+	items     map[string]*entry
+	mu        sync.RWMutex // 保护 items、LRU 链表、usedBytes 及热度计数
+	stopClean chan struct{}
+	// evictWG 跟踪 evictLoop goroutine：Close 中 close(stopClean) 后 Wait，
+	// 确保后台清理协程已退出（见 Close 注释）。
+	evictWG         sync.WaitGroup
 	cleanupInterval time.Duration
 	closeOnce       sync.Once
 
@@ -65,7 +68,8 @@ func newMemStore() *mem_store {
 }
 
 func (s *mem_store) startEviction() {
-	go s.evictLoop()
+	// 经 evictWG 跟踪：Close 在 close(stopClean) 后 Wait，确保 evictLoop 已退出。
+	s.evictWG.Go(s.evictLoop)
 }
 
 // pushFront 把尚未入链的 e 插入到 head 之后（成为最新使用节点）。
@@ -91,8 +95,8 @@ func (s *mem_store) remove(e *entry) {
 
 func (s *mem_store) Get(ctx context.Context, key string) ([]byte, bool, error) {
 	// LRU 提升需写链表，故全程持写锁单阶段处理（不再 RLock 读→Lock 复检）。
-	s.Lock()
-	defer s.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	e, found := s.items[key]
 	if !found {
@@ -125,8 +129,8 @@ func (s *mem_store) Get(ctx context.Context, key string) ([]byte, bool, error) {
 // 专供版本同步采样（syncBatch）使用：采样不得扰动 LRU 顺序，否则游标会在 head 端
 // 簇震荡、tail 端冷 key 被长期饿死。非导出，仅供 package cache 内部调用。
 func (s *mem_store) peek(key string) ([]byte, bool) {
-	s.Lock()
-	defer s.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	e, found := s.items[key]
 	if !found {
@@ -155,8 +159,8 @@ func (s *mem_store) Put(ctx context.Context, key string, v []byte, expireSecond 
 		}
 	}
 
-	s.Lock()
-	defer s.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	if old, ok := s.items[key]; ok {
 		// 覆写：原地更新 entry.item（不重新分配节点），字节精确记账（扣旧加新），
@@ -178,8 +182,8 @@ func (s *mem_store) Put(ctx context.Context, key string, v []byte, expireSecond 
 }
 
 func (s *mem_store) DeletePattern(ctx context.Context, pattern string) error {
-	s.Lock()
-	defer s.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	for k, e := range s.items {
 		matched, err := filepath.Match(pattern, k)
@@ -196,8 +200,8 @@ func (s *mem_store) DeletePattern(ctx context.Context, pattern string) error {
 }
 
 func (s *mem_store) Delete(ctx context.Context, key ...string) error {
-	s.Lock()
-	defer s.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	for _, k := range key {
 		if e, ok := s.items[k]; ok {
@@ -268,8 +272,8 @@ func (s *mem_store) evictIfNeeded() {
 func (s *mem_store) GetMulti(ctx context.Context, keys ...string) (map[string][]byte, error) {
 	result := make(map[string][]byte, len(keys))
 
-	s.Lock()
-	defer s.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	now := time.Now().UnixNano()
 	for _, key := range keys {
@@ -288,8 +292,8 @@ func (s *mem_store) GetMulti(ctx context.Context, keys ...string) (map[string][]
 func (s *mem_store) SetMulti(ctx context.Context, items map[string][]byte, expireSecond int) error {
 	ttlDuration := int64(time.Second * time.Duration(expireSecond))
 
-	s.Lock()
-	defer s.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	for key, val := range items {
 		var e int64
@@ -327,8 +331,8 @@ func (s *mem_store) SetMulti(ctx context.Context, items map[string][]byte, expir
 // 语义变化：旧版按插入顺序 offset 切片；新版基于 LRU 链表，故起始位置由 key 决定，
 // 对驱逐导致的下标漂移不敏感。调用方（syncBatch）以"返回空批 → 重置游标"实现回绕。
 func (s *mem_store) SampleKeys(afterKey string, n int) []string {
-	s.RLock()
-	defer s.RUnlock()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 
 	if n <= 0 {
 		return nil
@@ -352,8 +356,8 @@ func (s *mem_store) SampleKeys(afterKey string, n int) []string {
 }
 
 func (s *mem_store) Len() int {
-	s.RLock()
-	defer s.RUnlock()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	return len(s.items)
 }
 
@@ -361,15 +365,19 @@ func (*mem_store) IsRemote() bool { return false }
 
 func (*mem_store) Name() string { return "memory" }
 
-// Close 停止后台清理 goroutine，实现 io.Closer，供 Cache.Close 级联调用。
-// 幂等：两个 cache 实例共享同一 store 时二次 Close 不 panic；无失败路径，
-// 恒返回 nil。注意：多 cache 实例共享同一 store 时，首个 Close 会永久
+// Close 停止后台清理 goroutine 并等待其退出，实现 io.Closer，供 Cache.Close
+// 级联调用。幂等：两个 cache 实例共享同一 store 时二次 Close 不 panic；无失败
+// 路径，恒返回 nil。等待有界：evictLoop 的 select 收到 stopClean 后立即 return
+// （无长阻塞点），故 evictWG.Wait 至多等待当前一轮 evictExpired 持锁扫描完成。
+// 若从未调用 startEviction（未启动 evictLoop），Wait 立即返回。
+// 注意：多 cache 实例共享同一 store 时，首个 Close 会永久
 // 停止 janitor（后台主动过期清理），其余仍在运行的实例退化为仅依赖惰性过期
 // （Get/驱逐时顺带清理），不再享受后台主动回收——共享 store 的生命周期以最先
 // 到来的 Close 为准，如需各自独立回收请为每个实例分配独立 mem_store。
 func (s *mem_store) Close() error {
 	s.closeOnce.Do(func() {
 		close(s.stopClean)
+		s.evictWG.Wait()
 	})
 	return nil
 }
@@ -392,8 +400,8 @@ func (s *mem_store) evictLoop() {
 // 决定热 key 身份，跨周期不累计。清零仅在热 key 豁免开启时执行（关闭时 hits 无消费者）。
 func (s *mem_store) evictExpired() {
 	now := time.Now().UnixNano()
-	s.Lock()
-	defer s.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	clearHits := s.hotKeyThreshold > 0
 	for k, e := range s.items {
 		if e.Expiration > 0 && now > e.Expiration {

@@ -136,7 +136,7 @@ func (redisErr) RedisError()     {}
 // group/stream 尚不存在（未经 Initialize）时，首次 XReadGroup 报 NOGROUP，
 // watch 应调用 XGroupCreateMkStream 按需创建并继续读取。
 func TestStreamWatchNoGroupCreate(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 
 	var (
 		readCalls   int32
@@ -188,7 +188,7 @@ func TestStreamWatchNoGroupCreate(t *testing.T) {
 // TestStreamWatchDeliverAndAck 验证消息投递与 ACK：
 // XReadGroup 返回的消息写入 Subscribe 通道，投递后调用 XAck 确认。
 func TestStreamWatchDeliverAndAck(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 
 	stream := goredis.XStream{
 		Stream: "cache:invalidate",
@@ -262,7 +262,7 @@ func TestStreamWatchDeliverAndAck(t *testing.T) {
 // 首次 XReadGroup 失败（非 NOGROUP，如连接异常）后，watch 按退避延迟
 // 重试；恢复后消息正常投递。
 func TestStreamWatchRetryBackoff(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 	start := time.Now()
 
 	var readCalls int32
@@ -306,7 +306,7 @@ func TestStreamWatchRetryBackoff(t *testing.T) {
 // 会通过 AddPrefix 替换 s.rdb；watch 每轮读取前取 rdb 快照，应在不产生
 // 数据竞态（-race 验证）的前提下切换到带前缀的新 client。
 func TestStreamWatchInitializeSwapClient(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 
 	var lastClientID int32 // 最近一次 XReadGroup 调用所在 client 实例 id
 	m := &mockRedis{
@@ -340,7 +340,7 @@ func TestStreamWatchInitializeSwapClient(t *testing.T) {
 // TestStreamWatchReady 验证 Ready 就绪信号：watch 首次 XReadGroup 成功
 // （消费链路建立）即 close 就绪信号。
 func TestStreamWatchReady(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 
 	m := &mockRedis{
 		readGroup: func(ctx context.Context, a *goredis.XReadGroupArgs) *goredis.XStreamSliceCmd {
@@ -362,7 +362,7 @@ func TestStreamWatchReady(t *testing.T) {
 // TestStreamWatchReadyNotBeforeSuccess 验证 Ready 在 watch 成功建立消费前
 // 不会关闭：XReadGroup 持续失败（Redis 不可达等）时就绪信号保持未触发。
 func TestStreamWatchReadyNotBeforeSuccess(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 
 	m := &mockRedis{
 		readGroup: func(ctx context.Context, a *goredis.XReadGroupArgs) *goredis.XStreamSliceCmd {
@@ -388,7 +388,7 @@ func TestStreamWatchReadyNotBeforeSuccess(t *testing.T) {
 //
 // miniredis v2.5.0 不支持 stream 命令，故本用例必须依赖真实 Redis。
 func TestStreamWatchIntegration(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 	streamName := "stream-test-" + strconv.FormatInt(time.Now().UnixNano(), 36)
 
 	test.RunOnRedis(t, func(rdb redis.Client) {
@@ -401,8 +401,8 @@ func TestStreamWatchIntegration(t *testing.T) {
 		// 等待 watch 建立（NOGROUP → 创建 group/stream）
 		time.Sleep(500 * time.Millisecond)
 
-		assert.NoError(t, lis.Publish("inv-key-1"))
-		assert.NoError(t, lis.Publish("inv-key-2"))
+		assert.NoError(t, lis.Publish(t.Context(), "inv-key-1"))
+		assert.NoError(t, lis.Publish(t.Context(), "inv-key-2"))
 
 		got := make([]string, 0, 2)
 		deadline := time.Now().Add(5 * time.Second)
