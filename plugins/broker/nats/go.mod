@@ -3,7 +3,7 @@ module github.com/charlienet/gadget/plugins/broker/nats
 go 1.26
 
 require (
-	github.com/charlienet/gadget/broker v0.1.8
+	github.com/charlienet/gadget/broker v0.2.0
 	github.com/nats-io/nats-server/v2 v2.10.24
 	github.com/nats-io/nats.go v1.37.0
 	github.com/stretchr/testify v1.11.1
@@ -11,7 +11,6 @@ require (
 
 require (
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
-	github.com/google/uuid v1.6.0 // indirect
 	github.com/klauspost/compress v1.19.2 // indirect
 	github.com/kr/text v0.2.0 // indirect
 	github.com/minio/highwayhash v1.0.3 // indirect

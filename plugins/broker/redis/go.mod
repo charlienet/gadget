@@ -3,7 +3,7 @@ module github.com/charlienet/gadget/plugins/broker/redis
 go 1.26
 
 require (
-	github.com/charlienet/gadget/broker v0.1.7
+	github.com/charlienet/gadget/broker v0.2.0
 	github.com/charlienet/gadget/redis v0.9.0
 	github.com/redis/go-redis/v9 v9.22.0
 )
@@ -15,7 +15,6 @@ require (
 	github.com/charlienet/gadget/breaker v0.1.0 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/gomodule/redigo v1.9.3 // indirect
-	github.com/google/uuid v1.6.0 // indirect
 	github.com/hashicorp/go-version v1.9.0 // indirect
 	github.com/klauspost/cpuid/v2 v2.2.10 // indirect
 	github.com/kr/text v0.2.0 // indirect

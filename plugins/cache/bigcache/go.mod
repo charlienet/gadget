@@ -4,7 +4,7 @@ go 1.26
 
 require (
 	github.com/allegro/bigcache/v3 v3.1.0
-	github.com/charlienet/gadget/cache v0.6.0
+	github.com/charlienet/gadget/cache v0.7.0
 	github.com/stretchr/testify v1.11.1
 )
 

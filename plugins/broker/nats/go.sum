@@ -1,10 +1,8 @@
-github.com/charlienet/gadget/broker v0.1.8 h1:NW5S5naCuaYJ5yIJFwnI0LqDPoMmv+6jlPTmxpi+HKI=
-github.com/charlienet/gadget/broker v0.1.8/go.mod h1:V4MvtOct2srO6wWjr/sn3SK5iYvxg/366TECaFXqmg4=
+github.com/charlienet/gadget/broker v0.2.0 h1:Vlrtht19uy4pwt+MGJMtOmVxJkAZY8f1Wjzb/23aUKw=
+github.com/charlienet/gadget/broker v0.2.0/go.mod h1:RDbuNrS7LO8+PYRmdzMjhzlzEzSV3BdJJRjpxjUKBsY=
 github.com/creack/pty v1.1.9/go.mod h1:oKZEueFk5CKHvIhNR5MUki03XCEU+Q6VDXinZuGJ33E=
 github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc h1:U9qPSI2PIWSS1VwoXQT9A3Wy9MM3WgvqSxFWenqJduM=
 github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
-github.com/google/uuid v1.6.0 h1:NIvaJDMOsjHA8n1jAhLSgzrAzy1Hgr+hNrb57e+94F0=
-github.com/google/uuid v1.6.0/go.mod h1:TIyPZe4MgqvfeYDBFedMoGGpEw/LqOeaOT+nhxU+yHo=
 github.com/klauspost/compress v1.19.2 h1:hMRETovs/pu/dVWN7zIT1PGG8t509MwT6bO7XSi26R8=
 github.com/klauspost/compress v1.19.2/go.mod h1:cwPg85FWrGar70rWktvGQj8/hthj3wpl0PGDogxkrSQ=
 github.com/kr/pretty v0.3.1 h1:flRD4NNwYAUpkphVc1HcthR4KEIFJ65n8Mw5qdRn3LE=
