@@ -7,6 +7,7 @@ package redis
 import (
 	"context"
 	"math"
+	"time"
 )
 
 // BloomFilter 公共面：接口定义、配置与 Option、工厂入口，
@@ -117,7 +118,23 @@ type BloomFilter interface {
 	//   - 失败恒返回错误（errors.Is(ErrRedisUnavailable) 可感知），
 	//     与 FailPolicy 取值无关。
 	//   - Reset 删除整个键——勿与布隆过滤器共用键。
+	//
+	// 启用预填充（WithPrefill）后本方法被拦截：手工触发预填充重建的唯一
+	// 入口，等价 force=1 抢占式全流程——抢占成功 → 等待 Δ（2×syncInterval）
+	// → 清空重建 → 调用 PrefillFunc 回灌（预算 RebuildTimeout）→ 成功置
+	// ready、失败置 fail（指数退避），同步执行直至返回。Ready/Failed/
+	// Uninitialized 均可被 force 抢占（Failed 同时归零连续失败计数）；
+	// 抢占失败（权威状态为 Building）立即返回 ErrRebuildInProgress，不排队
+	// 不等锁，重试即可。启用后错误原样返回（ErrRebuildInProgress /
+	// ErrRebuildTimeout / cause），不经 fallbackErr 哨兵包装。
+	// 见 bloom_prefill_filter.go；未启用保持上述原语义。
 	Reset(ctx context.Context) error
+
+	// State 直接 GET 权威状态键查询预填充相位（1 RTT，不经本地缓存）。
+	// 键缺失返回 PrefillUninitialized；错误原样返回（phase 取
+	// PrefillUninitialized）。未启用预填充返回
+	// (PrefillUninitialized, ErrPrefillDisabled)。
+	State(ctx context.Context) (PrefillPhase, error)
 }
 
 // BloomInfo contains metadata about a Bloom filter.
@@ -131,6 +148,22 @@ type BloomInfo struct {
 	Expansion  int64 // expansion factor (仅 BF.* 路径有效，bitmap 回退版恒 0)
 }
 
+// UnimplementedBloomFilter 提供 BloomFilter 预填充扩展方法（State）
+// 的默认空实现：返回 (PrefillUninitialized, ErrPrefillDisabled)——
+// 未启用预填充时的正确语义。
+// 供既有 BloomFilter 实现方嵌入以平滑对接接口扩展（其余数据面方法仍由
+// 外层类型自行实现）：
+//
+//	type myFilter struct{ ... }
+//	func (f *myFilter) Add(...)  { ... } // 既有方法…
+//	var _ BloomFilter = (*myFilter)(nil) // 嵌入 UnimplementedBloomFilter 后满足接口
+type UnimplementedBloomFilter struct{}
+
+// State 未启用预填充的默认语义。
+func (UnimplementedBloomFilter) State(context.Context) (PrefillPhase, error) {
+	return PrefillUninitialized, ErrPrefillDisabled
+}
+
 // --- Options ---
 
 // BloomOption configures a Bloom filter.
@@ -138,6 +171,7 @@ type BloomOption func(*bloomConfig)
 
 type bloomConfig struct {
 	failPolicyConfig
+	prefillConfig // 预填充门控配置（fn==nil 时未启用，工厂不包装）
 	capacity      int64
 	falsePositive float64
 	shardCount    int // 集群分片数（默认 1=关闭；仅 ModeCluster 且 n>1 生效；<=0 非法值被忽略）
@@ -148,6 +182,7 @@ type BloomConfig = bloomConfig
 
 func defaultBloomConfig() bloomConfig {
 	return bloomConfig{
+		prefillConfig: defaultPrefillConfig(),
 		capacity:      1000000,
 		falsePositive: 0.0001, // 默认 0.01%
 		shardCount:    defaultBloomShardCount,
@@ -202,6 +237,66 @@ func WithShardCount(n int) BloomOption {
 	}
 }
 
+// WithPrefill 声明式启用 Bloom 预填充门控：新建/重置后由库负责预填充
+// 状态管理（Redis 权威状态键）、抢占重建、退避重试与多实例降级同步，
+// 完成前 Exists 面按"未就绪恒存在"降级（见 bloom_prefill_filter.go）。
+// fn==nil 静默忽略（不启用，对齐非法值静默忽略惯例）。opts 微调行为，
+// 非法值同样静默忽略。
+//
+// PrefillFunc 契约（应用回灌函数）：
+//   - 必须幂等可重试：库可能因退避/抢占在清空后再次调用；
+//   - 以权威数据源为扫描基准：清空窗口内的增量写入由回灌补回；
+//   - 应响应 ctx 取消：预算为 RebuildTimeout，超时按失败计并指数退避；
+//   - panic 由库 recover 转 error 走 fail 路径（不崩溃进程）。
+func WithPrefill(fn PrefillFunc, opts ...PrefillOption) BloomOption {
+	return func(c *bloomConfig) {
+		if fn == nil {
+			return // 静默忽略 = 不启用
+		}
+		c.enabled = true
+		c.fn = fn
+		for _, o := range opts {
+			o(&c.prefillConfig)
+		}
+	}
+}
+
+// WithRebuildTimeout 设置单次预填充重建的预算，默认 5 分钟；
+// <=0 静默忽略。权威状态键的 building TTL = 该值 +
+// max(10s, 2×syncInterval+5s) 裕量（见 prefillBuildingTTL）。
+func WithRebuildTimeout(d time.Duration) PrefillOption {
+	return func(c *prefillConfig) {
+		if d > 0 {
+			c.rebuildTimeout = d
+		}
+	}
+}
+
+// WithRetryBackoff 设置预填充失败的指数退避：backoff(n)=
+// min(initial×2^(n-1), max)，multiplier 固定 2 不可配；默认 5s/10min；
+// 非法值（<=0）静默忽略保留对应默认。
+func WithRetryBackoff(initial, max time.Duration) PrefillOption {
+	return func(c *prefillConfig) {
+		if initial > 0 {
+			c.retryInitial = initial
+		}
+		if max > 0 {
+			c.retryMax = max
+		}
+	}
+}
+
+// WithSyncInterval 设置本地状态同步间隔，默认 1s；<=0 静默忽略。
+// 该值同时影响三处：Δ 传播等待与 stale 阈值均为 2×该值，且 building TTL
+// 的裕量随其放大（裕量=max(10s, 2×syncInterval+5s)，见 prefillBuildingTTL）。
+func WithSyncInterval(d time.Duration) PrefillOption {
+	return func(c *prefillConfig) {
+		if d > 0 {
+			c.syncInterval = d
+		}
+	}
+}
+
 // --- Factory ---
 
 // NewBloomFilter creates a BloomFilter for the given key. The implementation
@@ -229,18 +324,28 @@ func (rdb *redisClient) NewBloomFilter(ctx context.Context, key string, opts ...
 		o(&cfg)
 	}
 
+	// 构造即连接：先按能力分派实现并 connectAll，全部成功才交付实例。
+	var inner BloomFilter
 	if rdb.cap.HasBloom() {
 		bf := rdb.newBFImpl(key, cfg)
 		if err := bf.connectAll(ctx); err != nil {
 			return nil, err
 		}
-		return bf, nil
+		inner = bf
+	} else {
+		b := newBitmapImpl(rdb, key, cfg)
+		if err := b.connectAll(ctx); err != nil {
+			return nil, err
+		}
+		inner = b
 	}
-	b := newBitmapImpl(rdb, key, cfg)
-	if err := b.connectAll(ctx); err != nil {
-		return nil, err
+
+	// 预填充门控：启用且 fn!=nil 才包装装饰器；未启用返回值与现网行为
+	// 完全一致（直接交付 inner）。
+	if cfg.enabled && cfg.fn != nil {
+		return newPrefillFilter(rdb, inner, key, cfg), nil
 	}
-	return b, nil
+	return inner, nil
 }
 
 // NewBloomFilterWithEstimate creates a BloomFilter with explicit capacity and

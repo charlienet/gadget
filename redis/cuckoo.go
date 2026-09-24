@@ -23,6 +23,7 @@ type CuckooOption func(*cuckooConfig)
 
 type cuckooConfig struct {
 	failPolicyConfig
+	prefillConfig       // 预填充门控配置（fn==nil 时未启用，工厂不建 coord，同 bloomConfig 方式）
 	capacity      int64 // 预估容量（模块版首写前恒 CF.RESERVE 预建，未显式传参按默认 1000000；回退版决定桶数量 numBuckets=capacity/bucketSize，默认 10000 为存量键布局兼容约束）
 	maxIterations int64 // 最大踢出迭代次数
 	bucketSize    int64 // 桶大小
@@ -32,7 +33,9 @@ type cuckooConfig struct {
 // CuckooConfig 是 CuckooFilter 的配置类型别名，供 WithFailPolicy 泛型参数使用。
 type CuckooConfig = cuckooConfig
 
-func defaultCuckooConfig() cuckooConfig { return cuckooConfig{} }
+func defaultCuckooConfig() cuckooConfig {
+	return cuckooConfig{prefillConfig: defaultPrefillConfig()}
+}
 
 // WithCuckooCapacity 设置预估容量（命名避免与 BloomFilter 的 WithCapacity
 // 冲突——两者是不同类型 Option，Go 同包不允许同名重载）。
@@ -72,6 +75,41 @@ func WithExpansion(n int64) CuckooOption {
 	return func(c *cuckooConfig) {
 		if n > 0 {
 			c.expansion = n
+		}
+	}
+}
+
+// WithCuckooPrefill 声明式启用布谷鸟过滤器预填充门控（使用形态与
+// WithPrefill 一致）：新建/重置后由库负责预填充状态管理（Redis 权威状态
+// 键 {base}:__prefill）、抢占重建、指数退避与多实例降级同步。fn==nil
+// 静默忽略（=不启用，对齐 WithPrefill 惯例）；opts 作用到
+// &c.prefillConfig（WithRebuildTimeout/WithRetryBackoff/WithSyncInterval），
+// 非法值静默忽略。
+//
+// PrefillFunc 回灌契约（同 WithPrefill）：
+//   - 必须幂等可重试：库可能因退避/抢占在清空后再次调用；
+//   - 以数据源为扫描基准：清空窗口内的增量写入由回灌以数据源为准补回
+//     （Add/AddNX/AddMulti/Del 非 Ready 期照常放行真实写入，Del 亦同）；
+//   - 应响应 ctx 取消：预算 RebuildTimeout，超时按失败计并指数退避；
+//   - panic 由库 recover 转 error 走 fail 路径（不崩溃进程）。
+//
+// 降级语义摘要（本地非新鲜 Ready 时，详见各方法 godoc）：
+//   - Exists 恒 (true,nil)、ExistsMulti 非空恒全 true、Count 恒 (1,nil)
+//     ——这是状态未就绪期的业务规则，**不受 FailPolicy 影响**（FailPolicy
+//     只作用于 Ready 态原路径与写入口原路径的 IsUnavailable 兜底）；
+//   - Add/AddNX/AddMulti/Del 放行（非 Ready 也走原路径，真实写入含
+//     FailPolicy 分叉）；Info 恒透传不降级；
+//   - Reset 被拦截为 force 重建全流程（手工触发重建的唯一入口）；
+//     State 查询权威相位；未启用时 State 返回 ErrPrefillDisabled。
+func WithCuckooPrefill(fn PrefillFunc, opts ...PrefillOption) CuckooOption {
+	return func(c *cuckooConfig) {
+		if fn == nil {
+			return // 静默忽略 = 不启用
+		}
+		c.enabled = true
+		c.fn = fn
+		for _, o := range opts {
+			o(&c.prefillConfig)
 		}
 	}
 }
@@ -133,7 +171,8 @@ type cuckooFilterImpl interface {
 //	}
 type CuckooFilter struct {
 	impl   cuckooFilterImpl
-	policy FailPolicy // 失效兜底策略（默认 FailOpen）
+	policy FailPolicy          // 失效兜底策略（默认 FailOpen）
+	coord  *prefillCoordinator // 预填充协调器（nil=未启用 WithCuckooPrefill）
 }
 
 // NewCuckooFilter 创建布谷鸟过滤器（挂 *redisClient）。
@@ -164,19 +203,39 @@ func (rdb *redisClient) NewCuckooFilter(ctx context.Context, key string, opts ..
 	for _, o := range opts {
 		o(&cfg)
 	}
+	// 预填充协调器：启用且 fn!=nil 才创建（impl 天然满足 prefillInner）；
+	// 未启用 coord==nil，数据面/Reset/Close 走原路径一字不改。
+	mkCoord := func(impl prefillInner) *prefillCoordinator {
+		if cfg.fn == nil {
+			return nil
+		}
+		return newPrefillCoordinator(rdb, impl, key, cfg.prefillConfig)
+	}
 
 	if rdb.cap.HasCuckoo() {
 		impl := &cfCmdImpl{client: rdb, key: key, cfg: cfg}
 		if err := impl.connectAll(ctx); err != nil {
 			return nil, err
 		}
-		return &CuckooFilter{impl: impl, policy: cfg.policy}, nil
+		return &CuckooFilter{impl: impl, policy: cfg.policy, coord: mkCoord(impl)}, nil
 	}
 	impl := newHashImpl(rdb, key, cfg)
 	if err := impl.connect(ctx); err != nil {
 		return nil, err
 	}
-	return &CuckooFilter{impl: impl, policy: cfg.policy}, nil
+	return &CuckooFilter{impl: impl, policy: cfg.policy, coord: mkCoord(impl)}, nil
+}
+
+// prefillProbe 热路径惰性触发：coord 存在时经 triggerLazy 起后台
+// force=0 重建（内部按本地相位/CAS 短路，恒调用安全；triggerLazy 以
+// WithoutCancel 派生 run ctx——剥离取消与超时、保留调用方 ctx values，
+// 与 bloom maybeTrigger(ctx) 口径一致），零 RTT 不阻塞当前请求；
+// coord==nil（未启用）为 no-op。数据面入口统一传入调用方 ctx 调用，
+// 保证冷启动首请求即能惰性起重建且 fn 的 ctx 可读到调用方 values。
+func (cf *CuckooFilter) prefillProbe(ctx context.Context) {
+	if cf.coord != nil {
+		cf.coord.triggerLazy(ctx)
+	}
 }
 
 // fallbackBool 按策略返回布谷鸟过滤器兜底值 + 哨兵错误：FailOpen → true
@@ -203,9 +262,12 @@ func (cf *CuckooFilter) fallbackBools(n int, err error) ([]bool, error) {
 // 模块版为多重集插入（已存在也会再插一份，false 源于桶满/驱逐超限）；
 // 回退版为去重式（false 即已存在）。跨路径勿依赖重复 Add 增值；需要
 // 唯一保证用 AddNX，观察次数用 Count，正规批量用 AddMulti。
+// 启用 WithCuckooPrefill 时非 Ready 也照常放行真实写入（清空窗口内的
+// 增量写入由回灌以数据源为准补回）。
 // IsUnavailable 时按 FailPolicy 兜底且返回 ErrRedisUnavailable 哨兵
 // （errors.Is 可感知）；数据类错误恒原样返回。
 func (cf *CuckooFilter) Add(ctx context.Context, item any) (bool, error) {
+	cf.prefillProbe(ctx)
 	added, err := cf.impl.Add(ctx, item)
 	if err != nil && IsUnavailable(err) {
 		return cf.fallbackBool(err)
@@ -214,10 +276,17 @@ func (cf *CuckooFilter) Add(ctx context.Context, item any) (bool, error) {
 }
 
 // Exists 检查元素是否可能存在于过滤器（布谷鸟过滤器无假阴性，可能有假阳性）。
+// 启用 WithCuckooPrefill 且本地非新鲜 Ready 时恒返回 (true, nil)——状态
+// 未就绪期"恒存在"是业务规则，不经 FailPolicy（先 prefillProbe 惰性探测
+// 一次）；Ready 透传原路径真实查询。
 // Redis 服务失效时按兜底策略：FailOpen → (true, nil)（视为存在，防穿透失效
 // 但放行业务）；FailClosed → (false, nil)。
 // item 属不支持类型时返回数据类错误，不触发兜底。
 func (cf *CuckooFilter) Exists(ctx context.Context, item any) (bool, error) {
+	if cf.coord != nil && !cf.coord.readyFresh() {
+		cf.prefillProbe(ctx)
+		return true, nil
+	}
 	exists, err := cf.impl.Exists(ctx, item)
 	if err != nil && IsUnavailable(err) {
 		return cf.fallbackBool(err)
@@ -227,13 +296,23 @@ func (cf *CuckooFilter) Exists(ctx context.Context, item any) (bool, error) {
 
 // ExistsMulti 批量检查多个元素是否存在，结果与入参顺序一一对应；
 // 存在性语义同 Exists（无假阴性，可能假阳性）。单命令/单脚本往返。
-// items 为空时返回 (nil, nil)。
+// items 为空时返回 (nil, nil)（空入参先于降级判断走原路径，两态一致）。
+// 启用 WithCuckooPrefill 且本地非新鲜 Ready 时非空入参恒返回
+// 长度=入参数的全 true + nil（业务规则，不经 FailPolicy，先 prefillProbe）。
 // IsUnavailable 时整体按 FailPolicy 兜底（FailOpen 全 true / FailClosed
 // 全 false）且返回 ErrRedisUnavailable 哨兵（errors.Is 可感知），禁止
 // 部分真实部分兜底的混合结果；数据类错误恒原样返回。
 func (cf *CuckooFilter) ExistsMulti(ctx context.Context, items ...any) ([]bool, error) {
 	if len(items) == 0 {
 		return nil, nil
+	}
+	if cf.coord != nil && !cf.coord.readyFresh() {
+		cf.prefillProbe(ctx)
+		out := make([]bool, len(items))
+		for i := range out {
+			out[i] = true
+		}
+		return out, nil
 	}
 	res, err := cf.impl.ExistsMulti(ctx, items...)
 	if err != nil {
@@ -249,9 +328,16 @@ func (cf *CuckooFilter) ExistsMulti(ctx context.Context, items ...any) ([]bool, 
 // Count 返回元素在过滤器中的出现次数估计。0 表示确定不存在（无假阴性）；
 // >0 为出现次数估计，可能因指纹碰撞高估。模块版（CF.ADD 多重集语义）
 // Count 可取任意值；回退版（Add 去重语义）恒为 0/1。跨路径勿依赖精确计数。
+// 启用 WithCuckooPrefill 且本地非新鲜 Ready 时恒返回 (1, nil)：降级期
+// 精确计数无意义，且 Count==0 在原语义是"确定不存在"的假阴性结论，
+// 未就绪期禁止返回 0（先 prefillProbe）。
 // IsUnavailable 时返回 (0, ErrRedisUnavailable 哨兵)（errors.Is 可感知），
 // 观测类不随 FailPolicy 分叉；数据类错误恒原样返回。
 func (cf *CuckooFilter) Count(ctx context.Context, item any) (int64, error) {
+	if cf.coord != nil && !cf.coord.readyFresh() {
+		cf.prefillProbe(ctx)
+		return 1, nil
+	}
 	n, err := cf.impl.Count(ctx, item)
 	if err != nil {
 		if IsUnavailable(err) {
@@ -267,9 +353,12 @@ func (cf *CuckooFilter) Count(ctx context.Context, item any) (int64, error) {
 // 一律用本方法（模块版 Add 是多重集插入——已存在也会再插一份；AddNX 恒
 // "存在即不加"；回退版两方法等价，Add 本就是去重式）。
 // false 的原因不承诺可区分：已存在、或过滤器满/驱逐超限均返回 false。
+// 启用 WithCuckooPrefill 时非 Ready 也照常放行真实写入（清空窗口内的
+// 增量写入由回灌以数据源为准补回）。
 // IsUnavailable 时按 FailPolicy 兜底且返回 ErrRedisUnavailable 哨兵
 // （errors.Is 可感知）；数据类错误恒原样返回。
 func (cf *CuckooFilter) AddNX(ctx context.Context, item any) (bool, error) {
+	cf.prefillProbe(ctx)
 	added, err := cf.impl.AddNX(ctx, item)
 	if err != nil && IsUnavailable(err) {
 		return cf.fallbackBool(err)
@@ -292,7 +381,10 @@ func (cf *CuckooFilter) AddNX(ctx context.Context, item any) (bool, error) {
 // IsUnavailable 时整体按 FailPolicy 兜底（FailOpen 全 true / FailClosed
 // 全 false）且返回 ErrRedisUnavailable 哨兵（errors.Is 可感知），禁止混合
 // 结果；数据类错误恒原样返回（但同样可能已部分写入，见上方重试警告）。
+// 启用 WithCuckooPrefill 时非 Ready 也照常放行真实写入（清空窗口内的
+// 增量写入由回灌以数据源为准补回）。
 func (cf *CuckooFilter) AddMulti(ctx context.Context, items ...any) ([]bool, error) {
+	cf.prefillProbe(ctx)
 	if len(items) == 0 {
 		return nil, nil
 	}
@@ -317,8 +409,11 @@ func (cf *CuckooFilter) AddMulti(ctx context.Context, items ...any) ([]bool, err
 // 整键清空请用 Reset。
 // Redis 服务失效时按兜底策略：FailOpen → (true, nil)（视为删除成功）；
 // FailClosed → (false, nil)。
+// 启用 WithCuckooPrefill 时非 Ready 也照常放行真实删除（清空窗口内的
+// Del 亦由回灌以数据源为准补回）。
 // item 属不支持类型时返回数据类错误，不触发兜底。
 func (cf *CuckooFilter) Del(ctx context.Context, item any) (bool, error) {
+	cf.prefillProbe(ctx)
 	deleted, err := cf.impl.Del(ctx, item)
 	if err != nil && isNotFoundByText(err) {
 		// not-found 归一化（评审定稿 M1）：字形取真机实测的模块输出
@@ -335,6 +430,7 @@ func (cf *CuckooFilter) Del(ctx context.Context, item any) (bool, error) {
 
 // Info 返回过滤器的元数据。回退版仅 Size/NumBuckets/NumItems/BucketSize
 // 四字段有效（其余恒 0，见 CuckooInfo）。
+// 观测类恒透传原路径：启用 WithCuckooPrefill 也不降级、不触发重建。
 // Redis 服务失效时按兜底策略：FailOpen → 空结构体 nil；FailClosed → 返回错误。
 func (cf *CuckooFilter) Info(ctx context.Context) (*CuckooInfo, error) {
 	info, err := cf.impl.Info(ctx)
@@ -363,11 +459,43 @@ func (cf *CuckooFilter) Info(ctx context.Context) (*CuckooInfo, error) {
 // 模块版注意：Reset 删除后立即按当前配置（未显式传参按默认容量 1000000）
 // 同步 CF.RESERVE 重建，返回成功即键已就绪；绕开本方法手工 DEL 后复用
 // 实例不自愈（写路径无预建动作）——键生命周期由库管辖，清空一律走 Reset。
+//
+// 启用 WithCuckooPrefill 后本方法被拦截：手工触发预填充重建的唯一入口，
+// 等价 force=1 抢占式全流程——抢占成功 → 等待 Δ（2×syncInterval）→
+// 清空重建 → 调用 PrefillFunc 回灌（预算 RebuildTimeout）→ 成功置
+// ready、失败置 fail（指数退避），同步执行直至返回。抢占失败（权威状态
+// 为 Building）立即返回 ErrRebuildInProgress，不排队不等锁；启用后错误
+// 原样返回（ErrRebuildInProgress / ErrRebuildTimeout / cause），不经
+// fallbackErr 哨兵包装。未启用保持上述原语义（coord==nil 走原路径）。
 func (cf *CuckooFilter) Reset(ctx context.Context) error {
+	if cf.coord != nil {
+		return cf.coord.run(ctx, 1)
+	}
 	err := cf.impl.Reset(ctx)
 	if err != nil && IsUnavailable(err) {
 		// 不做 FailPolicy 兜底（失败必须可见），但包装为哨兵错误保持可感知
 		return fallbackErr(err)
 	}
 	return err
+}
+
+// State 直接 GET 权威状态键查询预填充相位（1 RTT，不经本地缓存）。
+// 键缺失返回 PrefillUninitialized；错误原样返回（phase 取
+// PrefillUninitialized）。未启用预填充返回
+// (PrefillUninitialized, ErrPrefillDisabled)。
+func (cf *CuckooFilter) State(ctx context.Context) (PrefillPhase, error) {
+	if cf.coord == nil {
+		return PrefillUninitialized, ErrPrefillDisabled
+	}
+	return cf.coord.readState(ctx)
+}
+
+// Close 释放预填充协调器（停后台同步 ticker 并取消在飞 run），幂等；
+// coord==nil（未启用）返回 nil。不进 cuckooFilterImpl 接口，供单独释放
+// 门面持有的后台资源（亦经 redisClient.GracefulClose 级联）。
+func (cf *CuckooFilter) Close() error {
+	if cf.coord != nil {
+		cf.coord.Close()
+	}
+	return nil
 }

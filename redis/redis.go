@@ -87,6 +87,29 @@ type closeState struct {
 	mu       sync.Mutex
 	closed   bool                      // 是否已关闭（幂等关闭标记）
 	children map[*redisClient]struct{} // AddPrefix 派生的子连接池
+	closers  []func()                  // 附属资源释放回调（如 bloom prefill coordinator 停 ticker），GracefulClose 时遍历执行
+}
+
+// registerClose 注册一个资源释放回调：GracefulClose 时执行（停后台
+// goroutine 等）。注册时连接池已关闭则立即执行，避免回调悬挂——与
+// AddPrefix 对已关闭父池的处理口径一致。回调须幂等（可能与显式 Close
+// 并发/重复触达）。
+func (rdb redisClient) registerClose(fn func()) {
+	rdb.state.mu.Lock()
+	if rdb.state.closed {
+		rdb.state.mu.Unlock()
+		fn()
+		return
+	}
+	rdb.state.closers = append(rdb.state.closers, fn)
+	rdb.state.mu.Unlock()
+}
+
+// isClosed 报告连接池是否已 GracefulClose（供后台协程自退出判定）。
+func (rdb redisClient) isClosed() bool {
+	rdb.state.mu.Lock()
+	defer rdb.state.mu.Unlock()
+	return rdb.state.closed
 }
 
 // ParseURL 解析 redis:// / rediss:// URL（支持逗号分隔多地址种子列表与
@@ -380,7 +403,15 @@ func (rdb redisClient) GracefulClose(ctx context.Context) error {
 	for c := range rdb.state.children {
 		children = append(children, c)
 	}
+	// 附属资源释放回调（prefill coordinator 等）随关闭一并执行：先停后台
+	// 协程，再级联关闭子池与本池。
+	closers := rdb.state.closers
+	rdb.state.closers = nil
 	rdb.state.mu.Unlock()
+
+	for _, fn := range closers {
+		fn()
+	}
 
 	// 级联关闭 AddPrefix 派生的所有子连接池（递归），
 	// 单个子连接池关闭失败不中断，确保全部释放

@@ -313,3 +313,9 @@ func (b *bfCmdImpl) Reset(ctx context.Context) error {
 	}
 	return b.connectAll(ctx)
 }
+
+// State 是未启用预填充时的空实现：返回 (Uninitialized, ErrPrefillDisabled)。
+// （未启用预填充的正确语义；启用时由 prefillFilter 装饰器接管，见 bloom_prefill_filter.go。）
+func (b *bfCmdImpl) State(context.Context) (PrefillPhase, error) {
+	return PrefillUninitialized, ErrPrefillDisabled
+}
