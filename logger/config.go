@@ -1,6 +1,6 @@
 package logger
 
-// Config 日志配置（对齐 aide/internal/log 的 Config，支持 yaml/mapstructure 反序列化）
+// Config 日志配置，支持 yaml/mapstructure 反序列化
 type Config struct {
 	// Level 日志级别：trace, debug, info, warn, error, fatal
 	Level string `yaml:"level" mapstructure:"level"`

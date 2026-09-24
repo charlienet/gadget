@@ -97,8 +97,8 @@ if err := logger.Init(cfg, logger.WithSensitiveKeys("password")); err != nil {
 }
 ```
 
-> **控制台颜色 `color` 三态**：`true` 强制开色（非 TTY / 管道也输出 ANSI）、`false` 强制关、**省略该键**（`Config.Color == nil`）走自动判定（`NO_COLOR` 环境变量 + 是否 TTY）。仅作用于会启用控制台 sink 的 `output: console/both`；`file` 无控制台不受影响。
-> 注意：`DefaultConfig()` 把 `Color` 预置为 `true`（强制开色），故「`DefaultConfig()` 打底 + yaml 未写 `color`」会得到强制开色、非 TTY 也带 ANSI——这是默认 `true` 的既定含义；若想要 TTY 自动判定，请用 `var cfg logger.Config`（零值，`Color` 为 `nil`）打底而非 `DefaultConfig()`。
+> **控制台颜色 `no_color` 两态**：`true` 强制关闭颜色；**省略该键 / `false`（默认）** 走自动判定（终端支持 ANSI、输出为 TTY 且无 `NO_COLOR` 环境变量三者同时满足才涂色，管道 / 重定向到文件自动无 ANSI）。仅作用于会启用控制台 sink 的 `output: console/both`；`file` 无控制台不受影响。
+> `DefaultConfig()` 对 `no_color` 保持零值 `false`（自动判定），开发终端有色、生产非 TTY 无色，无需按环境专门配置；若确需强制开色（非 TTY / 管道也输出 ANSI），Config 层不提供，请用 Option 精调：`logger.Init(cfg, logger.WithConsole(logger.WithConsoleColor(true)))`。
 
 > `Init(cfg, opts...)` 先由 Config 生成打底 Option、再拼接用户 opts（后者覆盖同类项），**合并后**才校验：
 > `output: file / both` 但合并后文件路径仍为空 → 报错（黑洞；可用 `WithFile(path)` 补路径消除）；

@@ -20,7 +20,7 @@ func ParseFileFormat(s string) (FileFormat, error) {
 	}
 }
 
-// Init 根据 Config 初始化包级默认 logger，并接受若干精调 Option（对齐 aide 的 Init 语义）。
+// Init 根据 Config 初始化包级默认 logger，并接受若干精调 Option。
 // 级别解析：配置文件优先，环境变量 LOG_LEVEL 兜底。
 // New 内部已 slog.SetDefault，故 slog 包级函数自动使用本默认 logger；
 // Init 会替换包级 DefaultLogger（旧默认实例在 New 内被关闭，见 default.go）。

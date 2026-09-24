@@ -39,8 +39,9 @@
 // 两者皆未声明时兜底一个 stdout 控制台，保证 logger.New() 零配置开箱即用、包级日志不静默；
 // 仅声明 WithFile 则纯文件输出、不写 stdout；WithConsole + WithFile 即双端输出。
 //
-// 配置驱动面（Init/Config）：Config.Color 为 *bool 三态，映射到 WithConsoleColor——
-// nil=自动判定（NO_COLOR + TTY）、true=强制开色、false=强制关；DefaultConfig 默认 true。
+// 配置驱动面（Init/Config）：Config.NoColor 为负向命名 bool（零值安全），映射到 WithConsoleColor——
+// false（默认/未配置）=自动判定（终端支持 ANSI 且为 TTY 且无 NO_COLOR 才涂色）、true=强制关色；
+// Config 层不提供强制开色，该能力留在 Option 精调层 WithConsoleColor(true)。DefaultConfig 零值 false（自动）。
 // Config.Layout 非空→WithDateRotate 启用按日期轮换（空则维持 lumberjack 按大小轮换，仅 file/both 消费）；
 // Config.Sensitive_Keys / Sensitive_Mask 非空→WithSensitiveKeys / WithSensitiveMask（横切打码，console/file
 // 双端生效）；三者零值均不注入对应 Option，DefaultConfig 保持默认行为不变。
