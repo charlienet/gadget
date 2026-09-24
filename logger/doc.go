@@ -16,7 +16,9 @@
 // 在自研 console handler（文件 text sink FormatText 即其 NoColor 形态，同一实现）中，
 // service / env 与下方 trace_id / req_id 一并前置到 msg 之前（固定次序
 // service → env → trace_id → req_id），并按 record 优先去重；版式：前置段（time / level /
-// 命中字段）与 msg 均为裸值（无 key= 前缀、msg 不加引号），source= 与其余 attrs 保持 k=v，
+// 命中字段）与 msg 均为裸值（无 key= 前缀、msg 不加引号；msg 中 \n/\r 以字面量转义
+// 保持单行——防按 req_id/trace_id 过滤断行，不加引号，\t 等其余字符原样），
+// source= 与其余 attrs 保持 k=v，
 // source（若启用）恒在行尾；控制台通道仅在此之上叠加 ANSI 颜色，关闭颜色后两通道字节等同。
 // JSON handler（FormatJSON）走标准语义，不套用该布局。
 // 详见 README「身份与链路字段前置」。

@@ -149,6 +149,7 @@ time → level → service(如有) → env(如有) → trace_id(如有) → req_
 
 > **file `FormatText` 即 console 渲染器的 NoColor 形态（同一实现）**：前置段（`time` / `level` 及命中的前置字段）与
 > `msg` 均为裸值——无 `key=` 前缀，`msg` 原样输出不加引号（前置字段值含空格时才加引号）；
+> `msg` 中 `\n`/`\r` 以字面量转义（`\n`、`\r` 两字符形态）保持单行（防按 `req_id`/`trace_id` 过滤断行），不加引号；`\t` 等其余字符原样；
 > `source=` 与其余 attrs 保持 k=v 风格，`source`（若启用）恒在行尾（其余 attrs 之后）。
 > 唯一差异是控制台通道可叠加 ANSI 颜色（时间亮白、级别词按级染色、attr 的 `key=` 亮蓝），
 > 关闭颜色后两通道输出字节等同（同一实现构造性成立）。例：
@@ -287,7 +288,7 @@ logger.Close(2 * time.Second)        // 进程退出前统一 flush + 关文件
 
 ## 设计说明
 
-- **sink 装配**：控制台与文件为两路独立 sink，按存在性装配——`WithConsole`（彩色文本）与/或 `WithFile`（`FormatJSON` 默认 / `FormatText` 即 console 渲染器的 NoColor 形态、同一实现：`time → level → service → env → trace_id → req_id → msg → 其余 attrs → source（若启用，行尾）`，行版式为前置段裸值、msg 原样不加引号、source 与其余 attrs 保持 k=v；其中四个前置字段 `service`/`env`/`trace_id`/`req_id` 由 record 与 `With` 累积属性双源前置并按 record 优先去重，见「身份与链路字段前置」；`FormatJSON` 走标准 `slog.NewJSONHandler`，不套用该排序与双源规则）；二者并存时以 `MultiHandler` 汇聚，皆未声明则兜底 stdout 控制台（`New()` 零配置不静默），仅 `WithFile` 则不写 stdout
+- **sink 装配**：控制台与文件为两路独立 sink，按存在性装配——`WithConsole`（彩色文本）与/或 `WithFile`（`FormatJSON` 默认 / `FormatText` 即 console 渲染器的 NoColor 形态、同一实现：`time → level → service → env → trace_id → req_id → msg → 其余 attrs → source（若启用，行尾）`，行版式为前置段裸值、msg 原样不加引号（`\n`/`\r` 以字面量转义保持单行，`\t` 等其余字符原样）、source 与其余 attrs 保持 k=v；其中四个前置字段 `service`/`env`/`trace_id`/`req_id` 由 record 与 `With` 累积属性双源前置并按 record 优先去重，见「身份与链路字段前置」；`FormatJSON` 走标准 `slog.NewJSONHandler`，不套用该排序与双源规则）；二者并存时以 `MultiHandler` 汇聚，皆未声明则兜底 stdout 控制台（`New()` 零配置不静默），仅 `WithFile` 则不写 stdout
 - handler 链（内 → 外）：`(console 与/或 file)` → `StackHandler` → `SensitiveHandler` → `SamplingHandler` → `AsyncHandler` → `TraceHandler`（内置，始终位于最外层）；可选项未启用时不参与链
 - `TraceHandler` 置于最外层：`trace_id`/`req_id` 在**调用方 goroutine 内同步提取进 record**后才进入采样 / 异步队列，因此异步队列 entry 无需（也不应）持有请求级 `context.Context`；异步模式下 trace 提取同样生效，且避免了长命队列持有可取消 ctx 的反模式
 - 默认（零 sink）输出为 **stdout 控制台**（见上「sink 装配」）；`WithAsync` 队列容量默认 10240（与引擎一致）

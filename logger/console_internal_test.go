@@ -493,6 +493,32 @@ func TestConsoleHandlerTraceFieldColor(t *testing.T) {
 	}
 }
 
+// TestConsoleHandlerMessageNewlineEscape：msg 中 \n/\r 以字面量两字符（反斜杠+字母）
+// 转义保持单行——防按 req_id/trace_id grep 过滤时断行；不加引号，\t 等其余字节原样。
+func TestConsoleHandlerMessageNewlineEscape(t *testing.T) {
+	var buf bytes.Buffer
+	h := NewConsoleHandler(&buf, &ConsoleOptions{Level: slog.LevelInfo, NoColor: true})
+
+	r := slog.NewRecord(time.Now(), slog.LevelInfo, "line1\nline2\r\nx\ty", 0)
+	if err := h.Handle(context.Background(), r); err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+	got := buf.String()
+
+	// 整条日志仅占一行：全输出只允许行尾那一个真实 '\n'
+	if strings.Count(got, "\n") != 1 {
+		t.Errorf("expected single line (one trailing newline), got %d newlines: %q", strings.Count(got, "\n"), got)
+	}
+	// 转义后字面量：反斜杠n / 反斜杠r；tab 原样保留；不加引号
+	line := strings.TrimSpace(got)
+	if !strings.Contains(line, `line1\nline2\r\nx`+"\ty") {
+		t.Errorf("expected escaped-literal \\n \\r and raw tab in msg, got: %q", line)
+	}
+	if strings.Contains(line, `"line1`) || strings.Contains(line, `y"`) {
+		t.Errorf("msg must not be wrapped in quotes, got: %q", line)
+	}
+}
+
 // TestConsoleHandlerNoTrace：ctx 未注入 trace/req 时，不输出这两个 key。
 func TestConsoleHandlerNoTrace(t *testing.T) {
 	var buf bytes.Buffer

@@ -40,7 +40,11 @@ func TestConsoleNoColorByteIdenticalToFileText(t *testing.T) {
 		name   string
 		build  func() slog.Record
 		derive func(slog.Handler) slog.Handler
-		want   string // NoColor 形态整行锚定（防两通道同错）
+		want   string // NoColor 形态整行锚定（防两通道同错）；为空则跳过整行锚定（source 值动态，见⑧）
+		// addSource 为 true 时两 handler 均开 AddSource（用例⑧：source 值含
+		// 动态 file:line，无法静态锚定整行，改由 extra 做结构性断言）
+		addSource bool
+		extra     func(t *testing.T, got string)
 	}{
 		{
 			// ① 正常：time + service/env 前置 + msg + attrs
@@ -117,13 +121,51 @@ func TestConsoleNoColorByteIdenticalToFileText(t *testing.T) {
 			},
 			want: ts + ` INFO m path="a b" n=5` + "\n",
 		},
+		{
+			// ⑧ add-source：双通道均 AddSource=true；msg 含换行——把 msg 转义
+			// 行为锁进等同矩阵（字面 \n、单行），并锚定 source= 位于行尾
+			name:      "add-source",
+			addSource: true,
+			derive: func(h slog.Handler) slog.Handler {
+				return h.WithAttrs([]slog.Attr{
+					slog.String(AttrService, "svc"),
+					slog.String(AttrEnv, "prod"),
+				})
+			},
+			build: func() slog.Record {
+				pc, _, _, _ := runtime.Caller(0) // 真实 PC，source 可解析
+				r := slog.NewRecord(fixed, slog.LevelInfo, "src msg\nwith newline", pc)
+				r.AddAttrs(slog.Int("n", 1), slog.String("k", "v"))
+				return r
+			},
+			extra: func(t *testing.T, got string) {
+				line := strings.TrimSpace(got)
+				// msg 段转义为字面反斜杠n，整行仅行尾一个真实换行
+				if !strings.Contains(line, `src msg\nwith newline`) {
+					t.Errorf("expected msg escaped to literal backslash-n, got: %q", line)
+				}
+				if strings.Count(got, "\n") != 1 {
+					t.Errorf("expected single line, got %d newlines: %q", strings.Count(got, "\n"), got)
+				}
+				// source= 存在且位于行尾（最后一个字段）
+				idx := strings.Index(line, "source=")
+				if idx < 0 {
+					t.Fatalf("expected source= with AddSource, got: %q", line)
+				}
+				if strings.Contains(line[idx+len("source="):], " ") {
+					t.Errorf("expected source= as last field at line end, got: %q", line[idx:])
+				}
+			},
+		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			var cbuf, fbuf bytes.Buffer
-			ch := slog.Handler(NewConsoleHandler(&cbuf, &ConsoleOptions{Level: slog.LevelInfo, NoColor: true}))
-			fh := newFileTextSink(&fbuf, false)
+			ch := slog.Handler(NewConsoleHandler(&cbuf, &ConsoleOptions{
+				Level: slog.LevelInfo, NoColor: true, AddSource: tc.addSource,
+			}))
+			fh := newFileTextSink(&fbuf, tc.addSource)
 			if tc.derive != nil {
 				ch = tc.derive(ch)
 				fh = tc.derive(fh)
@@ -141,9 +183,13 @@ func TestConsoleNoColorByteIdenticalToFileText(t *testing.T) {
 			if gotC != gotF {
 				t.Errorf("console(NoColor) vs file Text not byte-identical:\n console: %q\n file:    %q", gotC, gotF)
 			}
-			if gotC != tc.want {
+			if tc.want != "" && gotC != tc.want {
 				t.Errorf("golden mismatch:\n got:  %q\nwant: %q", gotC, tc.want)
 			}
+			if tc.extra != nil {
+				tc.extra(t, gotC)
+			}
+			t.Logf("line: %q", gotC)
 		})
 	}
 }

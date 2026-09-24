@@ -120,9 +120,9 @@ func (h *consoleHandler) Handle(_ context.Context, r slog.Record) error {
 		}
 	}
 
-	// 消息本体原样输出、不上色、不加引号
+	// 消息本体：\n/\r 转义为字面量保持单行，不上色、不加引号（见 appendMessageEscaped）
 	sep()
-	buf = append(buf, r.Message...)
+	buf = appendMessageEscaped(buf, r.Message)
 
 	// 属性：先输出 WithAttrs 累积的 h.attrs，再输出记录自身 attrs
 	// （两循环均跳过已前置的前置字段，避免消息之后重复；h.attrs 带分组前缀时
@@ -328,6 +328,29 @@ func sourceFromPC(pc uintptr) (string, bool) {
 	}
 
 	return fmt.Sprintf("%s:%d", f.File, f.Line), true
+}
+
+// appendMessageEscaped 输出 msg 段：'\n' → 字面两字符 `\` `n`，'\r' → 字面 `\` `r`；
+// 其余字节原样（含 \t、引号、空格），不加前后引号。目的：单条日志恒占一行，
+// 防按 req_id/trace_id grep 过滤时消息换行断行。JSON 通道不经此处（标准库已转义）。
+// 快路径：不含 \n\r 时直接 append 原文，零额外分配。
+func appendMessageEscaped(buf []byte, msg string) []byte {
+	if strings.IndexByte(msg, '\n') < 0 && strings.IndexByte(msg, '\r') < 0 {
+		return append(buf, msg...)
+	}
+
+	for i := 0; i < len(msg); i++ {
+		switch msg[i] {
+		case '\n':
+			buf = append(buf, '\\', 'n')
+		case '\r':
+			buf = append(buf, '\\', 'r')
+		default:
+			buf = append(buf, msg[i])
+		}
+	}
+
+	return buf
 }
 
 // needsQuoting 判断字符串是否需要加引号包裹：当且仅当包含空格、制表、'='、'"'、
