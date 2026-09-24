@@ -134,6 +134,9 @@ type BloomFilter interface {
 	// 键缺失返回 PrefillUninitialized；错误原样返回（phase 取
 	// PrefillUninitialized）。未启用预填充返回
 	// (PrefillUninitialized, ErrPrefillDisabled)。
+	// State 返回错误可作 Redis 可用性探针（1 RTT 权威）；数据面
+	// Exists/Count 的降级值（恒 true/恒 1）不携带错误，勿以数据面
+	// 错误判断 Redis 健康。
 	State(ctx context.Context) (PrefillPhase, error)
 }
 
@@ -246,7 +249,16 @@ func WithShardCount(n int) BloomOption {
 // PrefillFunc 契约（应用回灌函数）：
 //   - 必须幂等可重试：库可能因退避/抢占在清空后再次调用；
 //   - 以权威数据源为扫描基准：清空窗口内的增量写入由回灌补回；
+//     假空防御：扫描成功但结果为空同样会置 ready——库无法区分"数据源
+//     真空"与"读失败被吞成空集"，fn 必须以可达性哨兵（如先读元数据行/
+//     心跳表，哨兵失败即返回 error）把"可疑的空"转为 error，交由库的
+//     fail+退避接管；假空会放行"ready+空 bloom→Exists 真实查询全
+//     false→洪泛回源"事故；
 //   - 应响应 ctx 取消：预算为 RebuildTimeout，超时按失败计并指数退避；
+//     ctx 纪律：fn 内部所有 I/O（DB 扫描、批量写入）必须挂在传入的
+//     ctx 上——自建 context.Background()/独立超时会使 Close 与
+//     RebuildTimeout 取消失效，超时/关闭后扫描继续空跑、破坏"何时算
+//     成功回灌"语义；
 //   - panic 由库 recover 转 error 走 fail 路径（不崩溃进程）。
 func WithPrefill(fn PrefillFunc, opts ...PrefillOption) BloomOption {
 	return func(c *bloomConfig) {

@@ -155,6 +155,8 @@ type PrefillOption func(*prefillConfig)
 //     判别意义，且避免重建期误触发）；
 //   - 与 FailPolicy 正交：探测错误（probeFn err/panic、ExistsMulti 底层
 //     错误）只跳过本轮，不构成失效证据；
+//   - 数据源为空/样本为空时探测静默跳过本轮（不判失效），空数据源下
+//     ready 保持为预期行为；
 //   - LivenessFunc 契约见其 godoc——样本错误会导致周期性误触发重建，
 //     属应用侧数据契约 bug 的可见化，库不做连续次数容忍；
 //   - PrefillOption 为 bloom/cuckoo 共用，本选项两处自动可用：

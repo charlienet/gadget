@@ -93,6 +93,12 @@ func WithExpansion(n int64) CuckooOption {
 //   - 应响应 ctx 取消：预算 RebuildTimeout，超时按失败计并指数退避；
 //   - panic 由库 recover 转 error 走 fail 路径（不崩溃进程）。
 //
+// 另两条同等契约（长文见 WithPrefill godoc 的 PrefillFunc 契约段）：
+//   - 假空防御：扫描成功但结果为空同样置 ready，fn 须以可达性哨兵把
+//     "可疑的空"转为 error，由库 fail+退避接管，防假空放行洪泛回源；
+//   - ctx 纪律：fn 内部所有 I/O 必须挂在传入的 ctx 上，自建
+//     context.Background()/独立超时会使 Close 与 RebuildTimeout 取消失效。
+//
 // 降级语义摘要（本地非新鲜 Ready 时，详见各方法 godoc）：
 //   - Exists 恒 (true,nil)、ExistsMulti 非空恒全 true、Count 恒 (1,nil)
 //     ——这是状态未就绪期的业务规则，**不受 FailPolicy 影响**（FailPolicy
@@ -483,6 +489,9 @@ func (cf *CuckooFilter) Reset(ctx context.Context) error {
 // 键缺失返回 PrefillUninitialized；错误原样返回（phase 取
 // PrefillUninitialized）。未启用预填充返回
 // (PrefillUninitialized, ErrPrefillDisabled)。
+// State 返回错误可作 Redis 可用性探针（1 RTT 权威）；数据面
+// Exists/Count 的降级值（恒 true/恒 1）不携带错误，勿以数据面错误
+// 判断 Redis 健康。
 func (cf *CuckooFilter) State(ctx context.Context) (PrefillPhase, error) {
 	if cf.coord == nil {
 		return PrefillUninitialized, ErrPrefillDisabled
