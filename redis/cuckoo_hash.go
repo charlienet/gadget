@@ -646,6 +646,7 @@ func (h *hashImpl) Info(ctx context.Context) (*CuckooInfo, error) {
 		NumBuckets: buckets,
 		NumItems:   items,
 		BucketSize: h.bucketSize,
+		Path:       PathHash,
 	}, nil
 }
 
@@ -674,4 +675,24 @@ func (h *hashImpl) connect(ctx context.Context) error {
 // 因此不需要任何复位胶水。键不存在时 DEL 返回 0、无错误，天然幂等。
 func (h *hashImpl) Reset(ctx context.Context) error {
 	return h.client.Del(ctx, h.key).Err()
+}
+
+// IntegrityProbe 是 G1 完整性校验的回退 Hash 路径判据：TYPE ∈
+// {none, hash} → ok；其余核心/模块类型 → invalid。
+//
+// **none 合法（ISSUE-101，P0）**：hashImpl 惰性建键（构造期对空键/缺失
+// 键不占位，见 NewCuckooFilter 注释），且「空数据源 + ready」是契约
+// 稳态——若把 none 判 invalid，回灌无数据的实例每拍检出→每拍 force=1
+// 重建 = 每秒重建风暴。这与 bf/cf 路径（构造即建键，none=失效证据）
+// 的口径**故意相反**，各自的构造契约决定各自的判据。
+func (h *hashImpl) IntegrityProbe(ctx context.Context) (bool, error) {
+	t, err := h.client.Type(ctx, h.key).Result()
+	if err != nil {
+		return false, err // 传输级：无结论
+	}
+	switch t {
+	case "none", "hash":
+		return true, nil
+	}
+	return false, nil
 }

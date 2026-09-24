@@ -95,9 +95,11 @@ func newProbeCoordinatorForTest(t *testing.T, key, seedState string, fn PrefillF
 	if err != nil {
 		t.Fatalf("NewBloomFilter: %v", err)
 	}
-	var inner prefillInner = real
+	// 工厂返回裸 impl（*bitmapImpl，G1 后满足 prefillInner——含
+	// IntegrityProbe），断言安全。
+	var inner prefillInner = real.(prefillInner)
 	if wrap != nil {
-		inner = wrap(real)
+		inner = wrap(real.(prefillInner))
 	}
 	// 对齐 WithPrefill 的字段写入形态：enabled/fn 直写，其余经 opts 平铺
 	//（probeInterval/probeFn 由 WithLivenessProbe 写入 cfg）。
@@ -497,14 +499,15 @@ func TestBloomProbeSkipCases(t *testing.T) {
 // --- 4) ExistsMulti 错误路径：错误≠失效，本轮跳过 ---
 
 // TestBloomProbeExistsMultiErrorSkips 验证数据面查询出错时本轮跳过：
-// 把数据键换成 hash 类型注入 WRONGTYPE（bitmap ExistsMulti 的 Lua
-// GETBIT 触发数据类错误）→ inner.ExistsMulti 返回 err → 不触发重建
-// （区分"错误"与"失效"：错误结果不可信，不得当作丢数据证据）。
-// 权威状态键类型不受影响 → loop 照常刷新本地新鲜 Ready，确保走到
-// ExistsMulti 而非在相位检查就被 stale 拦下。
+// 不触发重建（区分"错误"与"失效"：错误结果不可信，不得当作丢数据
+// 证据）。注入方式为构造时桩（ExistsMulti 恒报错，模拟底层 WRONGTYPE
+// 等数据类错误）——G1 完整性校验（Issue #2）上线后，旧"真实 HSet 数据
+// 键注错"形态会被搭车校验在 ≤1 拍内检出并重建修复，无法承载"错误持续
+// 存在"前提；桩注入与键形态解耦，probeOnce 错误跳过语义原样保留。
+// 数据键保持工厂建成的足额形态 → syncOnce 搭载校验判 ok，不干扰本用例
+// "错误≠失效"的判别；权威状态键 ready → tick 照常刷新新鲜 Ready，确保
+// 走到 ExistsMulti 而非在相位检查就被 stale 拦下。
 func TestBloomProbeExistsMultiErrorSkips(t *testing.T) {
-	ctx := t.Context()
-	key := bloomTestKey("probe-wrongtype")
 	const probeI = 80 * time.Millisecond
 
 	var fnCalls, probeCalls atomic.Int32
@@ -517,31 +520,26 @@ func TestBloomProbeExistsMultiErrorSkips(t *testing.T) {
 		probeCalls.Add(1)
 		return []any{"probe-seed"}, nil
 	}
-	pf, _, mr := newPrefillProbeForTest(t, key, pvReady, fn,
+	stub := &existsErrProbeStub{}
+	co, mr := newProbeCoordinatorForTest(t, bloomTestKey("probe-wrongtype"), pvReady, fn,
+		func(real prefillInner) prefillInner {
+			stub.prefillInner = real
+			return stub
+		},
 		WithSyncInterval(50*time.Millisecond),
 		WithRebuildTimeout(2*time.Second),
 		WithLivenessProbe(probeI, liveness))
-	co := pf.coord
-	if _, err := pf.inner.Add(ctx, "probe-seed"); err != nil {
-		t.Fatalf("Add seed: %v", err)
-	}
-	co.storeLocal(PrefillReady)
-	baseTries := co.acquireTries.Load()
-
-	// 注入类型错误：数据键 DEL 后 HSet 成 hash → ExistsMulti GETBIT WRONGTYPE
-	mr.Del(key)
-	mr.HSet(key, "f", "v")
 
 	time.Sleep(6 * probeI)
 	if probeCalls.Load() < 1 {
 		t.Fatalf("probeFn 应被调用（才走到 ExistsMulti），probeCalls=%d", probeCalls.Load())
 	}
-	// 报错时 ExistsMulti 必然出错（自检注入有效）：直查一次确认
-	if _, err := pf.inner.ExistsMulti(ctx, "probe-seed"); err == nil {
-		t.Fatal("前置条件：类型错误注入应使 ExistsMulti 返回 error")
+	// 自检注入有效：探测确实走到了报错的 ExistsMulti。
+	if stub.emCalls.Load() < 1 {
+		t.Fatalf("前置条件：探测应调用 ExistsMulti（报错桩），emCalls=%d", stub.emCalls.Load())
 	}
-	if got := co.acquireTries.Load(); got != baseTries {
-		t.Fatalf("ExistsMulti 错误不应触发重建（错误≠失效）：base=%d got=%d", baseTries, got)
+	if got := co.acquireTries.Load(); got != 0 {
+		t.Fatalf("ExistsMulti 错误不应触发重建（错误≠失效）：acquireTries=%d", got)
 	}
 	if fnCalls.Load() != 0 {
 		t.Fatalf("ExistsMulti 错误不应触发回灌 fn，fnCalls=%d", fnCalls.Load())
@@ -549,6 +547,18 @@ func TestBloomProbeExistsMultiErrorSkips(t *testing.T) {
 	if v := mustGet(t, mr, co.stateKey); v != pvReady {
 		t.Fatalf("状态应保持 ready，got %q", v)
 	}
+}
+
+// existsErrProbeStub 包装真实 inner、ExistsMulti 恒返回数据类错误——
+// 模拟探测直查遇到 WRONGTYPE 类持久故障（注入器，构造时定格）。
+type existsErrProbeStub struct {
+	prefillInner
+	emCalls atomic.Int32
+}
+
+func (s *existsErrProbeStub) ExistsMulti(context.Context, ...any) ([]bool, error) {
+	s.emCalls.Add(1)
+	return nil, errors.New("WRONGTYPE Operation against a key holding the wrong kind of value (stub)")
 }
 
 // --- 5) 探测触发的重建预算独立于探测 ctx（方案 A） ---

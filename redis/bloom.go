@@ -6,6 +6,8 @@ package redis
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"math"
 	"time"
 )
@@ -137,23 +139,51 @@ type BloomFilter interface {
 	// State 返回错误可作 Redis 可用性探针（1 RTT 权威）；数据面
 	// Exists/Count 的降级值（恒 true/恒 1）不携带错误，勿以数据面
 	// 错误判断 Redis 健康。
+	//
+	// 启用预填充后，后台每拍对本实例权威 Ready 相位搭载完整性校验
+	// （键存在性/布局，判据/覆盖/盲区/成本见 prefillInner.IntegrityProbe
+	// godoc）；检出即本地降级并异步 force=1 重建。已知接受行为
+	// （ISSUE-107③）：重建抢占若传输失败，下拍 GET ready → 相位复活
+	// → 再检 → 再试，每拍至多 1 个校验 RTT 的透传窗，无害自愈。
 	State(ctx context.Context) (PrefillPhase, error)
+
+	// Phase 零 RTT 纯内存读取本地相位快照（非权威），与 State(ctx) 的
+	// 对照是设计意图：本方法不发任何 Redis 命令，故不带 ctx（无取消/
+	// 超时可传导，诚实签名）。分工线——Phase 用于放行分流（fail-safe
+	// 方向，Fresh=false 按降级理解），State(ctx) 权威读用于不可逆决策；
+	// 多实例滞后与字段口径见 PhaseInfo godoc。
+	//
+	// LastSyncErr 仅代表后台 syncOnce 同步路径的底层错误（原样存储不
+	// 包装）：Ready 透传态下 Exists/ExistsMulti 的真实错误仍原样返回
+	// 调用方，两个观测点互不干扰。可用性指路：对 LastSyncErr 用
+	// IsUnavailable/IsNotFound 分类（勿以数据面降级值判断 Redis 健康，
+	// 同 State 探针声明）。
+	//
+	// 未启用预填充返回 (PhaseInfo{}, ErrPrefillDisabled)。
+	//
+	// 本地视图搭载完整性校验效果（G1）：后台检出键缺失/异类型占用/
+	// 布局不符即写降级相位（LastSyncErr 仍只承载传输错误，二者观测点
+	// 独立）；组合对不可逆决策仍有 ≤syncInterval 假窗口（权威未变而
+	// 本地先降级，或反之，见 State godoc ISSUE-107③ 声明）——不可逆
+	// 决策以 State(ctx) 权威读为准的分工线不因校验改变。
+	Phase() (PhaseInfo, error)
 }
 
 // BloomInfo contains metadata about a Bloom filter.
 // bitmap 回退版仅 Capacity/Size/NumItems 有效，NumFilters/Expansion
 // 恒 0（不适用）。
 type BloomInfo struct {
-	Capacity   int64 // configured capacity
-	Size       int64 // memory size (bytes)
-	NumFilters int64 // number of filters (仅 BF.* 路径有效，bitmap 回退版恒 0)
-	NumItems   int64 // approximate number of items
-	Expansion  int64 // expansion factor (仅 BF.* 路径有效，bitmap 回退版恒 0)
+	Capacity   int64  // configured capacity
+	Size       int64  // memory size (bytes)
+	NumFilters int64  // number of filters (仅 BF.* 路径有效，bitmap 回退版恒 0)
+	NumItems   int64  // approximate number of items
+	Expansion  int64  // expansion factor (仅 BF.* 路径有效，bitmap 回退版恒 0)
+	Path       string // 实际服务的实现路径（PathBF/PathBitmap，观测实例分派结果；服务不可用兜底返回的空结构体为 ""）
 }
 
-// UnimplementedBloomFilter 提供 BloomFilter 预填充扩展方法（State）
-// 的默认空实现：返回 (PrefillUninitialized, ErrPrefillDisabled)——
-// 未启用预填充时的正确语义。
+// UnimplementedBloomFilter 提供 BloomFilter 预填充扩展方法（State/Phase）
+// 的默认空实现：返回 (PrefillUninitialized/PhaseInfo{}, ErrPrefillDisabled)
+// ——未启用预填充时的正确语义。
 // 供既有 BloomFilter 实现方嵌入以平滑对接接口扩展（其余数据面方法仍由
 // 外层类型自行实现）：
 //
@@ -167,6 +197,68 @@ func (UnimplementedBloomFilter) State(context.Context) (PrefillPhase, error) {
 	return PrefillUninitialized, ErrPrefillDisabled
 }
 
+// Phase 未启用预填充的默认语义（零 RTT；无本地快照可读）。
+func (UnimplementedBloomFilter) Phase() (PhaseInfo, error) {
+	return PhaseInfo{}, ErrPrefillDisabled
+}
+
+// --- 模块期望声明与路径观测（v0.11.0 G4） ---
+
+// 实现路径观测常量：BloomInfo.Path 的取值，标识实例实际落在哪条实现
+// 路径上（Info/Card 等非热路径自检观测用，勿入热路径做逻辑分支）；
+// cuckoo 侧对称常量 PathCF/PathHash 见 cuckoo.go。
+const (
+	PathBF     = "bf"     // BF.* 原生模块路径
+	PathBitmap = "bitmap" // bitmap + Lua 回退路径
+)
+
+// 工厂模块期望校验的错误哨兵（包级共用，bloom/cuckoo 两侧工厂均返回；
+// 无组件前缀——错误文案不绑死单一组件，组件语境由包装层附加）。
+var (
+	// ErrCapabilityNotProbed 显式要求模块路径（BloomModuleBF/CuckooModuleCF）
+	// 但 Capability 尚未完成一次成功探测——静默回退会在错误路径上对既有
+	// 模块键发 STRLEN/GETBIT 报 WRONGTYPE（v0.10.x 事故），故 fail-loud
+	// 指路先 Probe。
+	ErrCapabilityNotProbed = errors.New("redis: capability not probed; call Capability().Probe(ctx) before constructing with a module requirement")
+	// ErrModuleNotLoaded 已探测但要求的模块/命令族不在场（错误串携带
+	// 实际判定结果）。
+	ErrModuleNotLoaded = errors.New("redis: required module not loaded")
+)
+
+// BloomModule 声明 NewBloomFilter 期望的实现路径（零值 Auto=现状自动
+// 分派；BF=必须 BF.* 模块路径，探测不满足即报错；Bitmap=无条件强制
+// bitmap 布局，唯一正当用例是有 bf 的服务器上刻意做双路径对照/存量
+// 迁移，路径错配事故由构造即连接的 WRONGTYPE fail-loud 兜底）。
+type BloomModule uint8
+
+const (
+	BloomModuleAuto   BloomModule = iota // 零值：按 Capability 自动分派（v0.10.0 行为）
+	BloomModuleBF                        // 强制 BF.* 路径：未探测/无 bf 模块一律构造期报错
+	BloomModuleBitmap                    // 强制 bitmap 路径：不查探测状态、不报错
+)
+
+// WithModule 声明 Bloom 工厂的模块期望（校验发生在建连之前，失败零
+// 命令副作用；分派规则见 BloomModule godoc）。不加本 Option 即 Auto，
+// 行为与 v0.10.0 一致。
+func WithModule(m BloomModule) BloomOption {
+	return func(c *bloomConfig) { c.module = m }
+}
+
+// checkModuleRequirement 工厂「显式要求模块路径」的构造期前置校验
+// （connectAll 之前调用，失败即返回错误、零命令副作用）：未探测 →
+// 包装 ErrCapabilityNotProbed（指路 Probe）；已探测但 loaded=false →
+// 包装 ErrModuleNotLoaded 并携带实际判定字样。bloom（HasBloom）与
+// cuckoo（HasCuckoo）两侧共用。
+func checkModuleRequirement(cap *Capability, loaded bool, want, verdict string) error {
+	if !cap.Probed() {
+		return fmt.Errorf("redis: %s requested: %w", want, ErrCapabilityNotProbed)
+	}
+	if !loaded {
+		return fmt.Errorf("redis: %s requested, but probe verdict %s==false: %w", want, verdict, ErrModuleNotLoaded)
+	}
+	return nil
+}
+
 // --- Options ---
 
 // BloomOption configures a Bloom filter.
@@ -177,7 +269,8 @@ type bloomConfig struct {
 	prefillConfig // 预填充门控配置（fn==nil 时未启用，工厂不包装）
 	capacity      int64
 	falsePositive float64
-	shardCount    int // 集群分片数（默认 1=关闭；仅 ModeCluster 且 n>1 生效；<=0 非法值被忽略）
+	shardCount    int         // 集群分片数（默认 1=关闭；仅 ModeCluster 且 n>1 生效；<=0 非法值被忽略）
+	module        BloomModule // 模块期望（零值 Auto=自动分派；见 WithModule/BloomModule）
 }
 
 // BloomConfig 是 BloomFilter 的配置类型别名，供 WithFailPolicy 泛型参数使用。
@@ -313,8 +406,8 @@ func WithSyncInterval(d time.Duration) PrefillOption {
 
 // NewBloomFilter creates a BloomFilter for the given key. The implementation
 // is auto-selected based on the server's capabilities（HasBloom() 为真走
-// BF.*，否则走 bitmap 回退；不提供强制路径旋钮，两路径数据布局不互通，
-// 双路径对照用两个不同 key 分别灌入）。
+// BF.*，否则走 bitmap 回退；两路径数据布局不互通，强制路径与探测防线
+// 见 WithModule/BloomModule）。
 // 失效兜底策略默认 FailOpen（服务不可用时放行业务）；可用 WithFailPolicy
 // 显式改为 FailClosed。
 // 集群分片默认关闭；Mode()==ModeCluster 且显式 WithShardCount(n>1) 时打散
@@ -329,6 +422,12 @@ func WithSyncInterval(d time.Duration) PrefillOption {
 // 数据类错误（含键名与期望长度，Reset 或换键解决）；服务不可用类错误包
 // ErrRedisUnavailable 哨兵（errors.Is 可感知）。构造失败不随 FailPolicy
 // 兜底——工厂返回的就是错误本身。
+//
+// 模块期望（v0.11.0 G4，见 WithModule/BloomModule）：默认 Auto 即上述
+// 自动分派；BloomModuleBF 要求构造前已 Capability().Probe(ctx) 且探测
+// 到 bf 模块，否则分别报 ErrCapabilityNotProbed / ErrModuleNotLoaded
+// （校验在建连前，零命令副作用）；BloomModuleBitmap 无条件强制 bitmap
+// 路径（双路径对照/存量迁移用，不查探测状态）。
 func (rdb *redisClient) NewBloomFilter(ctx context.Context, key string, opts ...BloomOption) (BloomFilter, error) {
 	cfg := defaultBloomConfig()
 	cfg.policy = FailOpen // 过滤器默认 FailOpen：宁可放行不阻塞业务
@@ -336,20 +435,40 @@ func (rdb *redisClient) NewBloomFilter(ctx context.Context, key string, opts ...
 		o(&cfg)
 	}
 
-	// 构造即连接：先按能力分派实现并 connectAll，全部成功才交付实例。
+	// 模块期望校验（G4）：发生在建连之前——校验失败零命令副作用
+	// （不发 RESERVE/不建键）。Auto 与 v0.10.0 逐行为一致；BF 要求
+	// 已探测且 bf 模块在场；Bitmap 无条件强制（不查探测状态）。
 	var inner BloomFilter
-	if rdb.cap.HasBloom() {
+	switch cfg.module {
+	case BloomModuleBF:
+		if err := checkModuleRequirement(rdb.cap, rdb.cap.HasBloom(), "bloom BF.* path", "HasBloom()"); err != nil {
+			return nil, err
+		}
 		bf := rdb.newBFImpl(key, cfg)
 		if err := bf.connectAll(ctx); err != nil {
 			return nil, err
 		}
 		inner = bf
-	} else {
+	case BloomModuleBitmap:
 		b := newBitmapImpl(rdb, key, cfg)
 		if err := b.connectAll(ctx); err != nil {
 			return nil, err
 		}
 		inner = b
+	default: // BloomModuleAuto：按能力缓存自动分派（现状行为）
+		if rdb.cap.HasBloom() {
+			bf := rdb.newBFImpl(key, cfg)
+			if err := bf.connectAll(ctx); err != nil {
+				return nil, err
+			}
+			inner = bf
+		} else {
+			b := newBitmapImpl(rdb, key, cfg)
+			if err := b.connectAll(ctx); err != nil {
+				return nil, err
+			}
+			inner = b
+		}
 	}
 
 	// 预填充门控：启用且 fn!=nil 才包装装饰器；未启用返回值与现网行为

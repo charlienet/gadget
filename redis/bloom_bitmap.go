@@ -708,7 +708,7 @@ func (b *bitmapImpl) existsMultiLoop(ctx context.Context, items []any) ([]bool, 
 // 分配；仅 Exists 触碰过的只读键可能尚不存在（StrLen/BITCOUNT 天然 0，
 // 只读路径不建立）。
 func (b *bitmapImpl) Info(ctx context.Context) (*BloomInfo, error) {
-	agg := &BloomInfo{Capacity: b.totalCapacity}
+	agg := &BloomInfo{Capacity: b.totalCapacity, Path: PathBitmap}
 	for _, key := range b.sharder.allKeys() {
 		strLen, err := b.client.StrLen(ctx, key).Result()
 		if err != nil {
@@ -770,6 +770,44 @@ func (b *bitmapImpl) Reset(ctx context.Context) error {
 // （未启用预填充的正确语义；启用时由 prefillFilter 装饰器接管，见 bloom_prefill_filter.go。）
 func (b *bitmapImpl) State(context.Context) (PrefillPhase, error) {
 	return PrefillUninitialized, ErrPrefillDisabled
+}
+
+// Phase 是未启用预填充时的空实现：返回 (PhaseInfo{}, ErrPrefillDisabled)。
+// （未启用预填充的正确语义；启用时由 prefillFilter 装饰器接管，见 bloom_prefill_filter.go。）
+func (b *bitmapImpl) Phase() (PhaseInfo, error) {
+	return PhaseInfo{}, ErrPrefillDisabled
+}
+
+// IntegrityProbe 是 G1 完整性校验的 bitmap 路径判据：逐分片 STRLEN 与
+// 期望布局长度等值比对（connectKeyLen **同源常量**，禁另写表达式——
+// 建键与校验同一口径；pipeline 批量 1 往返，ISSUE-105；ISSUE-104：
+// bitmap 判据升级 STRLEN 布局判据）；≠（含 0=缺失、短 string 占用、
+// 半截键）→ invalid。错误分界（三态契约见 prefillInner.IntegrityProbe
+// godoc）：STRLEN 对异类型键报 WRONGTYPE 属**结构性占用证据**
+// （invalid、err=nil）；对连接失败/超时报 Unavailable 属**传输级无结论**
+// （err 原样返回）——两类严禁混淆。pipeline 非事务：逐 cmd 分流，
+// 不采信 Exec 汇总错误。
+func (b *bitmapImpl) IntegrityProbe(ctx context.Context) (bool, error) {
+	wantLen := b.connectKeyLen()
+	keys := b.sharder.allKeys()
+	pipe := b.client.Pipeline()
+	cmds := make([]*goredis.IntCmd, len(keys))
+	for i, key := range keys {
+		cmds[i] = pipe.StrLen(ctx, key)
+	}
+	_, _ = pipe.Exec(ctx) // 单命令错误经 cmd.Err() 逐条分流（见下）
+	for _, cmd := range cmds {
+		if err := cmd.Err(); err != nil {
+			if IsUnavailable(err) {
+				return false, err // 传输级：本轮无结论
+			}
+			return false, nil // WRONGTYPE 等数据类错误 = 异类型占用证据
+		}
+		if cmd.Val() != wantLen {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 // estimateNumItems 由置位数反推已插入元素数（标准 Bloom filter 估计量）：

@@ -4,18 +4,26 @@ import (
 	"context"
 )
 
+// 实现路径观测常量：CuckooInfo.Path 的取值（口径同 bloom 侧
+// PathBF/PathBitmap，见 bloom.go）。
+const (
+	PathCF   = "cf"   // CF.* 原生模块路径
+	PathHash = "hash" // Hash + Lua 回退路径
+)
+
 // CuckooInfo 包含布谷鸟过滤器的元数据。模块版对应 CF.INFO 输出；回退版
 // 仅 Size/NumBuckets/NumItems/BucketSize 有效，其余字段
 // （NumFilters/NumDeletes/Expansion/MaxIterations）恒 0。
 type CuckooInfo struct {
-	Size          int64 // 过滤器大小（字节；回退版为估算：占用桶 × 桶字节数）
-	NumBuckets    int64 // 桶数量（回退版为占用桶数）
-	NumFilters    int64 // 过滤器数量（仅模块版；回退版恒 0）
-	NumItems      int64 // 已插入元素数
-	NumDeletes    int64 // 已删除元素数（仅模块版；回退版恒 0）
-	Expansion     int64 // 扩容因子（仅模块版；回退版恒 0）
-	BucketSize    int64 // 桶大小
-	MaxIterations int64 // 最大踢出迭代次数（仅模块版；回退版恒 0）
+	Size          int64  // 过滤器大小（字节；回退版为估算：占用桶 × 桶字节数）
+	NumBuckets    int64  // 桶数量（回退版为占用桶数）
+	NumFilters    int64  // 过滤器数量（仅模块版；回退版恒 0）
+	NumItems      int64  // 已插入元素数
+	NumDeletes    int64  // 已删除元素数（仅模块版；回退版恒 0）
+	Expansion     int64  // 扩容因子（仅模块版；回退版恒 0）
+	BucketSize    int64  // 桶大小
+	MaxIterations int64  // 最大踢出迭代次数（仅模块版；回退版恒 0）
+	Path          string // 实际服务的实现路径（PathCF/PathHash，观测实例分派结果；服务不可用兜底返回的空结构体为 ""）
 }
 
 // CuckooOption 配置布谷鸟过滤器。
@@ -23,11 +31,31 @@ type CuckooOption func(*cuckooConfig)
 
 type cuckooConfig struct {
 	failPolicyConfig
-	prefillConfig       // 预填充门控配置（fn==nil 时未启用，工厂不建 coord，同 bloomConfig 方式）
-	capacity      int64 // 预估容量（模块版首写前恒 CF.RESERVE 预建，未显式传参按默认 1000000；回退版决定桶数量 numBuckets=capacity/bucketSize，默认 10000 为存量键布局兼容约束）
-	maxIterations int64 // 最大踢出迭代次数
-	bucketSize    int64 // 桶大小
-	expansion     int64 // 扩容因子（仅模块版 CF.RESERVE 使用）
+	prefillConfig              // 预填充门控配置（fn==nil 时未启用，工厂不建 coord，同 bloomConfig 方式）
+	capacity      int64        // 预估容量（模块版首写前恒 CF.RESERVE 预建，未显式传参按默认 1000000；回退版决定桶数量 numBuckets=capacity/bucketSize，默认 10000 为存量键布局兼容约束）
+	maxIterations int64        // 最大踢出迭代次数
+	bucketSize    int64        // 桶大小
+	expansion     int64        // 扩容因子（仅模块版 CF.RESERVE 使用）
+	module        CuckooModule // 模块期望（零值 Auto=自动分派；见 WithCuckooModule/CuckooModule）
+}
+
+// CuckooModule 声明 NewCuckooFilter 期望的实现路径（与 BloomModule 对称，
+// 零值 Auto=现状自动分派；CF=必须 CF.* 命令族路径，探测不满足即报错；
+// Hash=无条件强制 Hash+Lua 布局，双路径对照/存量迁移用，路径错配事故
+// 由构造期 TYPE 校验 fail-loud 兜底）。
+type CuckooModule uint8
+
+const (
+	CuckooModuleAuto CuckooModule = iota // 零值：按 Capability 自动分派（v0.10.0 行为）
+	CuckooModuleCF                       // 强制 CF.* 路径：未探测/无 cf 命令族一律构造期报错
+	CuckooModuleHash                     // 强制 hash 路径：不查探测状态、不报错
+)
+
+// WithCuckooModule 声明 Cuckoo 工厂的模块期望（命名带组件前缀，对齐
+// WithCuckooCapacity 避免与 bloom 侧 Option 同名的先例；校验在建连前，
+// 失败零命令副作用，错误哨兵与分派规则见 bloom.go BloomModule）。
+func WithCuckooModule(m CuckooModule) CuckooOption {
+	return func(c *cuckooConfig) { c.module = m }
 }
 
 // CuckooConfig 是 CuckooFilter 的配置类型别名，供 WithFailPolicy 泛型参数使用。
@@ -203,6 +231,12 @@ type CuckooFilter struct {
 // 写入会污染 Info 统计）。类型冲突或布局不符在构造期 fail-loud（数据类
 // 错误、键未被修改）；服务不可用包 ErrRedisUnavailable 哨兵。失败返回
 // (nil, err)，不交付半初始化实例；构造失败不随 FailPolicy 兜底。
+//
+// 模块期望（v0.11.0 G4，见 WithCuckooModule/CuckooModule）：默认 Auto
+// 即上述自动分派；CuckooModuleCF 要求构造前已 Capability().Probe(ctx)
+// 且探测到 cf 命令族，否则分别报 ErrCapabilityNotProbed /
+// ErrModuleNotLoaded（校验在建连前，零命令副作用）；CuckooModuleHash
+// 无条件强制 hash 路径（对照/迁移用，不查探测状态）。
 func (rdb *redisClient) NewCuckooFilter(ctx context.Context, key string, opts ...CuckooOption) (*CuckooFilter, error) {
 	cfg := defaultCuckooConfig()
 	cfg.policy = FailOpen // 过滤器默认 FailOpen：宁可放行不阻塞业务
@@ -218,18 +252,42 @@ func (rdb *redisClient) NewCuckooFilter(ctx context.Context, key string, opts ..
 		return newPrefillCoordinator(rdb, impl, key, cfg.prefillConfig)
 	}
 
-	if rdb.cap.HasCuckoo() {
-		impl := &cfCmdImpl{client: rdb, key: key, cfg: cfg}
-		if err := impl.connectAll(ctx); err != nil {
+	// 模块期望校验（G4，口径同 bloom.go NewBloomFilter）：CF 要求已探测
+	// 且 cf 命令族在场（校验在建连前，零命令副作用）；Hash 无条件强制
+	// （不查探测状态）；Auto 与现状逐行为一致。
+	var impl cuckooFilterImpl
+	switch cfg.module {
+	case CuckooModuleCF:
+		if err := checkModuleRequirement(rdb.cap, rdb.cap.HasCuckoo(), "cuckoo CF.* path", "HasCuckoo()"); err != nil {
 			return nil, err
 		}
-		return &CuckooFilter{impl: impl, policy: cfg.policy, coord: mkCoord(impl)}, nil
+		cfi := &cfCmdImpl{client: rdb, key: key, cfg: cfg}
+		if err := cfi.connectAll(ctx); err != nil {
+			return nil, err
+		}
+		impl = cfi
+	case CuckooModuleHash:
+		hi := newHashImpl(rdb, key, cfg)
+		if err := hi.connect(ctx); err != nil {
+			return nil, err
+		}
+		impl = hi
+	default: // CuckooModuleAuto：按能力缓存自动分派（现状行为）
+		if rdb.cap.HasCuckoo() {
+			cfi := &cfCmdImpl{client: rdb, key: key, cfg: cfg}
+			if err := cfi.connectAll(ctx); err != nil {
+				return nil, err
+			}
+			impl = cfi
+		} else {
+			hi := newHashImpl(rdb, key, cfg)
+			if err := hi.connect(ctx); err != nil {
+				return nil, err
+			}
+			impl = hi
+		}
 	}
-	impl := newHashImpl(rdb, key, cfg)
-	if err := impl.connect(ctx); err != nil {
-		return nil, err
-	}
-	return &CuckooFilter{impl: impl, policy: cfg.policy, coord: mkCoord(impl)}, nil
+	return &CuckooFilter{impl: impl, policy: cfg.policy, coord: mkCoord(impl.(prefillInner))}, nil
 }
 
 // prefillProbe 热路径惰性触发：coord 存在时经 triggerLazy 起后台
@@ -492,11 +550,38 @@ func (cf *CuckooFilter) Reset(ctx context.Context) error {
 // State 返回错误可作 Redis 可用性探针（1 RTT 权威）；数据面
 // Exists/Count 的降级值（恒 true/恒 1）不携带错误，勿以数据面错误
 // 判断 Redis 健康。
+//
+// 启用预填充后，后台每拍对权威 Ready 相位搭载完整性校验（G1，镜像
+// BloomFilter.State 声明）：CF.* 路径 TYPE 负面清单、回退 Hash 路径
+// TYPE ∈ {none, hash}——**none 合法**（惰性建键 + 空数据源 ready 是
+// 契约稳态，误判即重建风暴，见 hashImpl.IntegrityProbe）。检出即本地
+// 降级并异步 force=1 重建；抢占传输失败的逐拍自愈（≤1 RTT 透传窗）
+// 与「State 权威+本地相位」组合 ≤syncInterval 假窗口为已知接受行为
+// （ISSUE-107③，同 bloom 侧声明）。
 func (cf *CuckooFilter) State(ctx context.Context) (PrefillPhase, error) {
 	if cf.coord == nil {
 		return PrefillUninitialized, ErrPrefillDisabled
 	}
 	return cf.coord.readState(ctx)
+}
+
+// Phase 零 RTT 纯内存读本地相位快照（非权威）——与 State(ctx) 的对照是
+// 设计意图：本方法不发 Redis 命令，故不带 ctx。分工线：Phase 用于放行
+// 分流（fail-safe 方向，Fresh=false 按降级理解），State 权威读用于不可逆
+// 决策；State 探针声明同样适用于 Phase 视角——LastSyncErr 仅代表后台
+// syncOnce 路径错误（原样存储不包装，用 IsUnavailable/IsNotFound 分类），
+// Ready 透传态下数据面真实错误仍原样返回调用方，两个观测点互不干扰。
+// 未启用预填充（coord==nil）返回 (PhaseInfo{}, ErrPrefillDisabled)，
+// 对齐其 State 写法；字段口径见 PhaseInfo godoc。
+//
+// 本地视图搭载完整性校验效果（G1，镜像 BloomFilter.Phase 声明）：检出
+// 键缺失/异类型占用即写降级相位；不可逆决策以 State(ctx) 权威读为准的
+// 分工线不因校验改变。
+func (cf *CuckooFilter) Phase() (PhaseInfo, error) {
+	if cf.coord == nil {
+		return PhaseInfo{}, ErrPrefillDisabled
+	}
+	return cf.coord.phaseInfo(), nil
 }
 
 // Close 释放预填充协调器（停后台同步 ticker 并取消在飞 run），幂等；

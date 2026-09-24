@@ -22,7 +22,9 @@ type prefillFilter struct {
 func newPrefillFilter(rdb *redisClient, inner BloomFilter, base string, cfg bloomConfig) *prefillFilter {
 	return &prefillFilter{
 		inner: inner,
-		coord: newPrefillCoordinator(rdb, inner, base, cfg.prefillConfig),
+		// 工厂契约：inner 恒为裸 impl（*bfCmdImpl/*bitmapImpl，均满足
+		// prefillInner——G1 后含 IntegrityProbe），断言安全。
+		coord: newPrefillCoordinator(rdb, inner.(prefillInner), base, cfg.prefillConfig),
 	}
 }
 
@@ -104,4 +106,20 @@ func (f *prefillFilter) Reset(ctx context.Context) error {
 // State 1 RTT 直接 GET 权威状态键（不经本地缓存）。
 func (f *prefillFilter) State(ctx context.Context) (PrefillPhase, error) {
 	return f.coord.readState(ctx)
+}
+
+// Phase 零 RTT 纯内存读本地相位快照（委托 coordinator 组装；接口契约与
+// State 的分工线见 BloomFilter.Phase / PhaseInfo godoc）。恒返回 nil 错
+// 误——启用预填充后快照恒可读（构造即有 Uninitialized 初值），同步故障
+// 经 PhaseInfo.LastSyncErr 承载而非返回值。
+func (f *prefillFilter) Phase() (PhaseInfo, error) {
+	return f.coord.phaseInfo(), nil
+}
+
+// IntegrityProbe 透传委托 inner 的 G1 校验（装饰器不拦截观测类调用；
+// coordinator 搭车路径直接用 inner，不经本方法）。工厂契约保证 inner
+// 恒为裸 impl（bfCmdImpl/bitmapImpl，均满足 prefillInner——与
+// coordinator.inner 同一实例）。
+func (f *prefillFilter) IntegrityProbe(ctx context.Context) (bool, error) {
+	return f.inner.(prefillInner).IntegrityProbe(ctx)
 }

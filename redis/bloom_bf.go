@@ -254,7 +254,7 @@ func (b *bfCmdImpl) multiByShards(ctx context.Context, items []any, isAdd bool) 
 // 精确计数，线性可加）；ExpansionRate 是 RESERVE 配置常量、各分片一致，
 // 取第一个分片。
 func (b *bfCmdImpl) Info(ctx context.Context) (*BloomInfo, error) {
-	agg := &BloomInfo{}
+	agg := &BloomInfo{Path: PathBF}
 	emptyShardOK := b.sharder.enabled
 	haveExpansion := false // Expansion 取**首个成功分片**（首片可能是空分片）
 	for _, key := range b.sharder.allKeys() {
@@ -318,4 +318,21 @@ func (b *bfCmdImpl) Reset(ctx context.Context) error {
 // （未启用预填充的正确语义；启用时由 prefillFilter 装饰器接管，见 bloom_prefill_filter.go。）
 func (b *bfCmdImpl) State(context.Context) (PrefillPhase, error) {
 	return PrefillUninitialized, ErrPrefillDisabled
+}
+
+// IntegrityProbe 是 G1 完整性校验的 BF.* 路径判据：逐分片 TYPE
+// （allKeys 枚举、pipeline 批量 1 往返），负面清单裁决——∈ 核心值类型
+// （含 none，构造即建键、缺失即失效）→ invalid；清单外任意类型名
+// （实测 MBbloom-- 及未来模块内部名变更）→ ok（禁硬编码，ISSUE-103，
+// 见 integrityTypeInvalid）。TYPE 对任意键形态都正常回答，err 必为
+// 传输级 → 原样返回（无结论，不折叠成 invalid——三态契约见
+// prefillInner.IntegrityProbe godoc）。
+func (b *bfCmdImpl) IntegrityProbe(ctx context.Context) (bool, error) {
+	return integrityTypeProbe(ctx, b.client, b.sharder.allKeys())
+}
+
+// Phase 是未启用预填充时的空实现：返回 (PhaseInfo{}, ErrPrefillDisabled)。
+// （未启用预填充的正确语义；启用时由 prefillFilter 装饰器接管，见 bloom_prefill_filter.go。）
+func (b *bfCmdImpl) Phase() (PhaseInfo, error) {
+	return PhaseInfo{}, ErrPrefillDisabled
 }

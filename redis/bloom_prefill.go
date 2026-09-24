@@ -155,6 +155,10 @@ type PrefillOption func(*prefillConfig)
 //     判别意义，且避免重建期误触发）；
 //   - 与 FailPolicy 正交：探测错误（probeFn err/panic、ExistsMulti 底层
 //     错误）只跳过本轮，不构成失效证据；
+//   - 与 G1 完整性校验（IntegrityProbe，搭车 syncOnce）互补：完整性
+//     校验覆盖键缺失/异类型占用/布局不符，但存在盲区——键在、类型对、
+//     内容被清空（DEL 后空 RESERVE 重建）无法由键形态检出，该形态由
+//     本选项的肯定样本探测承接，建议两者同时启用；
 //   - 数据源为空/样本为空时探测静默跳过本轮（不判失效），空数据源下
 //     ready 保持为预期行为；
 //   - LivenessFunc 契约见其 godoc——样本错误会导致周期性误触发重建，
@@ -315,23 +319,128 @@ var prefillFailScript = goredis.NewScript(`
 `)
 
 // prefillLocal 是本地缓存的相位快照（phase + updatedAt 一体更新）。
+// 注意：syncOnce 的错误观测字段不并入本结构——storeLocal 有多个调用点
+// （syncOnce×2、finish×2），并入会使每次相位刷新连带清零未携带字段；
+// 错误由独立的 errSnapshot 指针承载，见 prefillCoordinator.syncErr。
 type prefillLocal struct {
 	phase     PrefillPhase
 	updatedAt time.Time
 }
 
+// errSnapshot 承载 syncOnce 路径的末次底层错误及其时间。err 为 nil 表示
+// 最近一拍同步全 IO 成功（含 NotFound——键缺失是正常相位非错误），at 仍
+// 保留末次错误时间作诊断（清零口径只清 err 不清 at）。
+type errSnapshot struct {
+	err error
+	at  time.Time
+}
+
+// PhaseInfo 是 BloomFilter.Phase / CuckooFilter.Phase 返回的本地相位快照
+// 视图（零 RTT 纯内存读，由 coordinator 的两枚独立 atomic 指针组装）。
+//
+// 分工线：本地视图（Phase）用于放行分流——读的是本实例缓存，非权威，
+// fail-safe 方向使用（Fresh=false 按降级理解）；权威读 State(ctx)（1 RTT
+// 直接 GET 状态键）用于不可逆决策（重建、清理、运维判定等以权威为准）。
+//
+// 多实例滞后声明：本快照经后台 ticker 同步，滞后权威状态最多约
+// 1×syncInterval + 1 个 RTT；Fresh=false 时相位不可信，须按降级态
+// （数据面恒放行）理解，而非"权威一定不是 Ready"。
+//
+// 组装口径：Phase/UpdatedAt/Fresh 取自相位快照指针（freshOf 单源判定，
+// 与热路径 readyFresh 同口径）；LastSyncErr/LastSyncErrAt 取自错误快照
+// 指针。两枚指针间无原子撕裂保证——Phase() 组合读不保证跨字段同一瞬间
+// 一致（如相位刚刷新、错误指针尚是上一拍的），但各字段自带时间戳、
+// 均为诊断/分流用途，语义可接受。
+type PhaseInfo struct {
+	// Phase 是本地缓存相位（非权威，滞后见类型 godoc）。
+	Phase PrefillPhase
+	// UpdatedAt 是本地快照最近一次成功同步（或就地重建 storeLocal）的
+	// 时间；零值表示构造后从未成功同步（首拍即视为超龄降级）。
+	UpdatedAt time.Time
+	// Fresh 报告快照是否可作放行依据：相位 Ready 且未超龄
+	// （age ≤ 2×syncInterval），与装饰器降级分派的 readyFresh 同口径
+	// （同一判定源组装，非复制表达式）。
+	Fresh bool
+	// LastSyncErr 是最近一次后台 syncOnce 路径的底层错误，原样存储
+	// 不包装（errors.Is / IsUnavailable / IsNotFound 分类能力保留）。
+	// 仅代表后台同步路径错误：Ready 透传态下数据面（Exists 等）的真实
+	// 错误仍原样返回调用方，两个观测点互不干扰。nil = 最近一拍全 IO
+	// 成功。用 IsUnavailable/IsNotFound 对本值分类。
+	LastSyncErr error
+	// LastSyncErrAt 是 LastSyncErr 的记录时间；LastSyncErr 已清 nil 时
+	// 本值保留末次错误时间作诊断（不清零）。零值 = 从未记录过错误。
+	LastSyncErrAt time.Time
+}
+
 // prefillInner 是 prefill 核心对宿主过滤器的最小依赖：清空重建骨架
-// （Reset）、回灌写入（Add/AddMulti）与有效性探测直查（Exists/
+// （Reset）、回灌写入（Add/AddMulti）、有效性探测直查（Exists/
 // ExistsMulti——绕开门面/装饰器降级分派与 FailPolicy 兜底，拿到原始
-// 错误与真实值）。BloomFilter 与 cuckooFilterImpl 均满足——本文件的
-// 状态机/ticker/退避为两者共用。
+// 错误与真实值）与完整性校验（IntegrityProbe——G1 键存在性/布局校验）。
+// BloomFilter 与 cuckooFilterImpl 均满足——本文件的状态机/ticker/退避
+// 为两者共用。
 type prefillInner interface {
 	Reset(ctx context.Context) error
 	Add(ctx context.Context, item any) (bool, error)
 	AddMulti(ctx context.Context, items ...any) ([]bool, error)
 	Exists(ctx context.Context, item any) (bool, error)
 	ExistsMulti(ctx context.Context, items ...any) ([]bool, error)
+	// IntegrityProbe 三态校验宿主过滤器物理键的存在性/布局（裸命令，
+	// 禁 Lua——判据见各 impl）：
+	//   - ok=true, err=nil → 完整性证据充分（键在且形态正确）；
+	//   - ok=false, err=nil → 失效证据（键缺失/异类型占用/布局不符）；
+	//   - err != nil → 传输级错误（Unavailable 等），本轮无结论——
+	//     严禁折叠成 invalid（网络抖动不得引发重建）。
+	//
+	// 覆盖：键缺失、异类型占用、（bitmap）布局长度不符；已知盲区：
+	// 键在、类型对、但内容被清空（DEL 后空 RESERVE 重建）——该形态由
+	// WithLivenessProbe 肯定样本探测承接，建议同时启用。
+	//
+	// 成本：每拍 O(1) 命令 ×分片数（TYPE/STRLEN），实例数×分片数放大；
+	// 检出窗口 ≤ syncInterval + 1 RTT（调大 WithSyncInterval 线性变差）。
+	// 本方法只读证据、不写任何状态。
+	IntegrityProbe(ctx context.Context) (bool, error)
 }
+
+// integrityTypeInvalid 是 bf/cf 模块键 TYPE 判据的负面清单：返回 true
+// 当且仅当 t 为 Redis 核心值类型名（含 none——两路径构造即建键，缺失
+// 即失效证据）。清单外的任意类型名（实测 BF=MBbloom--、CF=MBbloomCF，
+// 及未来模块内部类型名变更）按肯定证据处理——**禁硬编码模块类型名**
+// （ISSUE-103：模块内部命名属上游实现细节，硬编码会在其变更时静默失效）。
+func integrityTypeInvalid(t string) bool {
+	switch t {
+	case "none", "string", "hash", "list", "set", "zset", "stream":
+		return true
+	}
+	return false
+}
+
+// integrityTypeProbe 以单次 pipeline 批量 TYPE keys（裸命令，禁 Lua——
+// ISSUE-105；分片 n 键 1 往返）执行 bf/cf 共用判据：任一键落入负面
+// 清单 → (false, nil)；TYPE 对任意键形态都正常回答（none/类型名），
+// Exec 出现的 err 必为传输级 → 原样返回（无结论）。
+func integrityTypeProbe(ctx context.Context, c *redisClient, keys []string) (bool, error) {
+	pipe := c.Pipeline()
+	cmds := make([]*goredis.StatusCmd, len(keys))
+	for i, key := range keys {
+		cmds[i] = pipe.Type(ctx, key)
+	}
+	if _, err := pipe.Exec(ctx); err != nil {
+		return false, err
+	}
+	for _, cmd := range cmds {
+		if integrityTypeInvalid(cmd.Val()) {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+// 编译期护栏（ISSUE-204）：bf/cf 共用路径与装饰器的数据面宿主实现必须
+// 满足 prefillInner（含 IntegrityProbe）——接口漂移在编译期暴露。
+var (
+	_ prefillInner = (*bfCmdImpl)(nil)
+	_ prefillInner = (*bitmapImpl)(nil)
+)
 
 // prefillCoordinator 是每实例每 filter 的本地协调器：后台 ticker 同步
 // 权威状态、热路径惰性触发、显式/自动重建执行与就地相位更新。
@@ -345,6 +454,7 @@ type prefillCoordinator struct {
 	failnKey string
 
 	phase         atomic.Pointer[prefillLocal] // 本地相位快照（phase+updatedAt 原子一体）
+	syncErr       atomic.Pointer[errSnapshot]  // syncOnce 末次错误（独立指针：storeLocal 多调用点不连带清零）
 	inFlight      atomic.Bool                  // 本地重建防重入（force=0 触发方 CAS 持有）
 	nextTriggerAt atomic.Int64                 // Failed 本地冷却截止（unixnano；仅近似，权威由 fail TTL 把守）
 	acquireTries  atomic.Int64                 // acquire 尝试计数（诊断/测试判别探针）
@@ -410,13 +520,37 @@ func (c *prefillCoordinator) loadLocal() prefillLocal {
 }
 
 // readyFresh 报告本地相位是否为新鲜 Ready：非 Ready 或 age>2×syncInterval
-// 均按非 Ready（stale fail-safe，T10）。
+// 均按非 Ready（stale fail-safe，T10）。判定逻辑单源在 freshOf（与
+// PhaseInfo.Fresh 共用，防两处口径漂移）。
 func (c *prefillCoordinator) readyFresh() bool {
-	s := c.loadLocal()
+	return c.freshOf(c.loadLocal())
+}
+
+// freshOf 报告给定快照能否作放行依据：phase==Ready 且未超龄（isStale
+// 单源判定）。热路径降级分派（readyFresh）与 Phase() 本地视图
+// （phaseInfo 组装）都经此，唯一口径。
+func (c *prefillCoordinator) freshOf(s prefillLocal) bool {
 	if s.phase != PrefillReady {
 		return false
 	}
 	return !c.isStale(s)
+}
+
+// phaseInfo 组合两枚 atomic 指针组装 PhaseInfo：相位快照经 loadLocal +
+// freshOf（与热路径同口径），错误快照独立读取。跨指针无原子撕裂保证
+// （见 PhaseInfo godoc），各字段自带时间戳，语义可接受。
+func (c *prefillCoordinator) phaseInfo() PhaseInfo {
+	s := c.loadLocal()
+	info := PhaseInfo{
+		Phase:     s.phase,
+		UpdatedAt: s.updatedAt,
+		Fresh:     c.freshOf(s),
+	}
+	if e := c.syncErr.Load(); e != nil {
+		info.LastSyncErr = e.err
+		info.LastSyncErrAt = e.at
+	}
+	return info
 }
 
 // isStale 报告本地相位快照是否超龄（age>2×syncInterval，T10）。
@@ -587,20 +721,100 @@ func (c *prefillCoordinator) callExistsMulti(ctx context.Context, samples []any)
 // store 相位；失败（含 IsUnavailable）不更新（让 age 增长触发 T10）。
 // 同步后权威相位为 Uninitialized/Failed → 本地 in-flight CAS 成功才
 // 后台 force=0 重建；Building/Ready 不动作。
+//
+// G3 观测（不改任何既有行为）：GET 失败（非 NotFound）拍把底层错误原样
+// 记入 syncErr 快照后照旧 return；本拍全 IO 成功（GET 成功，含 NotFound
+// ——键缺失是正常相位非错误）则清 err 保留 at。记录点仅在本路径，
+// probeOnce 不记（应用取样 bug 不得混入 Redis 故障信号）。
 func (c *prefillCoordinator) syncOnce() {
 	ctx, cancel := context.WithTimeout(context.Background(), prefillStatusTimeout)
 	defer cancel()
 	v, err := c.rdb.Get(ctx, c.stateKey).Result()
 	if err != nil {
 		if !IsNotFound(err) {
+			c.syncErr.Store(&errSnapshot{err: err, at: time.Now()})
 			return // 失败不更新（T10：age 增长 → 热路径按非 Ready 降级）
 		}
 		c.storeLocal(PrefillUninitialized)
 	} else {
 		c.storeLocal(phaseFromValue(v))
 	}
+	// 成功清 nil 口径：执行到此处 = 本拍唯一一次 GET 已成功（失败分支已
+	// return），"同拍内后发错误覆盖先发成功"天然满足；err 清 nil、at
+	// 保留末次错误时间作诊断。Ready 相位的搭车校验（G1）若遇传输错误，
+	// 会在 integrityCheck 内以 Store 覆盖本清零结果。
+	c.clearSyncErr()
 	if s := c.loadLocal(); s.phase == PrefillUninitialized || s.phase == PrefillFailed {
 		c.triggerLazy(context.Background())
+	}
+	// G1 搭车完整性校验：时序红线——必须在既有「GET→storeLocal→尾部
+	// triggerLazy」段之后（triggerLazy 的相位判定不得后移到校验降级
+	// 之后，否则降级写的 Uninitialized 会让它同步起 force=0 → 被 acquire
+	// 对 ready 拒绝 → 死锁面）。
+	c.integrityCheck()
+}
+
+// integrityCheck 是 syncOnce 尾部的 G1 完整性搭车（ISSUE-102/106）：
+// **仅当本拍权威相位==Ready** 时经 inner.IntegrityProbe 校验物理键
+// 存在性/布局（building/fail/uninitialized 不校验——building 期键正在
+// DEL/重建，校验必误报）：
+//   - err≠nil（传输级，无结论）→ 记 syncErr（G3 口径：本拍非全成功），
+//     不降级、不重建；
+//   - invalid（ok=false, err=nil）→ storeLocal(Uninitialized) 本地即刻
+//     降级（Exists 恢复恒 true，阻断假阴性透传）→ 异步 force=1 重建
+//     （triggerIntegrityRebuild，禁止同步执行——会冻结 sync loop 整个
+//     重建期，相位/LastSyncErr 观测断供）；
+//   - ok → 本拍 GET+probe 全成功，clearSyncErr 已在 syncOnce 完成（G3
+//     清 nil 口径的自然延伸）。
+//
+// 已知接受行为（ISSUE-107③）：force acquire 若传输失败，下拍 GET ready
+// → 相位复活 → 再检 → 再试，每拍 ≤1 校验 RTT 透传窗，无害自愈；
+// 「State 权威 + 本地相位」组合对不可逆决策仍有 ≤syncInterval 假窗口。
+func (c *prefillCoordinator) integrityCheck() {
+	if s := c.loadLocal(); s.phase != PrefillReady {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), prefillStatusTimeout)
+	defer cancel()
+	ok, err := c.inner.IntegrityProbe(ctx)
+	if err != nil {
+		c.syncErr.Store(&errSnapshot{err: err, at: time.Now()}) // 无结论：不降级不重建
+		return
+	}
+	if !ok {
+		c.storeLocal(PrefillUninitialized) // 本地即刻降级
+		c.triggerIntegrityRebuild()
+	}
+}
+
+// triggerIntegrityRebuild 起异步 force=1 完整性重建（复用 triggerLazy
+// 骨架改 force=1：in-flight CAS 防重入；ctx 直接以 Background 派生
+// RebuildTimeout 预算——syncOnce 无调用方 ctx 可继承，无剥离语义）。
+// **必须异步**——syncOnce 内同步 run 会冻结 sync loop 整个
+// 重建期。抢占失败（多实例他方持锁 Building）返回的 ErrRebuildInProgress
+// 静默丢弃：仲裁由权威 acquire Lua 完成，本实例经下拍同步自愈。
+func (c *prefillCoordinator) triggerIntegrityRebuild() {
+	if !c.inFlight.CompareAndSwap(false, true) {
+		return
+	}
+	runCtx, cancel := context.WithTimeout(context.Background(), c.cfg.rebuildTimeout)
+	go func() {
+		defer cancel()
+		defer c.inFlight.Store(false) // 就地清 in-flight（持 CAS 所有权）
+		_ = c.run(runCtx, 1)
+	}()
+}
+
+// clearSyncErr 按 G3 口径清除末次错误：err 置 nil，at 保留（尚未记录过
+// 错误时指针为 nil，无需写入）。
+//
+// syncErr 单写者契约：写方仅 syncOnce 路径（loop goroutine 内单写者
+// 串行）；本方法的 Load-then-Store 依赖该前提，非原子。新增记录点
+// （run/finish 等其它 goroutine）前，须先把写入收口到单写者或改为
+// CAS，否则错误快照可能被并发写撕裂。
+func (c *prefillCoordinator) clearSyncErr() {
+	if prev := c.syncErr.Load(); prev != nil && prev.err != nil {
+		c.syncErr.Store(&errSnapshot{at: prev.at})
 	}
 }
 

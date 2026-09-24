@@ -22,6 +22,13 @@ type Capability struct {
 	versionSem *version.Version
 	modules    []moduleInfo
 
+	// probed 报告 probeLocked 是否**全部探测步骤成功**过（v0.11.0 G4）：
+	// 区分「未探测」与「探测后无模块」两态，供工厂的模块期望校验
+	// （WithModule/WithCuckooModule）使用。部分失败（任一步骤报错提前
+	// 返回）保持 false——对齐「不得把探测失败当不支持缓存」口径；
+	// Refresh 清除置位（回到未探测保守态）。
+	probed bool
+
 	// 命令族级能力缓存：由 probeLocked 在 bf 模块在场时经
 	// `COMMAND INFO <族>.<命令>` 逐族真实确认，其余情况恒 false。**不得**
 	// 再用模块名判定——INFO MODULES 里的模块名是 bf/cb/RedisBloom 等加载名，
@@ -57,9 +64,14 @@ func (c *Capability) Refresh() {
 	defer c.mu.Unlock()
 	c.version, c.versionSem, c.modules = "", nil, nil
 	c.hasCuckoo, c.hasCMS, c.hasTopK, c.hasTDigest = false, false, false, false
+	c.probed = false
 }
 
 func (c *Capability) probeLocked(ctx context.Context) error {
+	// 重探即失效置位：任何一步失败都停留在 false（成功路径末尾统一置
+	// true），不把半途失败当作可信探测结果。
+	c.probed = false
+
 	// --- Server version ---
 	info, err := c.rdb.Info(ctx, "Server").Result()
 	if err != nil {
@@ -117,6 +129,8 @@ func (c *Capability) probeLocked(ctx context.Context) error {
 		}
 	}
 
+	// 全部探测步骤成功——置位（区分「未探测」与「探测后无模块」，G4）。
+	c.probed = true
 	return nil
 }
 
@@ -208,6 +222,17 @@ func parseModuleLine(line string) moduleInfo {
 		}
 	}
 	return m
+}
+
+// Probed 报告 Capability 是否已完成一次**全部步骤成功**的探测（Probe/
+// probeLocked 无错返回）。与 HasBloom/HasCuckoo 等查询的区别：那些方法
+// 在「未探测」与「探测后无模块」两态下同样返回 false，本方法区分二者
+// （v0.11.0 G4：工厂模块期望校验据此拦截「未探测即要求模块路径」的
+// 静默回退）。部分失败的探测不置位；Refresh 清除置位。纯内存读。
+func (c *Capability) Probed() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.probed
 }
 
 // Version returns the Redis server version string (e.g. "7.2.5").

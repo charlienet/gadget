@@ -181,6 +181,7 @@ func (cf *cfCmdImpl) Info(ctx context.Context) (*CuckooInfo, error) {
 		Expansion:     info.ExpansionRate,
 		BucketSize:    info.BucketSize,
 		MaxIterations: info.MaxIteration,
+		Path:          PathCF,
 	}, nil
 }
 
@@ -196,4 +197,12 @@ func (cf *cfCmdImpl) Reset(ctx context.Context) error {
 		return err
 	}
 	return cf.connectAll(ctx)
+}
+
+// IntegrityProbe 是 G1 完整性校验的 CF.* 路径判据：TYPE 负面清单
+// （同 bfCmdImpl 口径，实测模块类型名 MBbloomCF；键缺失 none=invalid，
+// 构造即 CF.RESERVE 建键）。err 必为传输级 → 原样返回无结论。
+// 本实现单键不分片（cuckoo 无分片形态），pipeline 退化为单命令批次。
+func (cf *cfCmdImpl) IntegrityProbe(ctx context.Context) (bool, error) {
+	return integrityTypeProbe(ctx, cf.client, []string{cf.key})
 }

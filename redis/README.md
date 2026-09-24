@@ -214,6 +214,13 @@ err = bf.Reset(ctx)                           // 就地清空 + 同步按当前�
 // 快捷等价：rdb.NewBloomFilterWithEstimate(ctx, "bf:1", 1000000, 0.01)
 ```
 
+预填充观测分工线（启用 `WithPrefill`/`WithCuckooPrefill` 后，Bloom 与
+Cuckoo 同口径）：`Phase()` 零 RTT 纯内存读本地相位快照，用于**放行分流**
+（fail-safe 方向，`Fresh=false` 按降级理解，滞后权威最多约 1×syncInterval
++RTT）；`State(ctx)` 1 RTT 直接 GET 权威状态键，用于**不可逆决策**。
+`PhaseInfo.LastSyncErr` 承载后台同步路径的末次底层错误（原样不包装，
+用 `IsUnavailable`/`IsNotFound` 分类）；字段契约见 `PhaseInfo` godoc。
+
 分派逻辑：服务器加载了 RedisBloom 的 bf 模块 → 原生 BF.* 命令（自动扩容子
 过滤器）；未加载 → 自动回退到 bitmap（GETBIT/SETBIT + Lua 原子脚本）实现
 （普通 Redis 即可运行，无模块依赖）。回退版单次 EVAL 完成 k 位检查+置位
