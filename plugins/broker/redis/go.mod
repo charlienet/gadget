@@ -4,7 +4,7 @@ go 1.26
 
 require (
 	github.com/charlienet/gadget/broker v0.2.0
-	github.com/charlienet/gadget/redis v0.10.0
+	github.com/charlienet/gadget/redis v0.11.0
 	github.com/redis/go-redis/v9 v9.22.0
 )
 
