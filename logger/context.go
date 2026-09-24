@@ -12,7 +12,7 @@ import (
 //   - AttrService / AttrEnv：由 New() 的 preset（WithService/WithEnv）注入；
 //   - AttrTraceID / AttrReqID：由最外层 TraceHandler 从 ctx 注入。
 //
-// 四者均作为「前置字段」参与自研 console/fileText handler 的固定顺序输出
+// 四者均作为「前置字段」参与 console handler（文件 text sink 为其 NoColor 形态，同一实现）的固定顺序输出
 // （挑选/去重判据与相对次序见 record_fields.go）。
 const (
 	AttrService = "service"

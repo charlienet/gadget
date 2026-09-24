@@ -13,7 +13,7 @@ import (
 //
 // 运行：go test -bench . -benchmem -run '^$' -benchtime=1s
 // 说明：本文件仅新增，不改任何既有源；内部测试（package logger），可直达未导出符号
-// （newFileTextHandler / newFileHandler / ParseFileFormat 等）。
+// （newFileHandler / ParseFileFormat 等）。
 
 // benchDiscard 所有基准统一输出目标（丢弃，隔离 IO 成本，纯测格式化/装饰/入队路径）。
 func benchDiscard() io.Writer { return io.Discard }
@@ -69,7 +69,7 @@ func BenchmarkSingleLogPath(b *testing.B) {
 			return NewConsoleHandler(benchDiscard(), &ConsoleOptions{Level: slog.LevelInfo, NoColor: false})
 		}},
 		{"filetext", func() slog.Handler {
-			return newFileTextHandler(benchDiscard(), &FileTextOptions{Level: slog.LevelInfo})
+			return newFileHandler(benchDiscard(), FormatText, benchHOpts())
 		}},
 		{"json", func() slog.Handler {
 			return slog.NewJSONHandler(benchDiscard(), benchHOpts())
@@ -109,7 +109,7 @@ func BenchmarkHandlerReuseRecord(b *testing.B) {
 			return NewConsoleHandler(benchDiscard(), &ConsoleOptions{Level: slog.LevelInfo, NoColor: false})
 		}},
 		{"filetext", func() slog.Handler {
-			return newFileTextHandler(benchDiscard(), &FileTextOptions{Level: slog.LevelInfo})
+			return newFileHandler(benchDiscard(), FormatText, benchHOpts())
 		}},
 		{"json", func() slog.Handler {
 			return slog.NewJSONHandler(benchDiscard(), benchHOpts())

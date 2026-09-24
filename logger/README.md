@@ -9,7 +9,7 @@
 - **链路追踪**：`*Context` 方法自动从 `context.Context` 提取 `trace_id`/`req_id` 注入日志属性
 - **日志切割**：lumberjack 按大小轮换 / 自研按日期轮换（+gzip+清理）
 - **可选装饰器**：异步写入、敏感信息打码、日志采样、错误堆栈、动态调级（全部基于 `slog.Handler`，按需启用）
-- **双端输出**：控制台彩色文本 / 文件 JSON 或自研排序 text（`WithFormat`）
+- **双端输出**：控制台彩色文本 / 文件 JSON 或 text（`WithFormat`，即 console 渲染器 NoColor 形态）
 
 依赖：仅 `gopkg.in/natefinch/lumberjack.v2`。
 
@@ -47,7 +47,7 @@ l := logger.New(
         logger.WithMaxAge(30),            // 天，默认 30
         logger.WithMaxBackups(10),        // 默认 10
         logger.WithCompress(true),        // 默认 true
-        logger.WithFormat(logger.FormatText), // 可选：自研排序 text（默认 FormatJSON）
+        logger.WithFormat(logger.FormatText), // 可选：text（console 渲染器 NoColor 形态，默认 FormatJSON）
         logger.WithDateRotate("2006-01-02"),  // 可选：按日期轮换
     ),
     logger.WithAsync(),                   // 可选：异步写入（默认队列 10240）
@@ -140,12 +140,19 @@ id := logger.GetTraceID(ctx)
 ### 自研 handler 的前置字段顺序（service → env → trace_id → req_id）
 
 `service` / `env`（`WithService`/`WithEnv` 或 `With` 预设的 handler 级属性）与
-`trace_id` / `req_id`（ctx 注入的 record 级属性）四个 key，在 console（彩色）与
-file `FormatText` 两个自研 text 类 handler 中执行统一的「前置 + 去重」，固定相对次序为：
+`trace_id` / `req_id`（ctx 注入的 record 级属性）四个 key，在 console 与
+file `FormatText` 两个 text 类通道中执行统一的「前置 + 去重」，固定相对次序为：
 
 ```
-time → level → service(如有) → env(如有) → trace_id(如有) → req_id(如有) → msg → source(可选) → 其余 attrs
+time → level → service(如有) → env(如有) → trace_id(如有) → req_id(如有) → msg → 其余 attrs → source(如有，行尾)
 ```
+
+> **file `FormatText` 即 console 渲染器的 NoColor 形态（同一实现）**：前置段（`time` / `level` 及命中的前置字段）与
+> `msg` 均为裸值——无 `key=` 前缀，`msg` 原样输出不加引号（前置字段值含空格时才加引号）；
+> `source=` 与其余 attrs 保持 k=v 风格，`source`（若启用）恒在行尾（其余 attrs 之后）。
+> 唯一差异是控制台通道可叠加 ANSI 颜色（时间亮白、级别词按级染色、attr 的 `key=` 亮蓝），
+> 关闭颜色后两通道输出字节等同（同一实现构造性成立）。例：
+> `2026-09-24 10:12:33.456 INFO opencode-api prod fetching user user_id=42`。
 
 缺失的 key 跳过，存在的保持上述相对次序。规则（四 key 各自独立判定）：
 
@@ -157,7 +164,8 @@ time → level → service(如有) → env(如有) → trace_id(如有) → req_
 - `WithGroup` 派生后 `With` 的同名 key 带分组前缀，视为普通属性、不参与前置；
 - 仅 `string` kind 命中（如 `slog.Int("env", ...)` 不前置，仍作普通属性输出）。
 
-> **与 JSON 路径的分叉**：以上前置/去重仅作用于自研 console / `FormatText` handler，
+> **与 JSON 路径的分叉**：以上前置/去重仅作用于 console 渲染器（含文件 `FormatText` 的
+> NoColor 形态，同一实现），
 > 覆盖 `service`/`env`/`trace_id`/`req_id` 四 key；文件格式 `FormatJSON` 走标准
 > `slog.NewJSONHandler`，保持标准字段语义，**不**套用该规则。
 
@@ -183,7 +191,7 @@ func (s *UserService) GetUser(ctx context.Context, id int64) {
 - **静态字段**（模块名、组件名，以及全局 `service`/`env`）：初始化时用 `With` 绑定
 - **请求级字段**（trace_id、req_id）：走 `logger.WithTraceID(ctx, ...)` + `InfoContext(ctx, ...)`，由 handler 自动注入，避免每请求构造临时 logger
 
-> `With` 预设的 `service`/`env`/`trace_id`/`req_id`（原生 string）在自研 console/fileText handler 中
+> `With` 预设的 `service`/`env`/`trace_id`/`req_id`（原生 string）在 console 渲染器（文件 text 通道同实现）中
 > 同样会被前置到 msg 之前（次序 `service → env → trace_id → req_id`，见上「身份与链路字段前置」）；
 > 但请求级动态值仍推荐走 ctx——两源并存时以 record 值为准，`With` 预设值被去重剔除。
 > `service`/`env` 用 `logger.WithService`/`WithEnv` 或 `Config.Service`/`Env` 配置，`New()` 内部即以常量 key 注入。
@@ -279,7 +287,7 @@ logger.Close(2 * time.Second)        // 进程退出前统一 flush + 关文件
 
 ## 设计说明
 
-- **sink 装配**：控制台与文件为两路独立 sink，按存在性装配——`WithConsole`（彩色文本）与/或 `WithFile`（`FormatJSON` 默认 / `FormatText` 自研排序：`time → level → service → env → trace_id → req_id → msg → source → 其余 attrs`，其中四个前置字段 `service`/`env`/`trace_id`/`req_id` 由 record 与 `With` 累积属性双源前置并按 record 优先去重，见「身份与链路字段前置」；`FormatJSON` 走标准 `slog.NewJSONHandler`，不套用该排序与双源规则）；二者并存时以 `MultiHandler` 汇聚，皆未声明则兜底 stdout 控制台（`New()` 零配置不静默），仅 `WithFile` 则不写 stdout
+- **sink 装配**：控制台与文件为两路独立 sink，按存在性装配——`WithConsole`（彩色文本）与/或 `WithFile`（`FormatJSON` 默认 / `FormatText` 即 console 渲染器的 NoColor 形态、同一实现：`time → level → service → env → trace_id → req_id → msg → 其余 attrs → source（若启用，行尾）`，行版式为前置段裸值、msg 原样不加引号、source 与其余 attrs 保持 k=v；其中四个前置字段 `service`/`env`/`trace_id`/`req_id` 由 record 与 `With` 累积属性双源前置并按 record 优先去重，见「身份与链路字段前置」；`FormatJSON` 走标准 `slog.NewJSONHandler`，不套用该排序与双源规则）；二者并存时以 `MultiHandler` 汇聚，皆未声明则兜底 stdout 控制台（`New()` 零配置不静默），仅 `WithFile` 则不写 stdout
 - handler 链（内 → 外）：`(console 与/或 file)` → `StackHandler` → `SensitiveHandler` → `SamplingHandler` → `AsyncHandler` → `TraceHandler`（内置，始终位于最外层）；可选项未启用时不参与链
 - `TraceHandler` 置于最外层：`trace_id`/`req_id` 在**调用方 goroutine 内同步提取进 record**后才进入采样 / 异步队列，因此异步队列 entry 无需（也不应）持有请求级 `context.Context`；异步模式下 trace 提取同样生效，且避免了长命队列持有可取消 ctx 的反模式
 - 默认（零 sink）输出为 **stdout 控制台**（见上「sink 装配」）；`WithAsync` 队列容量默认 10240（与引擎一致）

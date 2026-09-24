@@ -235,7 +235,7 @@ func TestPackageCloseJoinsAllErrors(t *testing.T) {
 
 // newTestFileLogger 构造纯文件 sink 的内部实例：不声明 WithConsole → 控制台不装配 →
 // 不写 stdout；不注册、不 SetDefault，避免污染包级默认状态；t.Cleanup 关闭文件句柄。
-// format 传 FileFormat 枚举（零值 ""/FormatJSON → JSON，FormatText → 自研 text handler）。
+// format 传 FileFormat 枚举（零值 ""/FormatJSON → JSON，FormatText → console 渲染器 NoColor 形态）。
 func newTestFileLogger(t *testing.T, path string, format FileFormat) *slogLogger {
 	t.Helper()
 	opt := Options{Level: slog.LevelInfo}
@@ -252,7 +252,7 @@ func tempLogPath(t *testing.T) string {
 }
 
 // TestFileHandlerTextFormat：WithFormat(FormatText) 时文件落地为自研排序 text handler 输出
-// （k=v、空格分隔、level=INFO/msg=），而非 JSON；并验证内置时间格式 "2006-01-02 15:04:05.000"。
+// （前置段裸值、msg 原样不加引号、source 与其余 attrs 为 k=v），而非 JSON；并验证内置时间格式 "2006-01-02 15:04:05.000"。
 func TestFileHandlerTextFormat(t *testing.T) {
 	path := tempLogPath(t)
 	l := newTestFileLogger(t, path, FormatText)
@@ -267,15 +267,17 @@ func TestFileHandlerTextFormat(t *testing.T) {
 	if strings.HasPrefix(got, "{") {
 		t.Fatalf("expected custom text handler output, got JSON-looking line: %s", got)
 	}
-	// 自研 text handler 的 k=v 特征：level=INFO（与 console 缩写风格一致）、msg=
-	if !strings.Contains(got, "level=INFO") || !strings.Contains(got, "msg=") {
-		t.Errorf("expected text key=value format, got: %s", got)
+	// 自研 text handler 版式：级别为裸值 INFO（与 console 缩写风格一致）、msg 原样、无 key= 前缀
+	if !strings.Contains(got, "INFO") || !strings.Contains(got, "text format msg") {
+		t.Errorf("expected bare-value text format, got: %s", got)
 	}
-	// 内置时间格式：形如 time=2006-01-02 15:04:05.000（含空格、无 RFC3339 的 T）。
-	// 自研 handler 对 time 值不加引号，允许可选引号以兼容正则。
-	timeRe := regexp.MustCompile(`time="?[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}`)
+	if strings.Contains(got, "level=") || strings.Contains(got, "msg=") {
+		t.Errorf("front segment and msg must be bare values, got: %s", got)
+	}
+	// 内置时间格式：行首裸值 2006-01-02 15:04:05.000（含空格、无 RFC3339 的 T、无 time= 前缀）。
+	timeRe := regexp.MustCompile(`^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3} `)
 	if !timeRe.MatchString(got) {
-		t.Errorf("expected built-in time format in text output, got: %s", got)
+		t.Errorf("expected built-in bare time format at line start, got: %s", got)
 	}
 }
 
@@ -301,7 +303,7 @@ func TestNewFileHandlerBackendSelection(t *testing.T) {
 			lg.Info("pick msg", "k", "v")
 			got := strings.TrimSpace(buf.String())
 			if c.wantText {
-				if strings.HasPrefix(got, "{") || !strings.Contains(got, "level=INFO") {
+				if strings.HasPrefix(got, "{") || !strings.Contains(got, "INFO") || strings.Contains(got, "level=") {
 					t.Errorf("want text handler (format %q), got: %s", c.format, got)
 				}
 			} else if !strings.HasPrefix(got, "{") || !strings.Contains(got, `"level":"INFO"`) {

@@ -80,8 +80,11 @@ func TestInitConsole(t *testing.T) {
 	if !strings.Contains(got, "k=v") {
 		t.Errorf("expected attrs in output, got: %s", got)
 	}
-	if !strings.Contains(got, "service=pay-svc") || !strings.Contains(got, "env=test") {
-		t.Errorf("expected service/env attrs, got: %s", got)
+	if !strings.Contains(got, "pay-svc test") {
+		t.Errorf("expected bare-value service/env front fields, got: %s", got)
+	}
+	if strings.Contains(got, "service=") || strings.Contains(got, "env=") {
+		t.Errorf("expected no key= prefix on console front fields, got: %s", got)
 	}
 	if !strings.Contains(got, "source=") {
 		t.Errorf("expected source= with Source:true, got: %s", got)
@@ -167,15 +170,18 @@ func TestInitFileTextFormat(t *testing.T) {
 	if strings.HasPrefix(strings.TrimSpace(got), "{") {
 		t.Errorf("expected text format file, got JSON-looking: %s", got)
 	}
-	if !strings.Contains(got, "level=INFO") || !strings.Contains(got, "file text msg") {
-		t.Errorf("expected TextHandler key=value output, got: %s", got)
+	if !strings.Contains(got, "INFO") || !strings.Contains(got, "file text msg") {
+		t.Errorf("expected text handler bare-value output, got: %s", got)
 	}
-	// 自研 text handler：trace_id 以 key=value 形态出现，且前置于 msg 之前
+	// 自研 text handler：trace_id 以裸值形态出现（无 trace_id= 前缀），且前置于 msg 之前
 	// （区别于标准 slog TextHandler 把 trace_id 落在 attrs 末尾的固定顺序）
-	traceIdx := strings.Index(got, "trace_id=init-file-text")
-	msgIdx := strings.Index(got, "msg=")
+	traceIdx := strings.Index(got, "init-file-text")
+	msgIdx := strings.Index(got, "file text msg")
 	if traceIdx < 0 {
-		t.Errorf("expected trace_id in text file, got: %s", got)
+		t.Errorf("expected bare trace_id value in text file, got: %s", got)
+	}
+	if strings.Contains(got, "trace_id=") || strings.Contains(got, "msg=") {
+		t.Errorf("front segment and msg must be bare values, got: %s", got)
 	}
 	if traceIdx >= 0 && msgIdx >= 0 && traceIdx > msgIdx {
 		t.Errorf("expected trace_id before msg (custom ordering), got: %s", got)

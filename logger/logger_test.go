@@ -127,10 +127,10 @@ func TestWithGroup(t *testing.T) {
 }
 
 func TestTraceLevel(t *testing.T) {
-	// Trace 级别经 slog 原生 Log 输出 [TRAC]
+	// Trace 级别经 slog 原生 Log 输出裸词 TRAC（与 fileText 版式统一）
 	l, buf := newBufLogger(t, logger.Trace)
 	l.Log(context.Background(), logger.Trace, "trace msg")
-	if !strings.Contains(buf.String(), "[TRAC] trace msg") {
+	if !strings.Contains(buf.String(), "TRAC trace msg") {
 		t.Errorf("expected trace output, got: %s", buf.String())
 	}
 }
@@ -183,29 +183,20 @@ func TestServiceEnvInjection(t *testing.T) {
 
 	l.Info("msg")
 	got := buf.String()
-	if !strings.Contains(got, "service=pay-svc") {
-		t.Errorf("expected service attr, got: %s", got)
+	// console 与 fileText 共享裸值版式：前置段无 key= 前缀，级别为裸词
+	if !strings.Contains(got, "INFO pay-svc prod msg") {
+		t.Errorf("expected bare-value service/env promoted before msg, got: %s", got)
 	}
-	if !strings.Contains(got, "env=prod") {
-		t.Errorf("expected env attr, got: %s", got)
-	}
-
-	// 端到端锁定前置布局：service/env 须前置到消息本体（裸文本 "msg"）之前，
-	// 而非作为普通属性落在尾部。
-	msgIdx := strings.Index(got, "msg")
-	if svcIdx := strings.Index(got, "service=pay-svc"); msgIdx < 0 || svcIdx < 0 || svcIdx >= msgIdx {
-		t.Errorf("expected service promoted before msg, got: %s", got)
-	}
-	if envIdx := strings.Index(got, "env=prod"); msgIdx < 0 || envIdx < 0 || envIdx >= msgIdx {
-		t.Errorf("expected env promoted before msg, got: %s", got)
+	if strings.Contains(got, "service=") || strings.Contains(got, "env=") {
+		t.Errorf("expected no key= prefix on front fields, got: %s", got)
 	}
 
-	// 未设置时不出现对应属性
+	// 未设置时不出现对应属性：级别词与 msg 之间不插入任何前置裸值
 	var buf2 bytes.Buffer
 	l2 := logger.New(logger.WithConsole(logger.WithConsoleWriter(&buf2)), logger.WithConsole(logger.WithConsoleColor(false)))
 	l2.Info("msg")
-	if strings.Contains(buf2.String(), "service=") || strings.Contains(buf2.String(), "env=") {
-		t.Errorf("expected no service/env attrs when not configured, got: %s", buf2.String())
+	if !strings.Contains(buf2.String(), "INFO msg") {
+		t.Errorf("expected no service/env front values when not configured, got: %s", buf2.String())
 	}
 }
 
@@ -254,24 +245,22 @@ func TestTraceContextInjection(t *testing.T) {
 
 	l.InfoContext(ctx, "with trace")
 	got := buf.String()
-	if !strings.Contains(got, "trace_id=t-1") {
-		t.Errorf("expected trace_id in output, got: %s", got)
-	}
-	if !strings.Contains(got, "req_id=r-1") {
-		t.Errorf("expected req_id in output, got: %s", got)
+	// console 与 fileText 共享裸值版式：trace_id/req_id 以裸值前置（无 trace_id= 前缀）
+	if !strings.Contains(got, "INFO t-1 r-1 with trace") {
+		t.Errorf("expected bare trace_id/req_id promoted, got: %s", got)
 	}
 
-	// 未注入 trace 的 ctx：不出现属性
+	// 未注入 trace 的 ctx：级别词与 msg 之间不插入前置裸值
 	buf.Reset()
 	l.InfoContext(context.Background(), "no trace")
-	if strings.Contains(buf.String(), "trace_id") || strings.Contains(buf.String(), "req_id") {
+	if !strings.Contains(buf.String(), "INFO no trace") {
 		t.Errorf("expected no trace attrs without ctx injection, got: %s", buf.String())
 	}
 
 	// 便捷方法（ctx 为 nil）：直接透传，不 panic、无属性
 	buf.Reset()
 	l.Info("convenience")
-	if strings.Contains(buf.String(), "trace_id") {
+	if !strings.Contains(buf.String(), "INFO convenience") {
 		t.Errorf("expected no trace attrs for convenience method, got: %s", buf.String())
 	}
 }
@@ -282,14 +271,14 @@ func TestTraceOnDerivedLogger(t *testing.T) {
 
 	ctx := logger.WithTraceID(context.Background(), "t-2")
 	l.With("k", "v").InfoContext(ctx, "derived")
-	if !strings.Contains(buf.String(), "trace_id=t-2") || !strings.Contains(buf.String(), "k=v") {
-		t.Errorf("expected trace_id on With-derived logger, got: %s", buf.String())
+	if !strings.Contains(buf.String(), "INFO t-2 derived") || !strings.Contains(buf.String(), "k=v") {
+		t.Errorf("expected bare trace_id on With-derived logger, got: %s", buf.String())
 	}
 
 	buf.Reset()
 	l.WithGroup("g").InfoContext(ctx, "grouped")
-	if !strings.Contains(buf.String(), "trace_id=t-2") {
-		t.Errorf("expected trace_id on WithGroup-derived logger, got: %s", buf.String())
+	if !strings.Contains(buf.String(), "INFO t-2 grouped") {
+		t.Errorf("expected bare trace_id on WithGroup-derived logger, got: %s", buf.String())
 	}
 }
 
@@ -326,7 +315,7 @@ func TestFatalPackageLevel(t *testing.T) {
 		t.Errorf("expected exit code 1, got %d", exitCode)
 	}
 	got := buf.String()
-	if !strings.Contains(got, "[FATA] exit test") {
+	if !strings.Contains(got, "FATA exit test") {
 		t.Errorf("expected fatal message with FATA level, got: %s", got)
 	}
 	if !strings.Contains(got, "k=v") {

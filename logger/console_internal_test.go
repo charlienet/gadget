@@ -109,7 +109,7 @@ func TestNewConsoleHandlerPublic(t *testing.T) {
 	if !strings.Contains(got, "pub debug") || !strings.Contains(got, "k=v") {
 		t.Errorf("expected debug with attrs, got: %s", got)
 	}
-	if !strings.Contains(got, "[INFO] pub info") {
+	if !strings.Contains(got, "INFO pub info") {
 		t.Errorf("expected info line, got: %s", got)
 	}
 
@@ -430,7 +430,8 @@ func TestSlogLoggerCloseErrorPropagation(t *testing.T) {
 // --- console 字段顺序：trace_id/req_id 前置到 msg 之前、其余 attrs 去重 ---
 
 // TestConsoleHandlerTraceFieldOrder：注入带 trace_id/req_id 的 record（经 TraceHandler 包一层），
-// 断言两字段出现在消息之前、消息之后不重复；并核对 console 观感（[LEVEL] 括号、值不加引号）。
+// 断言两字段以裸值形态出现在消息之前、消息之后不重复；并核对 console 观感
+// （与 fileText 共享同一裸值版式：级别为裸词 INFO、前置段无 key= 前缀）。
 func TestConsoleHandlerTraceFieldOrder(t *testing.T) {
 	var buf bytes.Buffer
 	th := NewTraceHandler(NewConsoleHandler(&buf, &ConsoleOptions{Level: slog.LevelInfo, NoColor: true}))
@@ -443,31 +444,31 @@ func TestConsoleHandlerTraceFieldOrder(t *testing.T) {
 	}
 	line := strings.TrimSpace(buf.String())
 
-	traceIdx := strings.Index(line, "trace_id=")
-	reqIdx := strings.Index(line, "req_id=")
+	traceIdx := strings.Index(line, " trace-abc")
+	reqIdx := strings.Index(line, " req-xyz")
 	msgIdx := strings.Index(line, "hello world")
-	userIdx := strings.Index(line, "user=")
+	userIdx := strings.Index(line, "user=bob")
 	if traceIdx < 0 || reqIdx < 0 || msgIdx < 0 || userIdx < 0 {
-		t.Fatalf("expected trace_id/req_id/msg/user present, got: %q", line)
+		t.Fatalf("expected trace/req bare values/msg/user present, got: %q", line)
 	}
 	if traceIdx >= reqIdx || reqIdx >= msgIdx || msgIdx >= userIdx {
 		t.Errorf("expected order trace_id<req_id<msg<user, got: %q", line)
 	}
-	// 去重：消息之后不得再出现 trace_id/req_id
-	if afterMsg := line[msgIdx:]; strings.Contains(afterMsg, "trace_id=") || strings.Contains(afterMsg, "req_id=") {
+	// 去重：消息之后不得再出现 trace/req 值，也不得回退成 key= 形态
+	if afterMsg := line[msgIdx:]; strings.Contains(afterMsg, "trace-abc") || strings.Contains(afterMsg, "req-xyz") {
 		t.Errorf("trace/req duplicated after msg: %q", afterMsg)
 	}
-	// console 观感：值不加引号、级别为 [INFO] 括号
-	if !strings.Contains(line, "trace_id=trace-abc") || !strings.Contains(line, "user=bob") {
-		t.Errorf("expected unquoted values, got: %q", line)
+	// console 观感：级别为裸词（无方括号）、前置段裸值无 key= 前缀
+	if !strings.Contains(line, "INFO trace-abc req-xyz") {
+		t.Errorf("expected bare level then bare front values, got: %q", line)
 	}
-	if !strings.Contains(line, "[INFO]") {
-		t.Errorf("expected bracketed level, got: %q", line)
+	if strings.Contains(line, "trace_id=") || strings.Contains(line, "req_id=") || strings.Contains(line, "[INFO]") {
+		t.Errorf("expected no key= prefix on front fields and no bracketed level, got: %q", line)
 	}
 }
 
-// TestConsoleHandlerTraceFieldColor：彩色分支——trace_id 的 key 上色、reset 紧邻值之前、
-// 值本身不上色不加引号（与现有 attr 彩色输出风格一致）。
+// TestConsoleHandlerTraceFieldColor：彩色分支——ANSI 仅叠加于时间/级别词，前置字段为裸值
+// 且不上色不加引号（与 fileText 共享同一裸值版式，颜色只是附加层）。
 func TestConsoleHandlerTraceFieldColor(t *testing.T) {
 	var buf bytes.Buffer
 	th := NewTraceHandler(NewConsoleHandler(&buf, &ConsoleOptions{Level: slog.LevelInfo, NoColor: false}))
@@ -478,12 +479,17 @@ func TestConsoleHandlerTraceFieldColor(t *testing.T) {
 		t.Fatalf("handle: %v", err)
 	}
 	got := buf.String()
-	if !strings.Contains(got, colorKey) {
-		t.Errorf("expected colored key, got: %q", got)
+	// 级别词按级染色：... <colorInfo>INFO<reset> <裸值 trace-abc
+	if !strings.Contains(got, colorInfo+"INFO"+colorReset+" trace-abc") {
+		t.Errorf("expected colored bare level word then uncolored unquoted front value, got: %q", got)
 	}
-	// key 上色后立即 reset，再接未上色的值：... trace_id=<reset>trace-abc
-	if !strings.Contains(got, "trace_id="+colorReset+"trace-abc") {
-		t.Errorf("expected key colored then reset before unquoted value, got: %q", got)
+	// 时间亮白包裹
+	if !strings.Contains(got, colorTimestamp) {
+		t.Errorf("expected colored timestamp, got: %q", got)
+	}
+	// 前置字段不再有 key= 上色形态
+	if strings.Contains(got, colorKey+"trace_id=") {
+		t.Errorf("expected no colored key= for front fields, got: %q", got)
 	}
 }
 

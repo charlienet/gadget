@@ -4,21 +4,22 @@ import (
 	"log/slog"
 )
 
-// record_fields.go：console 与 fileText 两个 handler 共享的「字段顺序语义」单一事实来源。
+// record_fields.go：console handler（含文件 text sink 的 NoColor 形态，同一实现）
+// 的「字段顺序语义」单一事实来源。
 //
-// 两者的字节级渲染风格不同（console：ANSI 颜色、`[LEVEL]`、字符串不加引号；
-// fileText：无颜色、`level=INFO`、k=v、按标准 quoting），故不共享渲染，只共享：
+// 版式统一（前置段裸值、msg 原样不加引号、source= 与其余 attrs 为 k=v、按标准 quoting），
+// 唯一差异是控制台通道可叠加 ANSI 颜色（时间亮白、级别词按级染色、attr 的 key= 亮蓝），故：
 //  1. 前置字段集合与相对次序（frontFieldKeys：service → env → trace_id → req_id）；
 //  2. 从 record 顶层与 handler 累积 attrs（h.attrs）双源挑选前置字段的判据（pickFrontFields）；
 //  3. 把已前置输出的字段从「其余 attrs」中剔除的判据（isPickedFrontAttr）；
 //  4. 字段插入位置约定：前置字段一律排在 level 之后、msg 之前；
-//     source（若启用）排在 msg 之后、其余 attrs 之前。
+//     source（若启用）排在其余 attrs 之后、恒在行尾。
 //
-// 顺序（两 handler 一致）：
+// 顺序：
 //
-//	time → level → service(如有) → env(如有) → trace_id(如有) → req_id(如有) → msg → source(可选) → 其余 attrs
+//	time → level → service(如有) → env(如有) → trace_id(如有) → req_id(如有) → msg → 其余 attrs → source(如有，行尾)
 //
-// 挑选规则（双源，两个 handler 一致；四个 key 各自独立判定）：
+// 挑选规则（双源，console 与文件 text sink 一致——同一渲染器；四个 key 各自独立判定）：
 //   - record 顶层优先于 h.attrs（ctx 注入是请求级最新事实）：两源并存时前置 record 的值，
 //     h.attrs 中同名项被去重剔除；
 //   - h.attrs 内同一 key 出现多次时取最后一次出现的值，其余全部剔除（不改动 WithAttrs 的

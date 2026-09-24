@@ -32,7 +32,11 @@ const (
 	colorReset     = "\033[0m"
 )
 
-// consoleHandler 彩色控制台 slog.Handler
+// consoleHandler 彩色控制台 slog.Handler，同时是文件 text sink（FormatText）的
+// 渲染实现——文件通道以 NoColor: true 形态复用本 handler（见 newFileHandler），
+// 两通道字节等同由单一实现构造性成立。
+// 字段次序：time → level → service/env/trace_id/req_id（如有）→ msg → 其余 attrs →
+// source（若启用，恒在行尾）。
 // 注意：mu 用指针共享，WithAttrs/WithGroup 派生时值拷贝安全；
 // w 构造后固定（输出目标切换 = 重建 logger，不支持热替换）。
 type consoleHandler struct {
@@ -63,7 +67,10 @@ var bufPool = sync.Pool{
 // maxPooledBufSize 允许放回池中的缓冲容量上限（超出则丢弃，交由 GC 回收）
 const maxPooledBufSize = 4096
 
-// Handle 拼装完整行后一次性写入（整行加锁，避免并发写交错）
+// Handle 拼装完整行后一次性写入（整行加锁，避免并发写交错）。
+// 字段次序：time → level → service/env/trace_id/req_id（如有）→ msg → 其余 attrs →
+// source（若启用，恒在行尾）。字段间以 sep() 补单个空格：首个字段（time 零值时被跳过）
+// 前不留行首空格。
 func (h *consoleHandler) Handle(_ context.Context, r slog.Record) error {
 	buf := bufPool.Get().([]byte)[:0]
 	defer func() {
@@ -72,8 +79,16 @@ func (h *consoleHandler) Handle(_ context.Context, r slog.Record) error {
 		}
 	}()
 
+	// sep 在字段间补单个空格；首个字段（time 可能零值被跳过）不留行首空格
+	sep := func() {
+		if len(buf) > 0 {
+			buf = append(buf, ' ')
+		}
+	}
+
 	// 时间戳（彩色），格式 "2006-01-02 15:04:05.000"
 	if !r.Time.IsZero() {
+		sep()
 		if !h.opts.NoColor {
 			buf = append(buf, colorTimestamp...)
 		}
@@ -83,40 +98,31 @@ func (h *consoleHandler) Handle(_ context.Context, r slog.Record) error {
 		}
 	}
 
-	// 级别（彩色）
-	buf = append(buf, ' ')
+	// 级别（彩色）：裸词无括号；ANSI 仅叠加在级别词本身；time 零值时不留行首空格
+	sep()
 	if !h.opts.NoColor {
 		buf = append(buf, levelColor(r.Level)...)
 	}
-	buf = append(buf, '[')
 	buf = append(buf, formatLevel(r.Level)...)
-	buf = append(buf, ']')
 	if !h.opts.NoColor {
 		buf = append(buf, colorReset...)
 	}
 
-	// 前置字段 service/env/trace_id/req_id：与 fileText 共享双源挑选判据（record 顶层 + h.attrs，
-	// 见 record_fields.go），按 frontFieldKeys 固定次序前置到消息之前。
-	// console 风格——key 上色、值不上色不加引号（与该 handler 现有 attr 输出一致）。
+	// 前置字段 service/env/trace_id/req_id：双源挑选判据见 record_fields.go，
+	// 按 frontFieldKeys 固定次序前置到消息之前。
+	// 版式——裸值、无 key= 前缀、按 needsQuoting 规则可选加引号；
+	// NoColor 时整行与文件 text sink 等同（同一实现），彩色仅在时间/级别词/attr key 上叠加。
 	picked := pickFrontFields(r, h.attrs, h.groups)
 	for _, key := range frontFieldKeys {
 		if v := picked.get(key); v != "" {
-			buf = h.appendColoredKey(buf, key)
-			buf = append(buf, v...)
+			sep()
+			buf = appendQuoted(buf, v)
 		}
 	}
 
-	// 消息本体不上色
-	buf = append(buf, ' ')
+	// 消息本体原样输出、不上色、不加引号
+	sep()
 	buf = append(buf, r.Message...)
-
-	// 源码位置
-	if h.opts.AddSource && r.PC != 0 {
-		if src, ok := sourceFromPC(r.PC); ok {
-			buf = append(buf, " source="...)
-			buf = append(buf, src...)
-		}
-	}
 
 	// 属性：先输出 WithAttrs 累积的 h.attrs，再输出记录自身 attrs
 	// （两循环均跳过已前置的前置字段，避免消息之后重复；h.attrs 带分组前缀时
@@ -132,6 +138,16 @@ func (h *consoleHandler) Handle(_ context.Context, r slog.Record) error {
 		buf = h.appendAttr(buf, a, prefix)
 		return true
 	})
+
+	// 源码位置：仅当 AddSource 且 r.PC != 0，恒在行尾（其余 attrs 之后）。
+	// source= 保持 k=v，值走 appendQuoted；彩色模式下 key 不上色（与 attrs 染色 key 有意不同）。
+	if h.opts.AddSource && r.PC != 0 {
+		if src, ok := sourceFromPC(r.PC); ok {
+			sep()
+			buf = append(buf, "source="...)
+			buf = appendQuoted(buf, src)
+		}
+	}
 
 	buf = append(buf, '\n')
 
@@ -216,24 +232,8 @@ func (h *consoleHandler) appendAttr(buf []byte, a slog.Attr, prefix string) []by
 		buf = append(buf, colorReset...)
 	}
 
-	return appendValue(buf, a.Value)
-}
-
-// appendColoredKey 输出一个 console 风格的固定字段 key（前导空格 + 可选上色 key + '='），
-// 值由调用方按 console 观感追加（不上色、不加引号）。专用于前置字段（service/env/trace_id/
-// req_id）这类需前置到消息之前、且不参与分组前缀的固定字段，key 上色风格与 appendAttr 保持一致。
-func (h *consoleHandler) appendColoredKey(buf []byte, key string) []byte {
-	if !h.opts.NoColor {
-		buf = append(buf, colorKey...)
-	}
-	buf = append(buf, ' ')
-	buf = append(buf, key...)
-	buf = append(buf, '=')
-	if !h.opts.NoColor {
-		buf = append(buf, colorReset...)
-	}
-
-	return buf
+	// 值渲染：string 按 needsQuoting 规则可选加引号，其余 Kind 复用 appendValue
+	return appendTextValue(buf, a.Value)
 }
 
 // formatLevel 级别缩写（4 字符）
@@ -328,4 +328,36 @@ func sourceFromPC(pc uintptr) (string, bool) {
 	}
 
 	return fmt.Sprintf("%s:%d", f.File, f.Line), true
+}
+
+// needsQuoting 判断字符串是否需要加引号包裹：当且仅当包含空格、制表、'='、'"'、
+// 反斜杠或控制字符（不可打印字符）。对齐标准 log/slog TextHandler 规则。
+func needsQuoting(s string) bool {
+	for _, r := range s {
+		if r == ' ' || r == '\t' || r == '=' || r == '"' || r == '\\' || !strconv.IsPrint(r) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// appendQuoted 输出字符串：需要时以双引号包裹并转义（" \ 及控制字符，由
+// strconv.AppendQuote 处理），否则原样输出。
+func appendQuoted(buf []byte, s string) []byte {
+	if needsQuoting(s) {
+		return strconv.AppendQuote(buf, s)
+	}
+
+	return append(buf, s...)
+}
+
+// appendTextValue 输出 slog.Value：字符串按 quoting 规则处理，其余 Kind 复用
+// 同包 appendValue（其内部已处理各 Kind）。Group 理论上已在 appendAttr 展开。
+func appendTextValue(buf []byte, v slog.Value) []byte {
+	if v.Kind() == slog.KindString {
+		return appendQuoted(buf, v.String())
+	}
+
+	return appendValue(buf, v)
 }

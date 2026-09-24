@@ -196,11 +196,9 @@ func TestSensitiveReservedTraceKeysExempt(t *testing.T) {
 	l.InfoContext(ctx, "login", "sessionid", "sess-hide")
 
 	got := buf.String()
-	if !strings.Contains(got, "trace_id=trace-keep") {
-		t.Errorf("expected trace_id kept intact, got: %s", got)
-	}
-	if !strings.Contains(got, "req_id=req-keep") {
-		t.Errorf("expected req_id kept intact, got: %s", got)
+	// console 裸值版式：ctx 注入的 trace_id/req_id 前置为裸值，豁免打码即值原样出现
+	if !strings.Contains(got, "trace-keep req-keep") {
+		t.Errorf("expected trace/req bare values kept intact, got: %s", got)
 	}
 	if strings.Contains(got, "sess-hide") || !strings.Contains(got, "sessionid=******") {
 		t.Errorf("expected sessionid still masked by substring key, got: %s", got)
@@ -238,8 +236,8 @@ func TestSensitiveReservedKeysExemptWithCustomMatch(t *testing.T) {
 	l.InfoContext(ctx, "m", "deviceid", "dev-hide")
 
 	got := buf.String()
-	if !strings.Contains(got, "trace_id=custom-keep") {
-		t.Errorf("expected trace_id exempt under custom match, got: %s", got)
+	if !strings.Contains(got, "custom-keep") {
+		t.Errorf("expected bare trace_id exempt under custom match, got: %s", got)
 	}
 	if strings.Contains(got, "dev-hide") {
 		t.Errorf("expected deviceid masked, got: %s", got)

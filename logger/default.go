@@ -186,7 +186,7 @@ func (l *slogLogger) rebuild() {
 			Level:     lvl,
 			AddSource: l.opt.Source,
 			ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
-				// 时间格式化为 "2006-01-02 15:04:05.000"（JSON handler 用；text 由自研 handler 内部固定）
+				// 时间格式化为 "2006-01-02 15:04:05.000"（JSON handler 用；text 形态由 console 渲染器内部固定）
 				if a.Key == slog.TimeKey && len(groups) == 0 {
 					a.Value = slog.StringValue(a.Value.Time().Format("2006-01-02 15:04:05.000"))
 				}
@@ -243,21 +243,22 @@ func shouldEnableConsole(hasConsole, hasFile bool) bool {
 }
 
 // newFileHandler 按 format 枚举选择文件输出后端（仅作用于文件 handler，控制台不受影响）：
-//   - FormatText → 自研排序 handler newFileTextHandler，字段顺序固定为
-//     time/level/service(如有)/env(如有)/trace_id(如有)/req_id(如有)/msg/source(可选)/其余 attrs，
-//     时间格式由该 handler 内部固定为 "2006-01-02 15:04:05.000"（不吃标准 HandlerOptions）；
+//   - FormatText → console 渲染器（console.go）的 NoColor 形态，字段顺序固定为
+//     time/level/service(如有)/env(如有)/trace_id(如有)/req_id(如有)/msg/其余 attrs/source(可选，行尾)，
+//     时间格式由渲染器内部固定为 "2006-01-02 15:04:05.000"（不吃标准 HandlerOptions 的 TimeFormat）；
 //   - FormatJSON（默认，含任何非 FormatText 值）→ slog.NewJSONHandler，保持既有行为。
 //
 // handlerOpts 由调用方（rebuild）统一构建：JSON 分支完整复用（Level/AddSource/ReplaceAttr 时间定制）；
-// text 分支自研 handler 不识别标准 HandlerOptions，仅从中取 Level/AddSource 两个字段。
+// text 分支复用 console 渲染器，不识别标准 HandlerOptions，仅从中取 Level/AddSource 两个字段。
 func newFileHandler(w io.Writer, format FileFormat, handlerOpts *slog.HandlerOptions) slog.Handler {
 	switch format {
 	case FormatJSON:
 		return slog.NewJSONHandler(w, handlerOpts)
 	case FormatText:
-		return newFileTextHandler(w, &FileTextOptions{
+		return NewConsoleHandler(w, &ConsoleOptions{
 			Level:     handlerOpts.Level,
 			AddSource: handlerOpts.AddSource,
+			NoColor:   true,
 		})
 	default: // 零值 ""（语义等同 JSON）及未来新增未知值回退 JSON；
 		// 显式枚举分支让 exhaustive 类 linter 在新增 FileFormat 常量时报警提醒补分支

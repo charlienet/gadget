@@ -13,9 +13,13 @@
 //
 // WithService / WithEnv 在 New 时注入 service / env 属性，随每条日志输出。
 //
-// 在自研 console / fileText（FormatText）handler 中，service / env 与下方 trace_id / req_id
-// 一并前置到 msg 之前（固定次序 service → env → trace_id → req_id），并按 record 优先去重；
-// JSON handler（FormatJSON）走标准语义，不套用该布局。详见 README「身份与链路字段前置」。
+// 在自研 console handler（文件 text sink FormatText 即其 NoColor 形态，同一实现）中，
+// service / env 与下方 trace_id / req_id 一并前置到 msg 之前（固定次序
+// service → env → trace_id → req_id），并按 record 优先去重；版式：前置段（time / level /
+// 命中字段）与 msg 均为裸值（无 key= 前缀、msg 不加引号），source= 与其余 attrs 保持 k=v，
+// source（若启用）恒在行尾；控制台通道仅在此之上叠加 ANSI 颜色，关闭颜色后两通道字节等同。
+// JSON handler（FormatJSON）走标准语义，不套用该布局。
+// 详见 README「身份与链路字段前置」。
 //
 // # 链路追踪
 //
@@ -34,7 +38,7 @@
 //   - WithConsole(opts...) 启用彩色控制台；子选项 WithConsoleWriter(w) 指定 writer
 //     （缺省 os.Stdout）、WithConsoleColor(b) 控制颜色（缺省自动：NO_COLOR + 是否 TTY）。
 //   - WithFile(path, opts...) 启用文件 sink（lumberjack 按大小 / 按日期轮换）；
-//     子选项 WithFormat(logger.FormatText) 切换自研排序 text handler（默认 FormatJSON）。
+//     子选项 WithFormat(logger.FormatText) 切换 text 输出（console 渲染器 NoColor 形态，默认 FormatJSON）。
 //
 // 两者皆未声明时兜底一个 stdout 控制台，保证 logger.New() 零配置开箱即用、包级日志不静默；
 // 仅声明 WithFile 则纯文件输出、不写 stdout；WithConsole + WithFile 即双端输出。

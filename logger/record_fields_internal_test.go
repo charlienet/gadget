@@ -10,7 +10,7 @@ import (
 )
 
 // assertFieldOrder 断言输出行中各 key 的首次出现位置严格递增（用于跨 console/fileText
-// 校验字段顺序一致，忽略各自的引号/括号/颜色差异）。
+// 校验字段顺序一致，忽略各自的引号/颜色差异）。
 func assertFieldOrder(t *testing.T, line string, keys []string) {
 	t.Helper()
 	prev := -1
@@ -35,7 +35,7 @@ func TestConsoleAndFileTextShareFieldOrder(t *testing.T) {
 	var cbuf, fbuf bytes.Buffer
 	preset := []slog.Attr{slog.String(AttrService, "svc-1"), slog.String(AttrEnv, "prod")}
 	console := NewTraceHandler(NewConsoleHandler(&cbuf, &ConsoleOptions{Level: slog.LevelInfo, NoColor: true})).WithAttrs(preset)
-	fileText := NewTraceHandler(newFileTextHandler(&fbuf, &FileTextOptions{Level: slog.LevelInfo})).WithAttrs(preset)
+	fileText := NewTraceHandler(newFileHandler(&fbuf, FormatText, &slog.HandlerOptions{Level: slog.LevelInfo})).WithAttrs(preset)
 
 	render := func(h slog.Handler, out *bytes.Buffer) string {
 		r := slog.NewRecord(time.Now(), slog.LevelInfo, "shared order", 0)
@@ -49,9 +49,9 @@ func TestConsoleAndFileTextShareFieldOrder(t *testing.T) {
 	cline := render(console, &cbuf)
 	fline := render(fileText, &fbuf)
 
-	keys := []string{"service=", "env=", "trace_id=", "req_id=", "shared order", "user="}
-	assertFieldOrder(t, cline, keys)
-	assertFieldOrder(t, fline, keys)
+	// console 与 fileText 共享同一裸值版式：前置段裸值（无 key= 前缀）、msg 原样
+	assertFieldOrder(t, cline, []string{"svc-1", "prod", "t-1", "r-1", "shared order", "user="})
+	assertFieldOrder(t, fline, []string{"svc-1", "prod", "t-1", "r-1", "shared order", "user="})
 }
 
 // TestScanFrontFieldsIgnoresNonStringAndGroup：挑选判据边界——
@@ -81,7 +81,9 @@ func TestScanFrontFieldsIgnoresNonStringAndGroup(t *testing.T) {
 
 // --- 双源挑选/去重契约：console 与 fileText 各跑一遍 ---
 
-// traceRenderCase 抽象两个自研 handler 的构造差异，便于同一契约测试各跑一遍。
+// traceRenderCase 抽象控制台与文件 text sink 两条通道的构造差异（文件通道为 console
+// 渲染器 NoColor 形态），便于同一契约测试各跑一遍。
+// 两者共享同一裸值版式，前置字段断言 token 即裸值本身。
 type traceRenderCase struct {
 	name  string
 	build func(*bytes.Buffer) slog.Handler
@@ -98,7 +100,7 @@ func traceRenderCases() []traceRenderCase {
 		{
 			name: "fileText",
 			build: func(b *bytes.Buffer) slog.Handler {
-				return newFileTextHandler(b, &FileTextOptions{Level: slog.LevelInfo})
+				return newFileHandler(b, FormatText, &slog.HandlerOptions{Level: slog.LevelInfo})
 			},
 		},
 	}
@@ -115,20 +117,19 @@ func renderTraceLine(t *testing.T, h slog.Handler, buf *bytes.Buffer, ctx contex
 	return strings.TrimSpace(buf.String())
 }
 
-// assertPromotedBeforeMsg 断言 key=value 出现在 msg 之前，且该 key 全行仅出现一次。
-func assertPromotedBeforeMsg(t *testing.T, line, msg, keyValue string) {
+// assertPromotedBeforeMsg 断言裸值 token 出现在 msg 之前，且全行恰好出现一次。
+func assertPromotedBeforeMsg(t *testing.T, line, msg, token string) {
 	t.Helper()
 	msgIdx := strings.Index(line, msg)
-	idx := strings.Index(line, keyValue)
+	idx := strings.Index(line, token)
 	if msgIdx < 0 || idx < 0 {
-		t.Fatalf("expected %q and msg %q present in: %q", keyValue, msg, line)
+		t.Fatalf("expected %q and msg %q present in: %q", token, msg, line)
 	}
 	if idx >= msgIdx {
-		t.Errorf("expected %q before msg, got: %q", keyValue, line)
+		t.Errorf("expected %q before msg, got: %q", token, line)
 	}
-	key := keyValue[:strings.Index(keyValue, "=")+1]
-	if n := strings.Count(line, key); n != 1 {
-		t.Errorf("expected key %q exactly once, got %d in: %q", key, n, line)
+	if n := strings.Count(line, token); n != 1 {
+		t.Errorf("expected %q exactly once, got %d in: %q", token, n, line)
 	}
 }
 
@@ -144,10 +145,12 @@ func TestWithPresetTraceIDsPromoted(t *testing.T) {
 			})
 			line := renderTraceLine(t, h, &buf, context.Background(), "hello")
 
-			assertPromotedBeforeMsg(t, line, "hello", "trace_id=t-with")
-			assertPromotedBeforeMsg(t, line, "hello", "req_id=r-with")
+			assertPromotedBeforeMsg(t, line, "hello", "t-with")
+			assertPromotedBeforeMsg(t, line, "hello", "r-with")
 			// 锁两 key 相对次序：trace_id → req_id → msg
-			assertFieldOrder(t, line, []string{"trace_id=", "req_id=", "hello"})
+			assertFieldOrder(t, line, []string{
+				"t-with", "r-with", "hello",
+			})
 		})
 	}
 }
@@ -167,8 +170,8 @@ func TestRecordWinsOverWithTraceIDs(t *testing.T) {
 
 			line := renderTraceLine(t, h, &buf, ctx, "hello")
 
-			assertPromotedBeforeMsg(t, line, "hello", "trace_id=t-ctx")
-			assertPromotedBeforeMsg(t, line, "hello", "req_id=r-ctx")
+			assertPromotedBeforeMsg(t, line, "hello", "t-ctx")
+			assertPromotedBeforeMsg(t, line, "hello", "r-ctx")
 			if strings.Contains(line, "t-with") || strings.Contains(line, "r-with") {
 				t.Errorf("expected h.attrs values deduped, got: %q", line)
 			}
@@ -188,7 +191,7 @@ func TestWithAttrsDuplicateTraceIDTakesLast(t *testing.T) {
 
 			line := renderTraceLine(t, h, &buf, context.Background(), "hello")
 
-			assertPromotedBeforeMsg(t, line, "hello", "trace_id=t-second")
+			assertPromotedBeforeMsg(t, line, "hello", "t-second")
 			if strings.Contains(line, "t-first") {
 				t.Errorf("expected earlier duplicate dropped, got: %q", line)
 			}
@@ -255,15 +258,21 @@ func TestWithPresetAllFrontFieldsPromoted(t *testing.T) {
 			h := tc.build(&buf).WithAttrs([]slog.Attr{
 				slog.String(AttrService, "svc"),
 				slog.String(AttrEnv, "prod"),
-				slog.String(AttrTraceID, "t"),
-				slog.String(AttrReqID, "r"),
+				slog.String(AttrTraceID, "tt"),
+				slog.String(AttrReqID, "rr"),
 			})
 			line := renderTraceLine(t, h, &buf, context.Background(), "hello")
 
 			// 锁死四 key 相对次序：service → env → trace_id → req_id → msg
-			assertFieldOrder(t, line, []string{"service=", "env=", "trace_id=", "req_id=", "hello"})
-			for _, kv := range []string{"service=svc", "env=prod", "trace_id=t", "req_id=r"} {
-				assertPromotedBeforeMsg(t, line, "hello", kv)
+			assertFieldOrder(t, line, []string{
+				"svc", "prod",
+				"tt", "rr", "hello",
+			})
+			for _, tok := range []string{
+				"svc", "prod",
+				"tt", "rr",
+			} {
+				assertPromotedBeforeMsg(t, line, "hello", tok)
 			}
 		})
 	}
@@ -283,7 +292,7 @@ func TestRecordWinsOverWithService(t *testing.T) {
 			}
 			line := strings.TrimSpace(buf.String())
 
-			assertPromotedBeforeMsg(t, line, "hello", "service=svc-rec")
+			assertPromotedBeforeMsg(t, line, "hello", "svc-rec")
 			if strings.Contains(line, "svc-with") {
 				t.Errorf("expected With service deduped, got: %q", line)
 			}
@@ -302,7 +311,7 @@ func TestWithAttrsDuplicateServiceTakesLast(t *testing.T) {
 
 			line := renderTraceLine(t, h, &buf, context.Background(), "hello")
 
-			assertPromotedBeforeMsg(t, line, "hello", "service=svc-second")
+			assertPromotedBeforeMsg(t, line, "hello", "svc-second")
 			if strings.Contains(line, "svc-first") {
 				t.Errorf("expected earlier duplicate dropped, got: %q", line)
 			}
@@ -371,8 +380,8 @@ func TestEmptyRecordServiceYieldsWith(t *testing.T) {
 			}
 			line := strings.TrimSpace(buf.String())
 
-			// With 值顶位前置，且全行 service 只出现一次（空串 record 项亦被去重）
-			assertPromotedBeforeMsg(t, line, "hello", "service=svc-with")
+			// With 值顶位前置，且全行该字段只出现一次（空串 record 项亦被去重）
+			assertPromotedBeforeMsg(t, line, "hello", "svc-with")
 		})
 	}
 }
@@ -393,10 +402,12 @@ func TestMixedSourceFrontFields(t *testing.T) {
 			line := strings.TrimSpace(buf.String())
 
 			// 两值均前置、各唯一
-			assertPromotedBeforeMsg(t, line, "hello", "service=svc-with")
-			assertPromotedBeforeMsg(t, line, "hello", "env=env-rec")
+			assertPromotedBeforeMsg(t, line, "hello", "svc-with")
+			assertPromotedBeforeMsg(t, line, "hello", "env-rec")
 			// 交叉来源下仍按 frontFieldKeys 固定次序：service（attrs）→ env（record）→ msg
-			assertFieldOrder(t, line, []string{"service=", "env=", "hello"})
+			assertFieldOrder(t, line, []string{
+				"svc-with", "env-rec", "hello",
+			})
 		})
 	}
 }
@@ -414,10 +425,12 @@ func TestMixedSourceServiceAttrsTraceRecord(t *testing.T) {
 
 			line := renderTraceLine(t, h, &buf, ctx, "hello")
 
-			assertPromotedBeforeMsg(t, line, "hello", "service=svc-with")
-			assertPromotedBeforeMsg(t, line, "hello", "trace_id=t-ctx")
+			assertPromotedBeforeMsg(t, line, "hello", "svc-with")
+			assertPromotedBeforeMsg(t, line, "hello", "t-ctx")
 			// service（attrs 源）先于 trace_id（record 源），二者均前置
-			assertFieldOrder(t, line, []string{"service=", "trace_id=", "hello"})
+			assertFieldOrder(t, line, []string{
+				"svc-with", "t-ctx", "hello",
+			})
 		})
 	}
 }

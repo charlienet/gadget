@@ -218,7 +218,7 @@ func TestFatalFlushesAsyncDefault(t *testing.T) {
 		t.Errorf("expected exit 1, got %d", exitCode)
 	}
 	// 未经包级 Close：Fatal 内部已 flush 异步队列
-	if !strings.Contains(buf.String(), "[FATA] fatal async msg") {
+	if !strings.Contains(buf.String(), "FATA fatal async msg") {
 		t.Errorf("expected fatal msg flushed synchronously by Fatal, got: %q", buf.String())
 	}
 }

@@ -168,11 +168,9 @@ func TestAsyncTraceCtx(t *testing.T) {
 	_ = logger.Close(2 * time.Second) // flush 异步队列
 
 	got := buf.String()
-	if !strings.Contains(got, "trace_id=async-trace") {
-		t.Errorf("expected trace_id through async, got: %q", got)
-	}
-	if !strings.Contains(got, "req_id=async-req") {
-		t.Errorf("expected req_id through async, got: %q", got)
+	// console 裸值版式：trace_id/req_id 前置为裸值（async-trace / async-req）
+	if !strings.Contains(got, "async-trace async-req") {
+		t.Errorf("expected bare trace/req through async, got: %q", got)
 	}
 }
 
