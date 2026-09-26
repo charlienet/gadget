@@ -49,8 +49,11 @@
 //   - WithSyslog(address, opts...) 启用 syslog sink：逐条发送 RFC5424 报文、\n 分帧，适配对端
 //     Vector syslog source（自动识别 5424）。连接懒建 / 断线后台重连，失败期间该条丢弃 + stderr
 //     限流告警，绝不阻塞调用方超过 Timeout。HOSTNAME 位=对端落盘归属（建议服务名），缺省链
-//     Hostname > Options.Service > os.Hostname()。单帧上限 102400 字节（对端 max_length 实配，
-//     超限帧被对端静默丢弃）：超限自动截断 MSG 体、保留 …[truncated] 标记并回退到 UTF-8 字符边界。
+//     Hostname > Options.Service > os.Hostname()，结果经白名单 sanitize（[a-zA-Z0-9._-] 外
+//     字符→'-'、空→'-'，与 http 帧 src 对称防御；APP-NAME/PROCID 不净化）。单帧预算：
+//     TCP 102400（对端 max_length 实配，超限帧被对端静默丢弃）/ UDP 65507（RFC 768 单数据报
+//     载荷上限，保证截断帧完整可发）：超限自动截断 MSG 体、保留 …[truncated] 标记并回退到
+//     UTF-8 字符边界。
 //     TIMESTAMP 恒为 UTC Z 或 +HH:MM 带冒号形态（规避对端 +0800 无冒号静默丢帧坑）。
 //     子选项 WithSyslogNetwork/Tag/Hostname/Facility/Format/Timeout。
 //   - WithHTTP(url, opts...) 启用 http sink：以 NDJSON 批量 POST 到远端 HTTP 收集端（适配对端
@@ -60,7 +63,10 @@
 //     与 console/文件 text 同源；FormatJSON 为整条 JSON 记录串、可被对端再解析——信封与
 //     单行帧形两种版式下恒定），src 决定落盘文件名、
 //     缺省链 Src > Options.Service > os.Hostname()，对端字符集 [a-zA-Z0-9._-] 由库构建期
-//     sanitize 兜底（越界字符替换为 '-'、保证非空），建议显式配置合规名。
+//     sanitize 兜底（越界字符替换为 '-'、保证非空），建议显式配置合规名。单帧护栏（库侧
+//     自律预算 102400 含帧分隔换行，对端 framing.max_length 默认无限制故主动防御）：超限截
+//     message、尾记 …[truncated] 后重新 Marshal（转义膨胀按实测计入、UTF-8 边界回退，整帧
+//     必达标）；FormatJSON 版式截断后 message 为残缺 JSON 前缀文本（信封仍合法、单行不破）。
 //     攒满 BatchSize 或 FlushInterval 到点即换出，
 //     由独立发送 worker 做网络 IO（日志调用方只缓冲，永不受网络耗时阻塞）；网络错误 / 5xx / 408 / 429
 //     整批指数退避重试（含首次共 3 次尝试），其余 4xx（对端任一坏帧即整批 400）为确定性失败**不重试**；

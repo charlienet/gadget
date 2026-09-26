@@ -255,8 +255,10 @@ outputs:
 单条报文：`<PRI>1 <RFC3339毫秒> <HOSTNAME> <APP-NAME> <PROCID> <MSGID> <SD-ID> <MSG>\n`
 
 - **PRI = facility × 8 + severity**；
-- **HOSTNAME 位 = 对端落盘归属（src 语义）**：建议显式配置服务名；缺省链
-  `Hostname` > `Config.Service` > `os.Hostname()`（见上 Option / yaml 注释）；
+- **HOSTNAME 位 = 对端落盘归属（src 语义，决定落盘文件名）**：建议显式配置服务名；缺省链
+  `Hostname` > `Config.Service` > `os.Hostname()`（见上 Option / yaml 注释），结果经
+  **白名单 sanitize**——与 http 帧 `src` 同一防御（`[a-zA-Z0-9._-]` 之外字符替换为 `-`、
+  空值回退 `-`；APP-NAME / PROCID 不净化，不决定文件名）；
 - **TIMESTAMP** 采用 Go 布局 `2006-01-02T15:04:05.000Z07:00`：输出恒为 UTC `Z` 或
   `+HH:MM` **带冒号**形态——规避对端实测的 `+0800` 无冒号形态被 Vector syslog source
   **静默丢帧**的坑（本机时区非 UTC 时 Go 也只会产出带冒号偏移，无需特殊配置）；
@@ -289,14 +291,16 @@ sources:
 ```
 
 - **分帧**：本后端每条报文以 `\n` 结尾，Vector syslog source 按 newline 拆帧、自动解析 RFC5424 头部；
-- **单帧上限 102400（超限客户端截断）**：对端 syslog source 实配 `max_length: 102400`，
-  超限帧会被对端**静默丢弃**，截断责任在客户端——本后端对整帧（含尾 `\n`）超过 102400 字节的
-  报文自动截短 MSG 体并保留 `…[truncated]` 收尾标记，截断点回退到 UTF-8 字符边界（绝不产出
-  残缺多字节序列）；截断是确定性策略而非故障，不告警、不计 dropped（包内可观测计数）；
-- **UDP ≤4KB**：UDP 每条报文为**单个数据报**（不拆包），且 IPv4 UDP 载荷受协议上限约束
-  （截断到 102400 的极端帧在 UDP 下也会因超过单数据报上限而写失败），建议 `format: json` +
-  控制属性体量使整包不超过约 4KB，避免超过 MTU 触发 IP 分片被丢弃（`Timeout` 仅约束读写，
-  不重试 UDP 丢包）；超长日志场景请走 `network: tcp`；
+- **单帧上限截断（分协议预算）**：TCP 帧预算 **102400**（= 对端 syslog source 实配
+  `max_length`，超限帧被对端静默丢弃，截断归客户端）；UDP 帧预算 **65507**（IPv4 单数据报
+  载荷协议上限，RFC 768——截到 102400 仍会 `EMSGSIZE` 整帧丢，故取 `min(max_length, 65507)`
+  保证截断后的数据报**完整可发**）。超限自动截短 MSG 体、尾部保留 `…[truncated]` 标记，
+  截断点回退 UTF-8 字符边界（绝不产出残缺序列）；截断是确定性策略而非故障，不告警、
+  不计 dropped（包内可观测计数）；
+- **UDP ≤4KB**：UDP 每条报文为**单个数据报**（不拆包），虽然护栏保证截断后可发，但接近
+  64KB 的数据报在真实网络仍可能因超过 MTU 触发 IP 分片被丢弃，建议 `format: json` +
+  控制属性体量使整包不超过约 4KB（`Timeout` 仅约束读写，不重试 UDP 丢包）；常态超长
+  日志（如大堆栈）建议走 `network: tcp`；
 - **失败语义**：连接建立或写入失败 → 该条丢弃 + 下次写入重试 dial + stderr 限流告警（每原因每 5s ≤1 条）；
   进程退出调用 `logger.Close` 关闭连接后不再重连写出。日志可靠性为「尽力而为」，需要不丢日志请配
   `WithAsync` 由异步队列削峰（队列满丢弃策略见「运行时管理」）；
@@ -404,6 +408,13 @@ outputs:
 - **请求头**：`Content-Type: application/json`（服务端不强制，统一发送）；`Gzip` 开启时追加
   `Content-Encoding: gzip`。用户 `Headers` 在默认头**之后**逐条 `Set`，因此可覆写
   `Content-Type`（例如对端要求 `application/x-ndjson`）。
+- **单帧护栏（库侧自律，预算 102400 含帧分隔换行）**：对端 Vector `http_server` 的
+  `framing.max_length` 默认无限制、官方明确警告畸形/超大数据可致内存耗尽，接入指导
+  「禁止单行超长」属客户端自律——本后端默认防御：帧超预算时截短 message（在渲染体上截、
+  截断点回退 UTF-8 边界）并追加 `…[truncated]` 尾记后重新 Marshal（JSON 转义膨胀按每轮
+  实测计入，整帧必达标），信封 `src` 等其余部分不受影响；截断不计 dropped、不告警。
+  `format: "json"` 版式下截断后的 message 为**残缺 JSON 前缀 + 标记**（信封仍是合法
+  JSON 字符串值、帧恒单行；对端再解析会得到解析失败的前缀文本，属截断的既定事实）；
 - **级别门槛**与 console / file / syslog 同一 `Leveler`。
 - **响应**：`2xx` 视为成功（Vector 默认 `response_code: 200`），`4xx`/`5xx` 与网络错误同样判失败。
 
@@ -674,6 +685,20 @@ http sink 的 `Close` 停止发送 worker、把残余缓冲批最后发一次（
 - **后端按节点存在性启用**：`Outputs.Console` / `Outputs.File` 某节点非 nil = 启用该后端，nil = 不启用；两节点皆 nil 由 `New` 兜底 stdout 控制台。未来新增 syslog/http 后端在 `OutputsConfig` 加指针字段即可。
 - `DefaultConfig()` 返回纯 console（`Outputs.Console = &ConsoleConfig{}`、`Outputs.File = nil`），等价旧 `Output: "console"`；文件默认参数（MaxSize 100 / MaxAge 30 / MaxBackups 10 / Compress true / Format "json"）见 `DefaultConfig` 文档中的 `FileConfig` 模板。
 - 黑洞校验措辞随语义更新：`Outputs.File` 节点非 nil 但合并后 `Filename` 为空 → 报错。
+
+## 护栏与单帧限制汇总（契约边界防御）
+
+公共库按契约边界自我完备：以下防御全部为**库内置默认行为**，无配置项、不可关闭，
+超限一律「截断 + 标记 + 计数」而非丢弃（截断是确定性策略：不计 dropped、不告警，
+包内 `truncatedCount` 可观测）：
+
+| 面 | 预算 / 规则 | 值 | 依据与行为 |
+| --- | --- | --- | --- |
+| syslog 单帧（TCP） | `syslogMaxFrame` | 102400 B（含尾 `\n`） | 对端 syslog source 实配 `max_length`，超限帧被**静默丢弃**→ 客户端截 MSG 体、尾记 `…[truncated]`、UTF-8 边界回退 |
+| syslog 单帧（UDP） | `syslogMaxFrameUDP` | 65507 B（含尾 `\n`） | IPv4 单数据报载荷协议上限（RFC 768）；取 `min(max_length, 65507)` 保证截断后数据报**完整可发**（否则 EMSGSIZE 整帧丢、截断白做） |
+| http 单帧 | `httpMaxFrame` | 102400 B（帧体+帧分隔换行） | **库侧自律**（对端 `framing.max_length` 默认无限制且官方警告超大数据内存耗尽；接入指导「禁止单行超长」）→ 截 message 重新 Marshal，信封两键与单行性不破；json 版式截断后 message 为残缺 JSON 前缀文本 |
+| 归属名（http `src` + syslog `HOSTNAME`） | `sanitizeWhitelistName` | 白名单 `[a-zA-Z0-9._-]` | 两处均决定对端**落盘文件名**（实测含 `/..` 送达 200 但文件名污染）→ 构建期越界字符替换 `-`、空回退 `-`；syslog APP-NAME/PROCID 不净化（不决定文件名） |
+| syslog 时间戳 | `syslogTimeLayout` | UTC `Z` / `+HH:MM` | Go `Z07:00` 布局恒带冒号或 Z，规避对端 `+0800` 无冒号静默丢帧坑 |
 
 ## 设计说明
 

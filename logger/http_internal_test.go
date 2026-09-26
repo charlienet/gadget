@@ -15,6 +15,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // ---- 本地 mock 收集端（模拟对端 Vector 0.58 sources.http_server）----
@@ -229,8 +230,8 @@ func waitDropped(t *testing.T, s *httpSink, n uint64, timeout time.Duration) uin
 	}
 }
 
-// httpSrcWhitelistRE 帧 src 对端落盘文件名白名单（[a-zA-Z0-9._-] 非空全匹配）。
-var httpSrcWhitelistRE = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
+// sanitizeWhitelistRE 归属名白名单（[a-zA-Z0-9._-] 非空全匹配）：http 帧 src 与 syslog HOSTNAME 位共用断言。
+var sanitizeWhitelistRE = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
 
 // parseNDJSONLine 断言单行是合法 JSON 并返回字段 map。
 func parseNDJSONLine(t *testing.T, line string) map[string]any {
@@ -304,8 +305,8 @@ func TestHTTP_BatchSizeFlush(t *testing.T) {
 	}
 	for i, want := range []string{"l1", "l2", "l3"} {
 		src, message := parseHTTPFrame(t, got.lines[i])
-		if src != sanitizeHTTPSrc(host) {
-			t.Errorf("第 %d 行 src=%q want %q（Src/Service 皆空回退 os.Hostname 经白名单化）", i+1, src, sanitizeHTTPSrc(host))
+		if src != sanitizeWhitelistName(host) {
+			t.Errorf("第 %d 行 src=%q want %q（Src/Service 皆空回退 os.Hostname 经白名单化）", i+1, src, sanitizeWhitelistName(host))
 		}
 		if !strings.Contains(message, want) {
 			t.Errorf("第 %d 行 message=%q 缺正文 %s", i+1, message, want)
@@ -427,7 +428,7 @@ func TestHTTP_SrcFallbackChain(t *testing.T) {
 	if err != nil {
 		t.Skipf("os.Hostname: %v", err)
 	}
-	hostSanitized := sanitizeHTTPSrc(host)
+	hostSanitized := sanitizeWhitelistName(host)
 	cases := []struct {
 		name    string
 		src     string // HTTPSettings.Src
@@ -457,7 +458,7 @@ func TestHTTP_SrcFallbackChain(t *testing.T) {
 			if gotSrc != c.want {
 				t.Errorf("src=%q want %q", gotSrc, c.want)
 			}
-			if !httpSrcWhitelistRE.MatchString(gotSrc) {
+			if !sanitizeWhitelistRE.MatchString(gotSrc) {
 				t.Errorf("帧 src=%q 含白名单 [a-zA-Z0-9._-] 之外字符", gotSrc)
 			}
 			if !strings.Contains(message, "m") {
@@ -467,7 +468,7 @@ func TestHTTP_SrcFallbackChain(t *testing.T) {
 	}
 }
 
-// sanitizeHTTPSrc 纯函数语义锁定：合规名原样；越界字节逐字节替换为 '-'（不删除、
+// sanitizeWhitelistName 纯函数语义锁定：合规名原样；越界字节逐字节替换为 '-'（不删除、
 // 字节数不变、UTF-8 自同步）；空串回退 '-' 保证帧 src 非空；路径注入样本收敛到白名单。
 func TestSanitizeHTTPSrc(t *testing.T) {
 	cases := []struct{ in, want string }{
@@ -479,8 +480,8 @@ func TestSanitizeHTTPSrc(t *testing.T) {
 		{"服务 名", "----------"},               // 全越界：3+3+1+3 字节 → 10 个 '-'，非空
 	}
 	for _, c := range cases {
-		if got := sanitizeHTTPSrc(c.in); got != c.want {
-			t.Errorf("sanitizeHTTPSrc(%q)=%q want %q", c.in, got, c.want)
+		if got := sanitizeWhitelistName(c.in); got != c.want {
+			t.Errorf("sanitizeWhitelistName(%q)=%q want %q", c.in, got, c.want)
 		}
 	}
 }
@@ -715,6 +716,121 @@ func TestHTTP_GzipJSONFrame(t *testing.T) {
 	b1, _ := parseJSONMessage(t, reqs[0].lines[1])
 	if b0["msg"] != "gj1" || b1["msg"] != "gj2" {
 		t.Errorf("gunzip JSON 内容错误: %v / %v", b0, b1)
+	}
+}
+
+// ---- 单帧护栏（P2：httpMaxFrame=102400 库侧自律预算，帧体+帧分隔换行计入）----
+
+// ~300KB 消息 → 实收帧体 ≤ 102399（整帧含分隔 \n 恰 ≤ 102400）；信封两键、src 完整、
+// message 尾 truncMark；truncatedCount==1、dropped==0；同批短帧零截断（回归）。
+func TestHTTP_FrameTruncateOversized(t *testing.T) {
+	m := newHTTPMock(t)
+	h, s := newHTTPHandler(&HTTPSettings{
+		URL: m.url, BatchSize: 2, FlushInterval: 10 * time.Second, Timeout: 2 * time.Second,
+		Src: "trunc-src",
+	}, "", slog.LevelDebug, false)
+	s.retryBase = 10 * time.Millisecond
+	s.stderr = &stderrBuf{}
+	defer s.Close()
+
+	big := strings.Repeat("z", 300*1024)
+	_ = h.Handle(t.Context(), slog.NewRecord(time.Now(), Info, big, 0))
+	_ = h.Handle(t.Context(), slog.NewRecord(time.Now(), Info, "short-sibling", 0))
+
+	reqs := m.waitReqs(1, 3*time.Second)
+	if len(reqs[0].lines) != 2 {
+		t.Fatalf("批应含 2 帧, got %d", len(reqs[0].lines))
+	}
+	f0 := reqs[0].lines[0]
+	if len(f0) > httpMaxFrame-1 {
+		t.Errorf("帧体 %d 字节超预算 %d（整帧含分隔应 ≤ %d）", len(f0), httpMaxFrame-1, httpMaxFrame)
+	}
+	src0, msg0 := parseHTTPFrame(t, f0)
+	if src0 != "trunc-src" {
+		t.Errorf("src=%q want trunc-src（截断不得伤及信封）", src0)
+	}
+	if !strings.HasSuffix(msg0, truncMark) {
+		t.Errorf("message 尾部缺截断标记, 尾部=%q", msg0[max(0, len(msg0)-30):])
+	}
+	// 短帧同批零截断回归
+	src1, msg1 := parseHTTPFrame(t, reqs[0].lines[1])
+	if src1 != "trunc-src" || !strings.Contains(msg1, "short-sibling") {
+		t.Errorf("短帧信封错误: src=%q msg=%q", src1, msg1)
+	}
+	if strings.Contains(msg1, truncMark) {
+		t.Errorf("短帧不应被截断: %q", msg1)
+	}
+	if n := s.truncatedCount(); n != 1 {
+		t.Errorf("truncatedCount=%d want 1", n)
+	}
+	if n := s.droppedCount(); n != 0 {
+		t.Errorf("截断非故障不应计 dropped, got %d", n)
+	}
+}
+
+// gzip 形态同验：压缩前帧已受限——gunzip 后逐帧仍 ≤ 预算、带标记。
+func TestHTTP_GzipFrameTruncate(t *testing.T) {
+	m := newHTTPMock(t)
+	h, s := newHTTPHandler(&HTTPSettings{
+		URL: m.url, BatchSize: 1, FlushInterval: 10 * time.Second, Timeout: 2 * time.Second,
+		Gzip: true, Src: "gz-tr",
+	}, "", slog.LevelDebug, false)
+	s.stderr = &stderrBuf{}
+	defer s.Close()
+
+	_ = h.Handle(t.Context(), slog.NewRecord(time.Now(), Info, strings.Repeat("g", 300*1024), 0))
+	reqs := m.waitReqs(1, 3*time.Second)
+	if !reqs[0].gzipped {
+		t.Fatal("应走 gzip")
+	}
+	f := reqs[0].lines[0]
+	if len(f) > httpMaxFrame-1 {
+		t.Errorf("gunzip 后帧体 %d 超预算（压缩前必须已截断）", len(f))
+	}
+	if _, msg := parseHTTPFrame(t, f); !strings.HasSuffix(msg, truncMark) {
+		t.Errorf("message 尾缺截断标记: %q", msg[max(0, len(msg)-30):])
+	}
+	if n := s.truncatedCount(); n != 1 {
+		t.Errorf("truncatedCount=%d want 1", n)
+	}
+}
+
+// 多字节边界：中文重复体截断点回退 rune 起始——解码后 message 的汉字区段为完整
+// 3 字节序列整数倍，utf8.ValidString 恒真。
+func TestHTTP_FrameTruncateUTF8Boundary(t *testing.T) {
+	m := newHTTPMock(t)
+	h, s := newHTTPHandler(&HTTPSettings{
+		URL: m.url, BatchSize: 1, FlushInterval: 10 * time.Second, Timeout: 2 * time.Second,
+		Src: "utf-tr",
+	}, "", slog.LevelDebug, false)
+	s.stderr = &stderrBuf{}
+	defer s.Close()
+
+	_ = h.Handle(t.Context(), slog.NewRecord(time.Now(), Info, strings.Repeat("漢", 40000), 0))
+	reqs := m.waitReqs(1, 3*time.Second)
+	_, message := parseHTTPFrame(t, reqs[0].lines[0])
+	if !utf8.ValidString(message) {
+		t.Error("截断后 message 含残缺多字节序列")
+	}
+	if !strings.HasSuffix(message, truncMark) {
+		t.Error("message 尾缺截断标记")
+	}
+	i := strings.Index(message, "漢")
+	if i < 0 {
+		t.Fatal("message 未含汉字区段")
+	}
+	rest := message[i : len(message)-len(truncMark)]
+	if len(rest)%3 != 0 {
+		t.Errorf("汉字区段长度 %d 非 3 的倍数（rune 回退未生效）", len(rest))
+	}
+	for _, r := range rest {
+		if r != '漢' {
+			t.Errorf("区段出现非预期字符 %q", r)
+			break
+		}
+	}
+	if n := s.truncatedCount(); n != 1 {
+		t.Errorf("truncatedCount=%d want 1", n)
 	}
 }
 
@@ -1166,8 +1282,8 @@ func TestInitConsoleAndHTTPEndToEnd(t *testing.T) {
 		t.Fatalf("os.Hostname: %v", err)
 	}
 	src, message := parseHTTPFrame(t, reqs[0].lines[0])
-	if src != sanitizeHTTPSrc(host) {
-		t.Errorf("src=%q want %q（Src/Service 皆空回退 os.Hostname 经白名单化）", src, sanitizeHTTPSrc(host))
+	if src != sanitizeWhitelistName(host) {
+		t.Errorf("src=%q want %q（Src/Service 皆空回退 os.Hostname 经白名单化）", src, sanitizeWhitelistName(host))
 	}
 	if !strings.Contains(message, "fanout-both") || !strings.Contains(message, "k=v") {
 		t.Errorf("http 侧 message=%q want 含 fanout-both 与 k=v", message)

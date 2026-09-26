@@ -124,7 +124,8 @@ type SyslogConfig struct {
 	Tag string `yaml:"tag" json:"tag" mapstructure:"tag"`
 
 	// Hostname RFC5424 HOSTNAME。对端语义：hostname 位 = 服务归属（决定落盘归属），
-	// 建议显式配置服务名；空则回退 Config.Service，再空回退 os.Hostname() → WithSyslogHostname
+	// 建议显式配置服务名；空则回退 Config.Service，再空回退 os.Hostname()；缺省链结果经
+	// 白名单 sanitize（[a-zA-Z0-9._-] 外字符→'-'、空→'-'，与 http Src 对称防御）→ WithSyslogHostname
 	Hostname string `yaml:"hostname" json:"hostname" mapstructure:"hostname"`
 
 	// Facility syslog 设施名（空默认 "user"(1)；支持 kern/user/daemon/local0-local7 等标准名，

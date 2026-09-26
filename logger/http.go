@@ -13,6 +13,7 @@ import (
 	"os"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 // http.go：http 后端（slog.Handler），以 NDJSON 批量 POST 到远端 HTTP 收集端，
@@ -29,6 +30,9 @@ import (
 //     注入/污染）；对端落盘**只保留 message 文本**、其余结构化字段
 //     丢弃，故时间/级别/msg/attrs 必须全部拼进 message 自身（经 text 版式渲染器产出单行文本
 //     后再 JSON 字符串编码，见 httpHandler.Handle）；
+//   - 单帧护栏（库侧自律，见 httpMaxFrame）：帧字节数（含帧分隔换行）超 102400 时截
+//     message 使整帧达标、尾部保留 truncMark——对端 Vector http_server framing
+//     max_length 默认无限制且官方警告超大数据可致内存耗尽，公共库默认防御；
 //   - Content-Type 统一发 "application/json"（服务端不强制）；Gzip 开启时置
 //     Content-Encoding: gzip（服务端支持解压）；
 //   - 成功判据：2xx（服务端 response_code 默认 200）；4xx/5xx 视为失败，其中 4xx（排除
@@ -142,6 +146,12 @@ const (
 	httpWarnInterval = 5 * time.Second
 	// httpIdleConnTimeout 连接池空闲上限：短于 Vector 默认 300s 回收，主动淘汰避开重拨竞态。
 	httpIdleConnTimeout = 100 * time.Second
+	// httpMaxFrame 单帧字节上限（帧体 + 帧分隔换行，即帧体预算 httpMaxFrame-1）——
+	// **库侧自律预算**，与 syslog TCP 的 syslogMaxFrame 对齐；非对端硬限：Vector
+	// http_server framing max_length 默认无限制，且官方明确警告畸形/超大数据可致内存
+	// 耗尽，接入指导「禁止单行超长」属客户端自律——公共库按契约边界默认自我完备防御：
+	// 超限时截 message 使整帧 ≤ 预算、message 尾部保留 truncMark（管道见 httpHandler.Handle）。
+	httpMaxFrame = 102400
 )
 
 // httpRetryBase 指数退避起始间隔（包内常量口径，测试经 sink.retryBase 字段缩短节奏，
@@ -190,9 +200,10 @@ type httpSink struct {
 	quit    chan struct{} // Close 信号
 	stopped chan struct{} // worker 已退出（Close 等待该信号后才关 idle 连接）
 
-	closed   bool
-	lastWarn map[string]time.Time // reason → 上次告警时间（限流）
-	dropped  uint64               // 失败/溢出丢弃计数（观测用，见 droppedCount）
+	closed    bool
+	lastWarn  map[string]time.Time // reason → 上次告警时间（限流）
+	dropped   uint64               // 失败/溢出丢弃计数（观测用，见 droppedCount）
+	truncated uint64               // 单帧超限截断计数（观测用，见 truncatedCount；确定性策略非故障，不计 dropped、不告警）
 }
 
 // droppedCount 返回累计丢弃条数（包内测试观测点，与 syslogConn.droppedCount 同构）。
@@ -200,6 +211,14 @@ func (s *httpSink) droppedCount() uint64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.dropped
+}
+
+// truncatedCount 返回累计截断帧数（包内测试观测点，与 syslogConn.truncatedCount 同构）。
+// 截断是对端内存防护下的确定性策略（见 httpMaxFrame），不是故障：不计 dropped、不告警。
+func (s *httpSink) truncatedCount() uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.truncated
 }
 
 // warnLocked 限流输出告警（须持 s.mu）。同一 reason 每 httpWarnInterval 最多 1 条。
@@ -455,26 +474,6 @@ func (s *httpSink) Close() error {
 	return nil
 }
 
-// sanitizeHTTPSrc 把 src 收敛到对端落盘文件名白名单 [a-zA-Z0-9._-]：集合外字节一律
-// 替换为 '-'（ASCII 白名单对 UTF-8 自同步，多字节字符逐字节替换为等量 '-'，不产生
-// 非法 UTF-8）。空串（含全越界再全删的场景不存在——替换非删除，仅输入为空才为空）
-// 回退 "-"，保证帧 src 恒非空、确定性。
-func sanitizeHTTPSrc(src string) string {
-	if src == "" {
-		return "-"
-	}
-	b := []byte(src)
-	for i, c := range b {
-		switch {
-		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
-		case c == '.', c == '_', c == '-':
-		default:
-			b[i] = '-'
-		}
-	}
-	return string(b)
-}
-
 // httpFrame NDJSON 单行帧（对端落盘字段契约，见文件头注释）：仅 src 与 message 两键，
 // 经 encoding/json 紧凑序列化为一行；两字段均走 JSON 字符串转义，防注入且帧内无裸换行。
 type httpFrame struct {
@@ -521,7 +520,7 @@ func newHTTPHandler(settings *HTTPSettings, service string, lvl slog.Leveler, ad
 	}
 
 	// 帧 src 缺省链（构建时一次性解析）：显式 Src > service（Options.Service）> os.Hostname()，
-	// 解析结果统一 sanitize 为对端白名单字符集（保证非空，见 sanitizeHTTPSrc）。
+	// 解析结果统一 sanitize 为对端白名单字符集（保证非空，见 sanitizeWhitelistName）。
 	src := settings.Src
 	if src == "" {
 		src = service
@@ -531,7 +530,7 @@ func newHTTPHandler(settings *HTTPSettings, service string, lvl slog.Leveler, ad
 			src = h
 		}
 	}
-	src = sanitizeHTTPSrc(src)
+	src = sanitizeWhitelistName(src)
 
 	s := &httpSink{
 		stderr:    os.Stderr,
@@ -589,6 +588,47 @@ func newHTTPHandler(settings *HTTPSettings, service string, lvl slog.Leveler, ad
 	return &httpHandler{s: s, inner: inner, level: lvl}, s
 }
 
+// httpMarshalFrame 组装两键帧并施加单帧护栏（httpMaxFrame，库侧自律预算）：
+// envelope Marshal 后帧体超预算（budget = httpMaxFrame-1，预留 1 字节帧分隔换行）时
+// 截渲染体 T 并追加 truncMark 后重新 Marshal，直至帧达标——
+// 实现取「按超额迭代裁剪」的简单正确法：JSON 字符串转义逐字节独立、前缀截短只会减少
+// 转义输出（信封开销与 src 部分恒定），每轮 frame 长度按 ≥1 严格递减必然收敛，
+// 无需按最坏膨胀系数预留余量或二分；转义膨胀天然计入每轮实测长度。
+// 截断点在 T 上回退 UTF-8 rune 起始边界（绝不产出残缺序列）。Format=json 版式下截断后
+// message 为残缺 JSON 前缀 + 标记（落盘仍是合法字符串值，见 README）。
+// 返回 truncated=true 表示发生了截断；空体+标记仍超预算时返回 nil 帧=丢弃信号
+// （信封 + truncMark + 极端超长 src 占满预算，理论不可达，调用方计 dropped）。
+func httpMarshalFrame(src string, text []byte) (frame []byte, truncated bool, err error) {
+	budget := httpMaxFrame - 1
+	frame, err = json.Marshal(httpFrame{Src: src, Message: string(text)})
+	if err != nil || len(frame) <= budget {
+		return frame, false, err
+	}
+	remaining := len(text)
+	for {
+		cut := remaining
+		// 回退到 rune 起始处：text[cut] 为截断点后首字节，延续字节（0b10xxxxxx）则前移；
+		// cut==len(text)（首轮全长、无截断）无需检查，越界防护。
+		for cut > 0 && cut < len(text) && !utf8.RuneStart(text[cut]) {
+			cut--
+		}
+		frame, err = json.Marshal(httpFrame{Src: src, Message: string(text[:cut]) + truncMark})
+		if err != nil {
+			return nil, true, err
+		}
+		if len(frame) <= budget {
+			return frame, true, nil
+		}
+		if cut == 0 {
+			return nil, true, nil
+		}
+		remaining -= len(frame) - budget // 超额即下一步要裁的字节数（转义输出只多裁不少裁，收敛）
+		if remaining < 0 {
+			remaining = 0
+		}
+	}
+}
+
 // Enabled 级别门槛判断（与 inner 同源 Leveler）。
 func (h *httpHandler) Enabled(ctx context.Context, level slog.Level) bool {
 	return h.inner.Enabled(ctx, level)
@@ -613,9 +653,18 @@ func (h *httpHandler) Handle(ctx context.Context, r slog.Record) error {
 		return err
 	}
 	text := bytes.TrimRight(s.buf.Bytes(), "\n") // text 渲染器每行带尾 \n，帧正文不含换行
-	frame, err := json.Marshal(httpFrame{Src: s.src, Message: string(text)})
+	frame, tr, err := httpMarshalFrame(s.src, text)
 	if err != nil { // 两字段皆为 string，理论不可达；防御性返回错误、不 panic
 		return err
+	}
+	if frame == nil {
+		// 极端护栏：信封+标记本身超预算（src 极端超长占满，理论不可达）→ 丢弃该条计 dropped。
+		s.dropped++
+		return nil
+	}
+	if tr {
+		// 截断是确定性策略而非故障：只计数（truncatedCount 观测）、不告警、不计 dropped（与 syslog 一致）。
+		s.truncated++
 	}
 	if len(s.cur) > 0 {
 		s.cur = append(s.cur, '\n')

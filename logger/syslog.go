@@ -41,12 +41,15 @@ const syslogTimeLayout = "2006-01-02T15:04:05.000Z07:00"
 const syslogWarnInterval = 5 * time.Second
 
 // syslogMaxFrame 单帧（整条 RFC5424 报文，含尾部 \n）字节上限 = 对端 Vector syslog
-// source 实配的 max_length。超限帧对端**静默丢帧**，截断责任在客户端（对端接入指导）：
-// 超限时报文 MSG 体截断至整帧恰 ≤ 该值，MSG 尾部保留 syslogTruncMark 标记。
+// source 实配的 max_length（TCP 路径）。超限帧对端**静默丢帧**，截断责任在客户端（对端
+// 接入指导）：超限时报文 MSG 体截断至整帧恰 ≤ 该值，MSG 尾部保留 truncMark 标记。
 const syslogMaxFrame = 102400
 
-// syslogTruncMark 截断标记（追加在截断后的 MSG 尾部，其字节数计入 syslogMaxFrame 预算）。
-const syslogTruncMark = "…[truncated]"
+// syslogMaxFrameUDP UDP 路径的单帧预算 = IPv4 单数据报载荷协议上限（RFC 768：
+// 长度字段 16 位，UDP 载荷 ≤ 65535 - IP 头 20 - UDP 头 8 = 65507）。
+// 对端 max_length=102400 在 UDP 下物理不可达——截到 102400 仍会 sendto EMSGSIZE
+// 整帧丢（截断白做），故 UDP 截断预算取两者较小者 65507，保证截断后的帧完整可发。
+const syslogMaxFrameUDP = 65507
 
 // syslogSeverity 把 slog 级别映射为 RFC5424 severity 编号。
 // Debug（及以下，含 trace）→7、Info→6、Warn→4、Error（及以上，含 fatal）→3。
@@ -219,8 +222,12 @@ func newSyslogHandler(settings *SyslogSettings, service string, lvl slog.Leveler
 			facility = f
 		}
 	}
-	// HOSTNAME 位 = 对端落盘归属（服务名），缺省链：显式 Hostname > service（Options.Service）
-	// > os.Hostname()（构建时一次性解析，与 appname 的 service 回退链路同源）。
+	// HOSTNAME 位 = 对端落盘归属（取报文 hostname 位做文件名，接入实测确证），缺省链：
+	// 显式 Hostname > service（Options.Service）> os.Hostname()（构建时一次性解析，与
+	// appname 的 service 回退链路同源）；解析结果统一 sanitizeWhitelistName 净化——
+	// 与 http 帧 src 对称防御（同一落盘文件名污染面：含 "/.." 会送达但文件名被污染）。
+	// APP-NAME / PROCID 不净化：不决定落盘文件名（见 sanitizeWhitelistName 注释），
+	// 维持报文其余格式零改动。
 	hostname := settings.Hostname
 	if hostname == "" {
 		hostname = service
@@ -228,10 +235,9 @@ func newSyslogHandler(settings *SyslogSettings, service string, lvl slog.Leveler
 	if hostname == "" {
 		if h, err := os.Hostname(); err == nil {
 			hostname = h
-		} else {
-			hostname = "-"
 		}
 	}
+	hostname = sanitizeWhitelistName(hostname)
 	appname := settings.Tag
 	if appname == "" {
 		appname = service
@@ -271,14 +277,15 @@ func newSyslogHandler(settings *SyslogSettings, service string, lvl slog.Leveler
 	return h, sc
 }
 
-// truncateSyslogFrame 把超限整帧（含尾 \n）的 MSG 体截短至帧长恰 ≤ syslogMaxFrame：
-// 保留 header、截断 MSG 体并在其尾部追加 syslogTruncMark 标记、补回尾 \n。
+// truncateSyslogFrame 把超限整帧（含尾 \n）的 MSG 体截短至帧长恰 ≤ maxFrame：
+// 保留 header、截断 MSG 体并在其尾部追加 truncMark 标记、补回尾 \n。
 // bodyLen 为 MSG 体在帧内的字节长度（header 占 len(pkt)-bodyLen-1 字节）。
+// maxFrame 由调用方按传输协议选取（tcp=syslogMaxFrame / udp=syslogMaxFrameUDP）。
 // 截断点若落在 UTF-8 多字节序列中部，回退到最近的 rune 起始处，绝不产出残缺序列。
 // header + 标记 + 尾 \n 本身超预算时返回 nil（丢弃信号；header 为固定字段、理论不可达）。
-func truncateSyslogFrame(pkt []byte, bodyLen int) []byte {
+func truncateSyslogFrame(pkt []byte, bodyLen, maxFrame int) []byte {
 	hl := len(pkt) - bodyLen - 1 // header 长（"<PRI>1 <ts> <host> <app> <procid> - - "）
-	avail := syslogMaxFrame - hl - 1 - len(syslogTruncMark)
+	avail := maxFrame - hl - 1 - len(truncMark)
 	if avail < 0 {
 		return nil
 	}
@@ -289,10 +296,10 @@ func truncateSyslogFrame(pkt []byte, bodyLen int) []byte {
 	for cut > 0 && !utf8.RuneStart(body[cut]) {
 		cut--
 	}
-	out := make([]byte, 0, hl+cut+len(syslogTruncMark)+1)
+	out := make([]byte, 0, hl+cut+len(truncMark)+1)
 	out = append(out, pkt[:hl]...)
 	out = append(out, body[:cut]...)
-	out = append(out, syslogTruncMark...)
+	out = append(out, truncMark...)
 	out = append(out, '\n')
 	return out
 }
@@ -337,14 +344,20 @@ func (h *syslogHandler) Handle(ctx context.Context, r slog.Record) error {
 	pkt = append(pkt, body...)
 	pkt = append(pkt, '\n')
 
-	// 2.5) 单帧上限截断（对端 syslog source max_length 实配 102400，超限帧被对端静默
-	// 丢弃，截断归客户端）：截 MSG 体使整帧（含尾 \n）恰 ≤ syslogMaxFrame，MSG 尾部保留
-	// 截断标记；截断点回退到 UTF-8 rune 起始处，绝不产出残缺多字节序列。
-	if len(pkt) > syslogMaxFrame {
-		pkt = truncateSyslogFrame(pkt, len(body))
+	// 2.5) 单帧上限截断（tcp：对端 syslog source max_length 实配 102400，超限帧被对端
+	// 静默丢弃；udp：协议单数据报载荷上限 65507（RFC 768），截到 102400 仍会 EMSGSIZE
+	// 整帧丢，故预算取 min(max_length, 65507)=65507 保证截断后可完整送达。截断归客户端）：
+	// 截 MSG 体使整帧（含尾 \n）恰 ≤ 对应预算，MSG 尾部保留截断标记；
+	// 截断点回退到 UTF-8 rune 起始处，绝不产出残缺多字节序列。
+	maxFrame := syslogMaxFrame
+	if sc.network == "udp" {
+		maxFrame = syslogMaxFrameUDP
+	}
+	if len(pkt) > maxFrame {
+		pkt = truncateSyslogFrame(pkt, len(body), maxFrame)
 		if pkt == nil {
 			// 理论不可达的极端防御：header + 标记 + 尾 \n 本身已超预算（header 固定字段
-			// 最长数百字节 ≪ 102400）→ 丢弃该条计 dropped。
+			// 最长数百字节 ≪ 65507）→ 丢弃该条计 dropped。
 			sc.dropped++
 			return nil
 		}
