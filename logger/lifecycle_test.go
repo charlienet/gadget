@@ -103,7 +103,7 @@ func TestConcurrentDefaultLifecycle(t *testing.T) {
 		wg.Go(func() {
 			for range 5 {
 				if err := logger.Init(logger.Config{
-					Level: "info", Output: "console", Async: true, QueueSize: 64,
+					Level: "info", Outputs: logger.OutputsConfig{Console: &logger.ConsoleConfig{}}, Async: true, QueueSize: 64,
 				}); err != nil {
 					t.Errorf("Init: %v", err)
 					return
@@ -137,7 +137,7 @@ func TestConcurrentDefaultLifecycle(t *testing.T) {
 	logger.DefaultLogger.Info("still alive")
 }
 
-// --- M-6：file/both + 空 File 的黑洞配置返回错误且不改动默认 logger ---
+// --- M-6：File 节点存在 + 空 Filename 的黑洞配置返回错误且不改动默认 logger ---
 
 func TestInitBlackholeConfigRejected(t *testing.T) {
 	orig := logger.DefaultLogger
@@ -146,28 +146,34 @@ func TestInitBlackholeConfigRejected(t *testing.T) {
 		slog.SetDefault(orig)
 	})
 
-	for _, out := range []string{"file", "both"} {
-		err := logger.Init(logger.Config{Output: out, File: ""})
+	// 纯 file 节点 / console+file 双节点：filename 皆空 → 黑洞
+	for _, cfg := range []logger.Config{
+		{Outputs: logger.OutputsConfig{File: &logger.FileConfig{Filename: ""}}},
+		{Outputs: logger.OutputsConfig{Console: &logger.ConsoleConfig{}, File: &logger.FileConfig{Filename: ""}}},
+	} {
+		err := logger.Init(cfg)
 		if err == nil {
-			t.Errorf("Init(output=%q, file=\"\") must return error", out)
+			t.Errorf("Init(file node, filename=\"\") must return error, got cfg=%+v", cfg.Outputs)
 			continue
 		}
-		if !strings.Contains(err.Error(), "requires non-empty file path") {
-			t.Errorf("unexpected error for output=%q: %v", out, err)
+		if !strings.Contains(err.Error(), "requires non-empty filename") {
+			t.Errorf("unexpected error for file node: %v", err)
 		}
 		// 失败不得替换 DefaultLogger
 		if logger.DefaultLogger != orig {
-			t.Errorf("DefaultLogger must stay untouched on rejected Init (output=%q)", out)
+			t.Errorf("DefaultLogger must stay untouched on rejected Init (file node=%+v)", cfg.Outputs)
 		}
 	}
 
-	// console + 空 File 维持现状：不报错
-	if err := logger.Init(logger.Config{Output: "console", File: ""}); err != nil {
-		t.Errorf("Init(console, no file) should succeed, got: %v", err)
+	// 仅 console 节点（无 File 节点）维持现状：不报错
+	if err := logger.Init(logger.Config{Outputs: logger.OutputsConfig{Console: &logger.ConsoleConfig{}}}); err != nil {
+		t.Errorf("Init(console only) should succeed, got: %v", err)
 	}
-	// file + 有 File：正常
+	// file 节点 + 有 Filename：正常
 	dir := t.TempDir()
-	if err := logger.Init(logger.Config{Output: "file", File: dir + "/ok.log"}); err != nil {
-		t.Errorf("Init(file with path) should succeed, got: %v", err)
+	if err := logger.Init(logger.Config{
+		Outputs: logger.OutputsConfig{File: &logger.FileConfig{Filename: dir + "/ok.log"}},
+	}); err != nil {
+		t.Errorf("Init(file node with filename) should succeed, got: %v", err)
 	}
 }

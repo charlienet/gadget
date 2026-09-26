@@ -3,14 +3,17 @@ package logger
 import (
 	"io"
 	"log/slog"
+	"time"
 )
 
 type Option func(*Options)
 
-// Options 汇总 New 的全部可选项。sink（控制台 / 文件）按「存在性」开关：
+// Options 汇总 New 的全部可选项。sink（控制台 / 文件 / syslog / http）按「存在性」开关：
 //   - Console != nil（由 WithConsole 置位）→ 启用控制台 sink；
 //   - File != ""（由 WithFile 置位）→ 启用文件 sink；
-//   - 两者皆无时 rebuild 兜底启用一个 stdout 控制台（见 default.go）。
+//   - Syslog != nil（由 WithSyslog 置位）→ 启用 syslog sink；
+//   - HTTP != nil（由 WithHTTP 置位）→ 启用 http sink；
+//   - 四者皆无时 rebuild 兜底启用一个 stdout 控制台（见 default.go）。
 //
 // 故 Options 不再持有独立的 Out/Color/FileFormat 字段：控制台 writer/颜色归
 // ConsoleSettings，文件格式归 FileOptions.Format。
@@ -19,6 +22,8 @@ type Options struct {
 	Console       *ConsoleSettings  // 控制台 sink（nil=未声明 WithConsole）
 	File          string            // 文件路径，空 = 不启用文件 sink
 	FileOpts      *FileOptions      // 文件轮换 + 输出格式配置（nil 用默认）
+	Syslog        *SyslogSettings   // syslog sink（nil=未声明 WithSyslog）
+	HTTP          *HTTPSettings     // http sink（nil=未声明 WithHTTP）
 	Source        bool              // 是否输出源码位置 file:line
 	Async         bool              // 异步写入：日志队列后台消费，不阻塞主业务
 	QueueSize     int               // 异步队列容量（<=0 默认 10240）
@@ -121,6 +126,81 @@ func WithSource(enabled bool) Option {
 	}
 }
 
+// ---- syslog sink ----
+
+// SyslogSettings syslog sink 的可选参数（Options.Syslog：nil=未声明 WithSyslog）。
+// 与 WithFile 惯例一致：WithSyslog 先填默认再应用子选项，最终写入 o.Syslog。
+// 各字段语义与默认见 SyslogConfig（Config 层）注释；本结构是 Option 精调层的等价形态。
+type SyslogSettings struct {
+	Network  string        // "tcp"(默认)/"udp"
+	Address  string        // 远端地址（必填）
+	Tag      string        // RFC5424 APP-NAME；空回退 Options.Service，再空回退 "gadget"
+	Hostname string        // RFC5424 HOSTNAME；空回退 os.Hostname()
+	Facility string        // 设施名；空默认 "user"(1)；非法回退 user
+	Format   FileFormat    // MSG 体渲染格式（FormatJSON 默认 / FormatText）
+	Timeout  time.Duration // 单次 dial/write 超时；<=0 用默认 5s
+}
+
+// defaultSyslogTimeout syslog dial/write 的默认超时。
+const defaultSyslogTimeout = 5 * time.Second
+
+// WithSyslog 启用 syslog sink（向远端发送 RFC5424 报文）。必须把 o.Syslog 置为非 nil
+// （即使不带子选项），再依次应用 opts。address 为远端 host:port（必填）。
+// 子选项缺省即默认：Network=tcp、Facility=user、Format=json、Timeout=5s、
+// Tag/Hostname 空（分别回退 Service/"gadget"、os.Hostname）。
+func WithSyslog(address string, opts ...SyslogOption) Option {
+	return func(o *Options) {
+		s := &SyslogSettings{
+			Network: "tcp",
+			Address: address,
+			Format:  FormatJSON,
+			Timeout: defaultSyslogTimeout,
+		}
+		for _, opt := range opts {
+			opt(s)
+		}
+		o.Syslog = s
+	}
+}
+
+// SyslogOption syslog sink 的子选项（作用于 SyslogSettings）。
+type SyslogOption func(*SyslogSettings)
+
+// WithSyslogNetwork 传输协议："tcp"/"udp"（非法值由 Init 拦截；包内 handler 回退 tcp）。
+func WithSyslogNetwork(network string) SyslogOption {
+	return func(s *SyslogSettings) { s.Network = network }
+}
+
+// WithSyslogTag RFC5424 APP-NAME。
+func WithSyslogTag(tag string) SyslogOption {
+	return func(s *SyslogSettings) { s.Tag = tag }
+}
+
+// WithSyslogHostname RFC5424 HOSTNAME。
+func WithSyslogHostname(hostname string) SyslogOption {
+	return func(s *SyslogSettings) { s.Hostname = hostname }
+}
+
+// WithSyslogFacility syslog 设施名（kern/user/daemon/local0-local7 等）。
+func WithSyslogFacility(facility string) SyslogOption {
+	return func(s *SyslogSettings) { s.Facility = facility }
+}
+
+// WithSyslogFormat MSG 体渲染格式（FormatJSON 默认 / FormatText）。
+func WithSyslogFormat(format FileFormat) SyslogOption {
+	return func(s *SyslogSettings) { s.Format = format }
+}
+
+// WithSyslogTimeout 单次 dial/write 超时（<=0 由 handler 回退默认 5s）。
+func WithSyslogTimeout(d time.Duration) SyslogOption {
+	return func(s *SyslogSettings) { s.Timeout = d }
+}
+
+// ---- http sink ----
+//
+// HTTPSettings / WithHTTP / HTTPOption 子选项定义在 http.go（与后端实现同文件，
+// 便于对照 NDJSON 批量语义与发送参数）。
+
 // WithAsync 启用异步写入：日志队列后台消费，不阻塞主业务。
 // queueSize 为队列容量（可省略，默认 10240）；队列满时默认丢弃并计数（可用 Stats 观测），
 // 搭配 WithAsyncBlocking 可改为阻塞背压。
@@ -193,7 +273,7 @@ func WithSampling(first, thereafter int) Option {
 
 // ---- 文件轮换选项 ----
 
-// FileFormat 文件输出格式枚举（string 基类型，与 Config.FileFormat 的 yaml 值同源）。
+// FileFormat 文件输出格式枚举（string 基类型，与 FileConfig.Format 的字符串值同源）。
 // 零值 ""（等价 FormatJSON）保证「未设置 = JSON」向后兼容；typed 参数防止调用方误传裸 string。
 type FileFormat string
 

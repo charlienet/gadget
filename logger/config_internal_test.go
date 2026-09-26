@@ -2,7 +2,7 @@ package logger
 
 import "testing"
 
-// TestConfigOptionsNoColorMapping 在映射层锁定 Config.NoColor 两态 → ConsoleSettings.Color。
+// TestConfigOptionsNoColorMapping 在映射层锁定 ConsoleConfig.NoColor 两态 → ConsoleSettings.Color。
 //
 // 端到端（captureStdout）把 os.Stdout 重定向到管道即非 TTY，NoColor=true（强制关）与
 // NoColor=false（自动判定 → 非 TTY 关）输出都无 ANSI，二者不可分辨。故真正的「强制关 vs
@@ -15,17 +15,17 @@ func TestConfigOptionsNoColorMapping(t *testing.T) {
 		wantSet bool // 期望 Console.Color != nil（即显式强制关）
 		wantVal bool // wantSet 为 true 时期望的 *Console.Color 值
 	}{
-		{"console+NoColor=true→强制关", Config{Output: "console", NoColor: true}, true, false},
-		{"console+NoColor=false→自动", Config{Output: "console", NoColor: false}, false, false},
-		{"both+NoColor=true→强制关", Config{Output: "both", File: "app.log", NoColor: true}, true, false},
-		{"both+NoColor=false→自动", Config{Output: "both", File: "app.log", NoColor: false}, false, false},
+		{"console+NoColor=true→强制关", Config{Outputs: OutputsConfig{Console: &ConsoleConfig{NoColor: true}}}, true, false},
+		{"console+NoColor=false→自动", Config{Outputs: OutputsConfig{Console: &ConsoleConfig{NoColor: false}}}, false, false},
+		{"both+NoColor=true→强制关", Config{Outputs: OutputsConfig{Console: &ConsoleConfig{NoColor: true}, File: &FileConfig{Filename: "app.log"}}}, true, false},
+		{"both+NoColor=false→自动", Config{Outputs: OutputsConfig{Console: &ConsoleConfig{NoColor: false}, File: &FileConfig{Filename: "app.log"}}}, false, false},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			o := buildOptions(configOptions(tt.cfg)...)
 			if o.Console == nil {
-				t.Fatalf("want Console sink declared, got nil (output=%q)", tt.cfg.Output)
+				t.Fatalf("want Console sink declared, got nil (case=%q)", tt.name)
 			}
 			if tt.wantSet {
 				if o.Console.Color == nil {

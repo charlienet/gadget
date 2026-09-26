@@ -208,7 +208,7 @@ func Stats() (total, dropped uint64) {
 }
 
 // Close 优雅关闭所有已注册 logger 实例（进程退出前调用）：
-// flush 各实例的异步队列（确保日志落盘）并关闭文件 writer。
+// flush 各实例的异步队列（确保日志落盘）并关闭文件 writer、syslog 连接与 http 发送 sink（停 worker + 收尾投递）。
 // 幂等：重复调用安全。
 // 注意：异步 logger 建议进程退出前调用包级 logger.Close()。
 // 用 copy 快照遍历，避免持锁时 Close 内部等待；重复调用第二次注册表已空，安全。

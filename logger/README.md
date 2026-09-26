@@ -54,38 +54,49 @@ l := logger.New(
 )
 // l 是 *slog.Logger，注入业务代码即可
 
-defer logger.Close(0) // 进程退出前 flush 异步队列、关闭文件句柄
+defer logger.Close(0) // 进程退出前 flush 异步队列、关闭文件句柄与远端 sink（syslog / http）
 ```
 
-> **sink 按「存在性」装配**：`WithConsole(...)` 启用控制台、`WithFile(...)` 启用文件，各为独立开关。
-> 二者皆不声明时兜底一个 stdout 控制台（`logger.New()` 零配置即用、包级日志不静默）；仅 `WithFile`
-> 则纯文件输出、不写 stdout；`WithConsole` + `WithFile` 即双端输出。
+> **sink 按「存在性」装配**：`WithConsole(...)` 启用控制台、`WithFile(...)` 启用文件、`WithSyslog(...)` 启用
+> syslog、`WithHTTP(...)` 启用 http，各为独立开关（可任意组合，多路经同一 MultiHandler 扇出）。皆不声明时兜底一个 stdout 控制台
+> （`logger.New()` 零配置即用、包级日志不静默）；仅声明非 console sink（file / syslog / http）则不写 stdout；
+> `WithConsole` + 其它即双/多端输出。
 
-### Config + Init（配置文件驱动）
+### Config + Init（结构体配置驱动）
 
-```yaml
-log:
-  level: "info"          # trace | debug | info | warn | error | fatal
-  output: "both"         # console | file | both
-  no_color: false        # true 强制关闭颜色；默认 false=自动（终端支持 ANSI 即应用，跟随 NO_COLOR）
-  file: "./logs/app.log"
-  max_size: 100
-  max_age: 30
-  max_backups: 10
-  compress: true
-  layout: "2006-01-02"   # 可选：非空=按日期轮换(WithDateRotate)，省略/空=lumberjack 按大小轮换
-  async: true
-  queue_size: 10240
-  source: false          # 输出 file:line
-  service: "opencode-api"
-  env: "prod"
-  sensitive_keys: ["mytoken"]  # 可选：追加敏感字段词(子串匹配、与内置词集合并)，省略/空=不注入
-  sensitive_mask: "[REDACTED]" # 可选：自定义掩码(默认 ******)，省略/空=不注入
-```
+后端按 `Outputs` 分组声明：**某节点非 nil = 启用该后端，nil = 不启用**；不再有 `output: console/file/both`
+字符串开关。各 sink 节点皆 nil 时由 `New` 兜底 stdout 控制台（显式声明了 `file` / `syslog` / `http` 而未声明 `console`
+时不兜底 stdout）。**配置格式解析（yaml/json 等）由应用端负责**——
+`Config` 及其子结构的每个导出字段携带 `yaml` / `json` / `mapstructure` tag（键名统一 snake_case，层级嵌套由子结构
+自然承载），支持应用端直接嵌入结构体（如 `Logger: logger.Config`）后用对应解码器填充；
+logger 库本身不含任何解析代码，`Init` 只接收装配好的结构体。
 
 ```go
-var cfg logger.Config
-viper.UnmarshalKey("log", &cfg) // 或 yaml.Unmarshal
+cfg := logger.Config{
+    Level:     "info",          // trace | debug | info | warn | error | fatal
+    Service:   "opencode-api",
+    Env:       "prod",
+    Source:    false,           // 输出 file:line
+    Async:     true,
+    QueueSize: 10240,
+    Sensitive: logger.SensitiveConfig{
+        Keys: []string{"mytoken"}, // 可选：追加敏感字段词(子串匹配、与内置词集合并)，nil/空=不注入
+        Mask: "[REDACTED]",        // 可选：自定义掩码(默认 ******)，空=不注入
+    },
+    Outputs: logger.OutputsConfig{
+        Console: &logger.ConsoleConfig{}, // 指针非 nil=启用控制台；置 nil=不启用
+        // NoColor: true 强制关闭颜色；默认 false=自动（终端支持 ANSI 即应用，跟随 NO_COLOR）
+        File: &logger.FileConfig{ // File 节点非 nil=启用文件；置 nil=不启用（启用时 Filename 必填，见下方黑洞校验）
+            Filename:   "logs/app.log",
+            Format:     "json", // json(默认)/text（大小写不敏感，非法非空值报错）
+            MaxSize:    100,    // MB
+            MaxAge:     30,     // 天
+            MaxBackups: 10,
+            Compress:   true,
+            // Layout: "2006-01-02", // 可选：非空=按日期轮换(WithDateRotate)，空=lumberjack 按大小轮换
+        },
+    },
+}
 
 if err := logger.Init(cfg); err != nil { // 内部自动 slog.SetDefault
     log.Fatalf("init logger: %v", err)
@@ -97,15 +108,289 @@ if err := logger.Init(cfg, logger.WithSensitiveKeys("password")); err != nil {
 }
 ```
 
-> **控制台颜色 `no_color` 两态**：`true` 强制关闭颜色；**省略该键 / `false`（默认）** 走自动判定（终端支持 ANSI、输出为 TTY 且无 `NO_COLOR` 环境变量三者同时满足才涂色，管道 / 重定向到文件自动无 ANSI）。仅作用于会启用控制台 sink 的 `output: console/both`；`file` 无控制台不受影响。
-> `DefaultConfig()` 对 `no_color` 保持零值 `false`（自动判定），开发终端有色、生产非 TTY 无色，无需按环境专门配置；若确需强制开色（非 TTY / 管道也输出 ANSI），Config 层不提供，请用 Option 精调：`logger.Init(cfg, logger.WithConsole(logger.WithConsoleColor(true)))`。
+启用文件后端时可参考 `DefaultConfig` 文档中的默认参数模板（MaxSize 100 / MaxAge 30 /
+MaxBackups 10 / Compress true / Format "json"）；`DefaultConfig()` 本身返回纯 console
+默认（`Outputs.Console` 非 nil、`Outputs.File` 为 nil），等价旧 `output: "console"`。
+
+配置文件驱动时，应用端自行解码后传入即可。字段 tag 对应的 yaml 键名示意（仅示意，
+解析动作在应用端，如 `yaml.Unmarshal` / viper / mapstructure）：
+
+```yaml
+# 与 logger.Config 的 yaml tag 对齐（snake_case；outputs 下某节存在 = 启用该后端）
+level: "info"
+service: "opencode-api"
+env: "prod"
+source: false
+async: true
+queue_size: 10240
+sensitive:            # 可选：横切打码（console/file 双端生效），整节缺省=不注入
+  keys: ["mytoken"]
+  mask: "[REDACTED]"
+outputs:
+  console:            # 节存在=启用控制台；缺省=不启用
+    no_color: false   #   true 强制关闭颜色；默认 false=自动（ANSI + TTY + 无 NO_COLOR）
+  file:               # 节存在=启用文件；缺省=不启用（存在时 filename 必填，见下方黑洞校验）
+    filename: "logs/app.log"
+    format: "json"    #   json(默认)/text（大小写不敏感，非法非空值报错）
+    max_size: 100     #   MB
+    max_age: 30       #   天
+    max_backups: 10
+    compress: true
+    layout: "2006-01-02" # 可选：非空=按日期轮换(WithDateRotate)，缺省/空=lumberjack 按大小轮换
+  http:                 # 节存在=启用 http 后端；缺省=不启用（存在时 url 必填，见下方黑洞校验）
+    url: "http://127.0.0.1:8686/v1/logs" # 完整 POST 端点（含路径），scheme 必须 http/https
+    headers:            #   附加请求头（认证等由应用端注入）
+      Authorization: "Bearer <token>"
+    batch_size: 100     #   每次 POST 最大条数，0/缺省=100，负数 Init 报错
+    flush_interval: 500ms #  不满批强制投递间隔，空默认 500ms；非法/负值 Init 报错
+    timeout: 5s         #   整请求超时（含重试单次尝试），空默认 5s；非法/负值 Init 报错
+    gzip: false         #   请求体 gzip 压缩（置 Content-Encoding: gzip）
+```
+
+> **控制台颜色 `ConsoleConfig.NoColor` 两态**：`true` 强制关闭颜色；**`false`（默认零值）** 走自动判定（终端支持 ANSI、输出为 TTY 且无 `NO_COLOR` 环境变量三者同时满足才涂色，管道 / 重定向到文件自动无 ANSI）。仅作用于非 nil 的 `Console` 节点；`Console` 为 nil（不启用控制台）不受影响。
+> `DefaultConfig()` 对 `NoColor` 保持零值 `false`（自动判定），开发终端有色、生产非 TTY 无色，无需按环境专门配置；若确需强制开色（非 TTY / 管道也输出 ANSI），Config 层不提供，请用 Option 精调：`logger.Init(cfg, logger.WithConsole(logger.WithConsoleColor(true)))`。
 
 > `Init(cfg, opts...)` 先由 Config 生成打底 Option、再拼接用户 opts（后者覆盖同类项），**合并后**才校验：
-> `output: file / both` 但合并后文件路径仍为空 → 报错（黑洞；可用 `WithFile(path)` 补路径消除）；
-> `file_format` 为非法非空值 → 报错（不静默回退 JSON）。任一失败均**不**改动 `DefaultLogger`。
+> `Outputs.File` 节点非 nil 但合并后 `Filename` 仍为空 → 报错（黑洞；可用 `WithFile(path)` 补路径消除）；
+> `FileConfig.Format` 为非法非空值 → 报错（不静默回退 JSON）；
+> `Outputs.Syslog` 节点非 nil 时：合并后 `Address` 为空、`Network` 非 `""`/`tcp`/`udp`、`Facility` 非法名、
+> `Timeout` 非空但无法 `time.ParseDuration` 解析、`Format` 非法 → 一并报错。任一失败均**不**改动 `DefaultLogger`。
+> 注意 syslog 连接为**懒建 / 后台重连**，地址不可达**不在** `Init` 报错（与 file 的 lumberjack 惰性 IO 语义一致）。
+> `Outputs.HTTP` 节点非 nil 时：合并后 `URL` 为空、`URL` 无法 `url.Parse` 解析或 scheme 非 `http`/`https`、
+> `BatchSize` 负数、`Timeout` / `FlushInterval` 非空但无法解析或为负值 → 一并报错。http 连接同样**懒建**
+> （首个批次发送时才拨号），端点不可达**不在** `Init` 报错。
 > `Init` / `New` 每次替换默认实例前会关闭（flush + 释放句柄）上一个默认实例，见「设计说明」。
 
-> **Config 能力映射**：`layout` 非空 → `WithDateRotate(layout)`（按日期轮换，仅 `file`/`both` 消费，空则维持 lumberjack 按大小轮换）；`sensitive_keys` 非空 → `WithSensitiveKeys(...)`（追加词、与内置词集合并）、`sensitive_mask` 非空 → `WithSensitiveMask(...)`——敏感打码为横切能力，console/file 双端生效。三者**零值均不注入**对应 Option（默认行为不变，`DefaultConfig` 保持 `layout` 空、敏感配置 nil/空）；Init 打底后用户 opts 可再追加（`WithSensitiveKeys` 为 append 语义，两组词都生效）。
+> **Config 能力映射**：`FileConfig.Layout` 非空 → `WithDateRotate(layout)`（按日期轮换，仅 `File` 节点消费，空则维持 lumberjack 按大小轮换）；`Sensitive.Keys` 非空 → `WithSensitiveKeys(...)`（追加词、与内置词集合并）、`Sensitive.Mask` 非空 → `WithSensitiveMask(...)`——敏感打码为横切能力，console/file 双端生效。二者**零值均不注入**对应 Option（默认行为不变，`DefaultConfig` 敏感配置 nil/空）；Init 打底后用户 opts 可再追加（`WithSensitiveKeys` 为 append 语义，两组词都生效）。
+
+## syslog 后端（RFC5424 → 远端 Vector）
+
+把日志以 **RFC5424 报文**逐条发送到远端 syslog 服务，报文以 `\n` 分帧。适配对端
+**Vector 0.58 `sources.syslog`**（`mode: tcp`/`udp`，自动识别 RFC5424）。连接为**懒建**（首条
+消息时拨号）、**断线后台重连**（下次写入重试 dial），失败期间该条丢弃并向 stderr 输出**限流**
+告警（同一原因每 5s 至多 1 条，防洪泛），**绝不阻塞日志调用方超过 `Timeout`**。
+
+### Go 构造（Option 模式）
+
+```go
+l := logger.New(
+    logger.WithSyslog("127.0.0.1:6514", // 远端地址（必填）
+        logger.WithSyslogNetwork("tcp"),           // "tcp"(默认)/"udp"
+        logger.WithSyslogTag("opencode-api"),      // RFC5424 APP-NAME；空回退 Service，再空回退 "gadget"
+        logger.WithSyslogHostname("host-a"),       // 空回退 os.Hostname()
+        logger.WithSyslogFacility("local0"),       // 默认 "user"；见下方设施名表
+        logger.WithSyslogFormat(logger.FormatJSON),// MSG 体："json"(默认)/"text"
+        logger.WithSyslogTimeout(5*time.Second),   // 单次 dial/write 超时（默认 5s）
+    ),
+)
+defer logger.Close(0) // 关闭 syslog 连接（此后不再重连写出），与 flush/文件释放同链
+```
+
+### Config + Init（yaml 示意）
+
+```go
+cfg := logger.Config{
+    Level:   "info",
+    Service: "opencode-api", // 未设 Tag 时作为 APP-NAME 回退值
+    Outputs: logger.OutputsConfig{
+        Syslog: &logger.SyslogConfig{ // 节点非 nil=启用；置 nil=不启用
+            Network:  "tcp",
+            Address:  "127.0.0.1:6514", // 必填
+            Tag:      "opencode-api",
+            Facility: "local0",
+            Format:   "json",
+            Timeout:  "5s", // time.ParseDuration
+        },
+    },
+}
+_ = logger.Init(cfg)
+```
+
+```yaml
+outputs:
+  syslog:                 # 节存在=启用；缺省=不启用（address 必填，见黑洞校验）
+    network: "tcp"        #   "tcp"(默认)/"udp"，其它值 Init 报错
+    address: "127.0.0.1:6514" # 非空
+    tag: "opencode-api"   #   空回退 service，再空回退 "gadget"
+    hostname: ""          #   空回退 os.Hostname()
+    facility: "local0"    #   空默认 "user"；非法名 Init 报错
+    format: "json"        #   json(默认)/text
+    timeout: "5s"         #   time.ParseDuration，空默认 5s；非法值 Init 报错
+```
+
+> 未声明 `Console` 时，仅启用 `syslog`（或 `file`）不兜底 stdout 控制台；如需 console+syslog
+> 双端，额外加 `Console: &ConsoleConfig{}` 节点（或 `WithConsole()`）。
+
+### 报文格式与级别映射
+
+单条报文：`<PRI>1 <RFC3339毫秒> <HOSTNAME> <APP-NAME> <PROCID> <MSGID> <SD-ID> <MSG>\n`
+
+- **PRI = facility × 8 + severity**；
+- **PROCID** 为真实进程号（`os.Getpid()`）、**MSGID/SD-ID** 固定 `-`：三者不会同时为 `-`
+  （Vector 实测对「procid/msgid/sd 全 `-`」会拒收，填真实 pid 即规避）；
+- **MSG** 体为单行：`json` 走标准 `slog` JSON、`text` 走 console 渲染器 NoColor 形态，与
+  文件 sink **同源复用**（保证无裸换行、可反序列化）。
+
+| slog 级别 | syslog severity | 编号 |
+| --- | --- | --- |
+| trace / debug | debug | 7 |
+| info | informational | 6 |
+| warn | warning | 4 |
+| error / fatal | err | 3 |
+
+设施名（`facility`）→ 编号：`kern`0、`user`1、`mail`2、`daemon`3、`auth`4、`syslog`5、`lpr`6、
+`news`7、`uucp`8、`cron`9、`authpriv`10、`ftp`11、`ntp`12、`security`13、`console`14、
+`solaris-cron`15、`local0`16 … `local7`23（大小写不敏感、自动 trim）。
+
+### 与 Vector syslog source 对接
+
+Vector 侧示例（newline 分帧 + 自动识别 RFC5424）：
+
+```yaml
+sources:
+  in:
+    type: syslog
+    mode: tcp        # 或 udp
+    address: 0.0.0.0:6514
+```
+
+- **分帧**：本后端每条报文以 `\n` 结尾，Vector syslog source 按 newline 拆帧、自动解析 RFC5424 头部；
+- **UDP ≤4KB**：UDP 每条报文为**单个数据报**（不拆包），建议 `format: json` + 控制属性体量使整包
+  不超过约 4KB，避免超过 MTU 触发 IP 分片被丢弃（`Timeout` 仅约束读写，不重试 UDP 丢包）；
+- **失败语义**：连接建立或写入失败 → 该条丢弃 + 下次写入重试 dial + stderr 限流告警（每原因每 5s ≤1 条）；
+  进程退出调用 `logger.Close` 关闭连接后不再重连写出。日志可靠性为「尽力而为」，需要不丢日志请配
+  `WithAsync` 由异步队列削峰（队列满丢弃策略见「运行时管理」）。
+
+## http 后端（NDJSON 批量 → 远端 Vector）
+
+把日志以 **NDJSON 批量 POST** 到远端 HTTP 收集端（一个请求携带多行 JSON）。适配对端
+**Vector 0.58 `sources.http_server`**（`codec: json` 逐行解码）。发送在**独立 worker goroutine**
+里完成（日志调用方 `Handle` 只做「加锁 + 渲染 + 追加缓冲」，**绝不做网络 IO**），因此本后端
+无需开启 `WithAsync` 也不会把网络耗时压到业务线程上。
+
+### Go 构造（Option 模式）
+
+```go
+l := logger.New(
+    logger.WithHTTP("http://127.0.0.1:8686/v1/logs", // 完整 POST 端点（含路径，必填）
+        logger.WithHTTPHeaders(map[string]string{     // 附加请求头（认证等由应用端注入）
+            "Authorization": "Bearer <token>",        //   logger 库不含鉴权语义，token 从哪来由应用决定
+        }),
+        logger.WithHTTPBatchSize(100),                // 每次 POST 最大条数（默认 100）
+        logger.WithHTTPFlushInterval(500*time.Millisecond), // 不满批强制投递间隔（默认 500ms）
+        logger.WithHTTPTimeout(5*time.Second),        // 整请求超时，含重试的单次尝试（默认 5s）
+        logger.WithHTTPGzip(false),                   // 请求体 gzip 压缩（置 Content-Encoding: gzip）
+    ),
+)
+defer logger.Close(0) // 停发送 worker + 把残余缓冲批最后发一次，与 flush/文件释放同链
+```
+
+### Config + Init（yaml 示意）
+
+```go
+cfg := logger.Config{
+    Level:   "info",
+    Service: "opencode-api",
+    Outputs: logger.OutputsConfig{
+        HTTP: &logger.HTTPConfig{ // 节点非 nil=启用；置 nil=不启用
+            URL:           "http://127.0.0.1:8686/v1/logs", // 必填
+            Headers:       map[string]string{"Authorization": "Bearer <token>"},
+            BatchSize:     100,   // 0=默认 100；负数 Init 报错
+            FlushInterval: "500ms",
+            Timeout:       "5s",
+            Gzip:          false,
+        },
+    },
+}
+_ = logger.Init(cfg)
+```
+
+```yaml
+outputs:
+  http:                 # 节存在=启用；缺省=不启用（url 必填，见下方黑洞校验）
+    url: "http://127.0.0.1:8686/v1/logs"
+    headers:
+      Authorization: "Bearer <token>"
+    batch_size: 100     # 0/缺省=默认 100；负数 Init 报错
+    flush_interval: 500ms # 空默认 500ms；非法/负值 Init 报错
+    timeout: 5s         # 空默认 5s；非法/负值 Init 报错
+    gzip: false
+```
+
+> 未声明 `Console` 时，仅启用 `http`（或 `file` / `syslog`）不兜底 stdout 控制台；如需 console+http
+> 双端，额外加 `Console: &ConsoleConfig{}` 节点（或 `WithConsole()`）。
+
+### 请求与帧格式
+
+- **方法 / 路径**：固定 `POST`，请求发到 `URL` 指定的**完整端点**（含路径）。Vector 侧
+  `sources.http_server.path` 默认是 `/` 且为**精确匹配**，所以两端路径必须写一致：
+  Vector 配 `path: /v1/logs` ↔ 客户端 `url: http://host:8686/v1/logs`。若希望按前缀接收
+  （例如同时接 `/v1/logs` 与 `/v1/logs/*`），需按所用 Vector 版本开启 `strict_path: false`
+  （该选项并非所有版本都有，以官方文档为准）；本库不做客户端健康检查。
+- **请求体**：NDJSON——每行一个 JSON 对象、行间单个 `\n`、**末尾亦以单个 `\n` 结束**（发送前
+  统一补齐；gzip 压缩的即加尾后的完整体），不依赖对端「EOF 时刷出无尾换行残余」的行为差异。
+  **不发** v2 批格式
+  `{"logs":[{"event","metadata"}]}`（会被 json codec 当作**单个**不透明事件）。
+- **请求头**：`Content-Type: application/json`（服务端不强制，统一发送）；`Gzip` 开启时追加
+  `Content-Encoding: gzip`。用户 `Headers` 在默认头**之后**逐条 `Set`，因此可覆写
+  `Content-Type`（例如对端要求 `application/x-ndjson`）。
+- **渲染**：与文件 sink **同源复用** `slog.NewJSONHandler`（含 `time` 定制为
+  `2006-01-02 15:04:05.000`），保证单行、消息内 `\n` 被转义、字段可反序列化；
+  级别门槛与 console / file / syslog 同一 `Leveler`。
+- **响应**：`2xx` 视为成功（Vector 默认 `response_code: 200`），`4xx`/`5xx` 与网络错误同样判失败。
+
+### 批量、重试与丢弃语义
+
+| 触发 | 行为 |
+| --- | --- |
+| 当前批攒满 `BatchSize` 条 | 换出交给发送 worker，立即 `POST` |
+| `FlushInterval` 到点且当前批非空 | 换出发送（不满批也发） |
+| 换出时上一批仍在重试（inflight 槽占用） | **丢弃新换出的整批**（按条计 dropped）+ 限流告警 |
+| 网络错误 / 5xx / **408 / 429** | 整批指数退避重试：100ms 起倍增至上限 2s，**含首次共 3 次尝试**（不可对外配置） |
+| **其余 4xx**（400 / 404 / 413 …） | **确定性失败 → 不重试**：立即丢弃该批（按条计 dropped）+ 限流告警（文案含状态码，如 `http post 400 …`） |
+| 重试次数用尽 | **丢弃该批**（按条计 dropped）+ 限流告警（同一原因每 5s 至多 1 条，与 syslog 同策略） |
+| `Close`（含包级 `logger.Close` / 替换默认实例 / **`Fatal` 退出前**） | 停 ticker 与 worker；残余缓冲批最后发**一次**（快速尝试、不重试、限时 `Timeout`）；此后 `Handle` 静默丢弃 |
+
+- **为什么 4xx 不重试**：对端 Vector 的 `http_server` + `codec: json` 对**任一坏帧即整批回 400**
+  （解码失败发生在服务端解析阶段，与是哪一条无关），重试必然同败；把它计入 3 次重试只会
+  拖慢丢弃、并占用 inflight 槽加剧后续批溢出。`408 Request Timeout` 与 `429 Too Many Requests`
+  属暂时性状况（对端可能只是忙），仍走重试；
+- **可靠性 = at-least-once**：重试发的是整批，若某次尝试已被对端接收但响应丢失/后续失败，
+  **同一批会在对端重复落库**。本库不投递去重、不加事件 ID——需要 exactly-once 请在对端
+  （Vector `dedupe` transform 或存储层主键）处理。
+- **绝不 panic、绝不无限重试**：任何失败只影响该批，日志调用方永不因网络受阻（`Handle` 无 IO）。
+- **`Close` 的等待上界**：常规单批总时限 = `Timeout` × 尝试次数 + 退避之和（默认上界约
+  3×5s + 0.3s）；`Close` 只等 `2 × Timeout`，超时段内未落定的残留批按「丢弃 + 限流告警」处理，
+  语义与 `AsyncHandler.Close` 的超时报告一致（此时不应再复用该实例）。
+- **`Fatal` 保证限时 flush**：`logger.Fatal` / `Fatalf` 在记录后、`ExitFunc(1)` 之前，对当前默认实例
+  执行**完整 sink 释放链**（异步队列 flush → 文件 → syslog → http 收尾投递，限时 2s），因此
+  **未满批、未到 `FlushInterval` 的 Fatal 级日志也会尽力送达**——不会因为「投递在后台 worker」
+  而随进程退出丢失。仍是尽力语义：2s 预算内未落定则按丢弃 + 限流告警处理；对端长期不可达时
+  需要绝对送达请自行在退出前调用 `logger.Close(更大的 timeout)` 并检查返回错误。
+- **批量默认值与 100MiB 上限**：Vector 对**解压后**的请求体有 100MiB 上限。默认 `BatchSize=100`
+  条按常规日志体量（每条数百字节～数 KB）算，单请求约在 KB～百 KB 级，与上限相差 3~4 个数量级；
+  调大 `BatchSize` 前请估算自身单条日志体积，避免触发对端 413。
+- **连接**：`http.Client` 单例复用，`IdleConnTimeout` 取 100s（短于 Vector 默认 300s 连接回收），
+  空闲连接由本端先淘汰；对端已关闭的连接 Go 传输层会自动重拨，无需应用层探活。
+- **观测**：http 丢弃数不在 `logger.Stats()` 内（该方法只汇总异步队列），以 stderr 限流告警暴露。
+
+### 与 Vector http_server source 对接
+
+```yaml
+sources:
+  in:
+    type: http_server
+    address: 0.0.0.0:8686
+    path: /v1/logs        # 必须与客户端 url 的路径部分一致（默认是 "/"）
+    codec: json           # 逐行解码 NDJSON（与本项目后端输出的帧格式对应）
+```
+
+- **`codec: json` 的解码粒度**是「一行一个 JSON 对象」，正是本后端的分帧方式；若对端配成
+  `codec: text`，每行会变成一个 `message` 字段而非结构化事件；
+- ** gzip **：对端需支持 `Content-Encoding: gzip`（Vector `http_server` 支持透明解压），
+  不确定时把 `gzip` 设为 `false`；
+- **失败反馈**：对端返回非 2xx（如写入下游失败、请求体超限 413）都会触发本后端的整批重试，
+  因此请确保 Vector 的健康应答码路径畅通，避免长期不可用时以 3 次尝试/批的频率反复投递。
 
 ## 身份与链路字段前置（service / env / trace_id / req_id）
 
@@ -154,6 +439,11 @@ time → level → service(如有) → env(如有) → trace_id(如有) → req_
 > 唯一差异是控制台通道可叠加 ANSI 颜色（时间亮白、级别词按级染色、attr 的 `key=` 亮蓝），
 > 关闭颜色后两通道输出字节等同（同一实现构造性成立）。例：
 > `2026-09-24 10:12:33.456 INFO opencode-api prod fetching user user_id=42`。
+> attr 值渲染先解析 `slog.LogValuer`（对齐标准库 handler）：`LogValue()` 返回 Group 时按 `key.sub=…`
+> 递归展开、string 等形态按对应 Kind 处理（字符串走上述 quoting 规则）；未实现 LogValuer 的
+> 普通 Any 值仍 `encoding.TextMarshaler` 优先、`%+v` 兜底；链式自引用由标准库深度保护退化为
+> error 字符串，渲染层不 panic。Group 递归展开有 100 层深度上限，超限输出 `!DEPTH` 退化标记
+> （保护同机内存，仅病理/程序化超深输入可达）。
 
 缺失的 key 跳过，存在的保持上述相对次序。规则（四 key 各自独立判定）：
 
@@ -207,7 +497,7 @@ l := logger.New(
     // 敏感信息打码：命中 key 的属性值替换为掩码（Group 递归）
     logger.WithSensitiveKeys("password", "token"), // 子串匹配，与内置词集合并
     logger.WithSensitiveMask("******"),            // 自定义掩码
-    // Config 面可直接声明 sensitive_keys / sensitive_mask（映射同上「Config + Init」）
+    // Config 面可直接声明 Sensitive.Keys / Sensitive.Mask（映射同上「Config + Init」）
     // logger.WithSensitiveMatch(func(key string) bool { ... }), // 自定义匹配
 
     // 日志采样：窗口内前 10 条全留，之后每 100 条留 1 条
@@ -238,14 +528,20 @@ lvl.Set(slog.LevelWarn)              // 自定义 Leveler：级别控制权完�
                                      // 包级 SetLevel 对该实例无效
 
 total, dropped := logger.Stats()     // 异步累计统计（total / 因队列满丢弃数）
-logger.Fatal("unrecoverable", "component", "broker") // 记录 → flush 异步队列 → ExitFunc(1)
-logger.Close(2 * time.Second)        // 进程退出前统一 flush + 关文件
+logger.Fatal("unrecoverable", "component", "broker") // 记录 → 完整 sink 释放链（限时 2s，含 http 收尾投递）→ ExitFunc(1)
+logger.Close(2 * time.Second)        // 进程退出前统一 flush + 关文件 + 关 syslog 连接 + 停 http worker
 ```
 
 `Close` 返回非 nil 错误表示某实例的异步队列**未在 timeout 内排空**（错误信息含残余条数）。
 此时该实例的后台消费 goroutine 仍在写入，且文件 writer「写时重开」可能产生永不关闭的残余句柄——
 调用方应视该实例存在残余、不再复用其日志能力，只能假定进程即将退出；
 需要确定性落盘的场景请加大 timeout 或改用同步 writer（不启用 `WithAsync`）。
+`Fatal` / `Fatalf` 退出前走的是**同一个** `close` 释放链（预算 2s、幂等），故异步队列、文件、
+syslog 与 http 缓冲批都会在退出前尽力送出；其超时残余同样只以告警暴露（进程即将退出，错误不上抛）。
+syslog sink 的 `Close` 关闭底层连接并置为已关闭，此后**不再重连写出**（幂等，与文件句柄释放同链）；
+http sink 的 `Close` 停止发送 worker、把残余缓冲批最后发一次（快速尝试、不重试）后关闭空闲连接，
+此后 `Handle` 静默丢弃（幂等；其内部等待上界为 `2 × Timeout`，排在异步 flush 与文件/syslog 释放之后）；
+`Stats()` 仅统计异步队列丢弃，**不含** syslog / http 的发送失败丢弃（后者以 stderr 限流告警暴露，语义不同）。
 另注意：按日期轮换（`WithDateRotate`）的跨日压缩/清理在后台执行，其 `Close` 等待任务收敛
 **没有自有超时**——病态文件系统（如 NFS 挂起）下可能超出 `logger.Close(timeout)` 的预算
 （见 `rotate.RotateDateWriter.Close` 文档）。
@@ -284,13 +580,36 @@ logger.Close(2 * time.Second)        // 进程退出前统一 flush + 关文件
 
 - **sink 按存在性开关**：`WithConsole` 启用控制台、`WithFile` 启用文件；二者皆不声明时兜底一个 stdout 控制台（`logger.New()` 零配置即用、避免包级日志静默），仅 `WithFile` 则纯文件、不写 stdout。
 - **文件格式改枚举** `FileFormat`（`FormatJSON` 默认 / `FormatText`），`WithFormat` 收 typed 值而非裸 string；`Config.FileFormat` 的 yaml 字符串（`"json"`/`"text"`，大小写不敏感）仍向后兼容，非法非空值经 `Init` 报错而非静默回退。
-- `Config` 字段名与 `yaml`/`mapstructure` tag（含 `output`/`file_format`）**保持不变**，仅内部映射为分组 Option；`Init` 新增变参 `Init(cfg, opts...)`（`Init(cfg)` 源码兼容）。
+- `Config` 字段名与 `yaml`/`mapstructure` tag（含 `output`/`file_format`）**保持不变**，仅内部映射为分组 Option；`Init` 新增变参 `Init(cfg, opts...)`（`Init(cfg)` 源码兼容）。（v0.5.0 起 Config 层级化，平铺 tag 键随结构调整为层级 snake_case，旧键不再被识别，见下节。）
+
+### v0.4.0 → v0.5.0（Config 层级化多后端，破坏性）
+
+`Config` 由平铺结构改为层级化多后端结构（Option 层 API 不变），**不保留**旧字段兼容层；
+字段继续携带 `yaml` / `json` / `mapstructure` tag（键名统一 snake_case，层级嵌套由子结构自然承载），
+支持应用端直接嵌入（如 `Logger: logger.Config`）后解码；logger 库本身仍不含任何解析代码，
+`Init` 只接收装配好的结构体：
+
+| 旧 Config 字段（已删除） | 新 Go 写法 | 新 tag 键（yaml/mapstructure） |
+| :--- | :--- | :--- |
+| `Output: "console"` | `Outputs.Console: &ConsoleConfig{}`（指针非 nil 即启用） | `outputs.console` 节存在 |
+| `Output: "file"` | `Outputs.File: &FileConfig{…}`（仅 File 节点） | `outputs.file` 节存在 |
+| `Output: "both"` | `Outputs.Console` 与 `Outputs.File` 两节点同时非 nil | 两节同时存在 |
+| `NoColor` | `Outputs.Console.NoColor` | `outputs.console.no_color` |
+| `File` | `Outputs.File.Filename` | `outputs.file.filename` |
+| `FileFormat` | `Outputs.File.Format` | `outputs.file.format` |
+| `MaxSize` / `MaxAge` / `MaxBackups` / `Compress` / `Layout` | 迁入 `Outputs.File.*` | `outputs.file.max_size` / `max_age` / `max_backups` / `compress` / `layout` |
+| `Sensitive_Keys` / `Sensitive_Mask` | `Sensitive.Keys` / `Sensitive.Mask` | `sensitive.keys` / `sensitive.mask` |
+
+- **后端按节点存在性启用**：`Outputs.Console` / `Outputs.File` 某节点非 nil = 启用该后端，nil = 不启用；两节点皆 nil 由 `New` 兜底 stdout 控制台。未来新增 syslog/http 后端在 `OutputsConfig` 加指针字段即可。
+- `DefaultConfig()` 返回纯 console（`Outputs.Console = &ConsoleConfig{}`、`Outputs.File = nil`），等价旧 `Output: "console"`；文件默认参数（MaxSize 100 / MaxAge 30 / MaxBackups 10 / Compress true / Format "json"）见 `DefaultConfig` 文档中的 `FileConfig` 模板。
+- 黑洞校验措辞随语义更新：`Outputs.File` 节点非 nil 但合并后 `Filename` 为空 → 报错。
 
 ## 设计说明
 
 - **sink 装配**：控制台与文件为两路独立 sink，按存在性装配——`WithConsole`（彩色文本）与/或 `WithFile`（`FormatJSON` 默认 / `FormatText` 即 console 渲染器的 NoColor 形态、同一实现：`time → level → service → env → trace_id → req_id → msg → 其余 attrs → source（若启用，行尾）`，行版式为前置段裸值、msg 原样不加引号（`\n`/`\r` 以字面量转义保持单行，`\t` 等其余字符原样）、source 与其余 attrs 保持 k=v；其中四个前置字段 `service`/`env`/`trace_id`/`req_id` 由 record 与 `With` 累积属性双源前置并按 record 优先去重，见「身份与链路字段前置」；`FormatJSON` 走标准 `slog.NewJSONHandler`，不套用该排序与双源规则）；二者并存时以 `MultiHandler` 汇聚，皆未声明则兜底 stdout 控制台（`New()` 零配置不静默），仅 `WithFile` 则不写 stdout
+- **远端 sink**：`WithSyslog`（逐条 RFC5424、newline 分帧、懒 dial + 后台重连）与 `WithHTTP`（批量 NDJSON POST、单 worker 发送 + 指数退避重试）在 `New` 时各构建一次并注册到 Close 链，与本地 sink 并存时同样进 `MultiHandler` 扇出；两者的失败都是「丢弃 + stderr 限流告警」，不阻塞、不报错给日志调用方
 - handler 链（内 → 外）：`(console 与/或 file)` → `StackHandler` → `SensitiveHandler` → `SamplingHandler` → `AsyncHandler` → `TraceHandler`（内置，始终位于最外层）；可选项未启用时不参与链
 - `TraceHandler` 置于最外层：`trace_id`/`req_id` 在**调用方 goroutine 内同步提取进 record**后才进入采样 / 异步队列，因此异步队列 entry 无需（也不应）持有请求级 `context.Context`；异步模式下 trace 提取同样生效，且避免了长命队列持有可取消 ctx 的反模式
 - 默认（零 sink）输出为 **stdout 控制台**（见上「sink 装配」）；`WithAsync` 队列容量默认 10240（与引擎一致）
 - `With` 派生共享底层设施（writer/异步队列/文件句柄），均为并发安全共享；派生实例与父实例的属性互不影响
-- **连续 `New` / `Init` 语义**：每次 `New` 在把新实例登记为「默认实例」前，会 `close` 上一个默认实例（flush 其异步队列、关闭文件句柄、从注册表注销），避免队列 / 句柄累积；首次创建（无旧实例）跳过。`SetLevel` / `Fatal` 读取的默认实例引用与 `New` / `Init` 的写入由 `defaultMu` 互斥
+- **连续 `New` / `Init` 语义**：每次 `New` 在把新实例登记为「默认实例」前，会 `close` 上一个默认实例（flush 其异步队列、关闭文件句柄、从注册表注销），避免队列 / 句柄累积；首次创建（无旧实例）跳过。`SetLevel` / `Fatal` 读取的默认实例引用与 `New` / `Init` 的写入由 `defaultMu` 互斥；`Fatal` 退出前对默认实例执行的是同一条 `close` 释放链（限时 2s、`closeOnce` 幂等），与 `New` 替换旧实例时的 `prev.close(2s)` 同一实现，`close` 内部不取 `defaultMu`（只取实例 `l.mu` 与注册表 `loggerMu`），故在 `defaultMu` 之外调用无自锁风险

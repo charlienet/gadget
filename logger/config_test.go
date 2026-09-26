@@ -15,45 +15,50 @@ func TestDefaultConfig(t *testing.T) {
 	cfg := logger.DefaultConfig()
 
 	want := logger.Config{
-		Level:      "info",
-		Output:     "console",
-		MaxSize:    100,
-		MaxAge:     30,
-		MaxBackups: 10,
-		Compress:   true,
-		Async:      false,
-		QueueSize:  10240,  // 与 async.go 引擎默认一致（m-9）
-		FileFormat: "json", // 文件输出默认 JSON（向后兼容）
-		// 新增字段保持零值（默认行为不变）：NoColor 零值 false → 颜色自动判定；
-		// layout 空 → lumberjack 按大小轮换；敏感配置 nil/空 → 不注入对应 Option。
-		// Sensitive_Keys 用 nil 而非 []string{}，与 DefaultConfig 未赋值（nil slice）
+		Level:     "info",
+		Async:     false,
+		QueueSize: 10240, // 与 async.go 引擎默认一致（m-9）
+		// 纯 console 默认（等价旧格式仅启用 console 节点）：Console 节点非 nil、File 节点 nil。
+		Outputs: logger.OutputsConfig{
+			Console: &logger.ConsoleConfig{},
+			File:    nil,
+		},
+		// 其余保持零值（默认行为不变）：ConsoleConfig.NoColor 零值 false → 颜色自动判定；
+		// 敏感配置 nil/空 → 不注入对应 Option。
+		// Sensitive.Keys 用 nil 而非 []string{}，与 DefaultConfig 未赋值（nil slice）
 		// 在 reflect.DeepEqual 下保持一致。
-		Layout:         "",
-		Sensitive_Keys: nil,
-		Sensitive_Mask: "",
+		Sensitive: logger.SensitiveConfig{Keys: nil, Mask: ""},
 	}
-	// Config 含 slice 字段（Sensitive_Keys），不可用 ==/!= 直接比较（编译期即报错）；
+	// Config 含 slice 字段（Sensitive.Keys），不可用 ==/!= 直接比较（编译期即报错）；
 	// 统一用 reflect.DeepEqual 做逐字段语义比较。
 	if !reflect.DeepEqual(cfg, want) {
 		t.Errorf("DefaultConfig() = %+v, want %+v", cfg, want)
 	}
-	// 文件输出格式默认必须为 json（新增字段显式确认向后兼容）
-	if cfg.FileFormat != "json" {
-		t.Errorf("DefaultConfig().FileFormat = %q, want %q", cfg.FileFormat, "json")
+	// 默认不启用文件后端（File 节点 nil；启用时 format 默认 json 由 ParseFileFormat
+	// 对空串的 FormatJSON 回退保证，见 TestParseFileFormat）
+	if cfg.Outputs.File != nil {
+		t.Errorf("DefaultConfig().Outputs.File = %+v, want nil（默认纯 console）", cfg.Outputs.File)
+	}
+	// FileConfig 零值 Format 经 ParseFileFormat 仍为 JSON（文件默认格式向后兼容）
+	if got, err := logger.ParseFileFormat((&logger.FileConfig{}).Format); err != nil || got != logger.FormatJSON {
+		t.Errorf(`ParseFileFormat(FileConfig{}.Format) = %q, err %v, want json, nil`, got, err)
 	}
 	// 控制台颜色默认自动（NoColor 零值 false → 不禁用、走 NO_COLOR+TTY 判定）
-	if cfg.NoColor {
-		t.Errorf("DefaultConfig().NoColor = %v, want false（默认自动判定）", cfg.NoColor)
+	if cfg.Outputs.Console == nil {
+		t.Fatal("DefaultConfig().Outputs.Console = nil, want 非 nil（默认启用控制台）")
 	}
-	// 零值字段显式确认（Service/Env/File 不设默认）
-	if cfg.Service != "" || cfg.Env != "" || cfg.File != "" {
-		t.Errorf("expected empty Service/Env/File defaults, got %+v", cfg)
+	if cfg.Outputs.Console.NoColor {
+		t.Errorf("DefaultConfig().Outputs.Console.NoColor = %v, want false（默认自动判定）", cfg.Outputs.Console.NoColor)
 	}
-	// 新增字段零值显式确认：layout/sensitive 不设默认（保持既有按大小轮换、无打码行为）。
-	// Sensitive_Keys 必须是 nil（非 []string{}），否则与 want 的 DeepEqual 语义不一致。
-	if cfg.Layout != "" || cfg.Sensitive_Keys != nil || cfg.Sensitive_Mask != "" {
-		t.Errorf("expected empty layout/sensitive defaults, got layout=%q keys=%v mask=%q",
-			cfg.Layout, cfg.Sensitive_Keys, cfg.Sensitive_Mask)
+	// 零值字段显式确认（Service/Env 不设默认）
+	if cfg.Service != "" || cfg.Env != "" {
+		t.Errorf("expected empty Service/Env defaults, got %+v", cfg)
+	}
+	// 零值显式确认：sensitive 不设默认（保持无打码行为）。
+	// Sensitive.Keys 必须是 nil（非 []string{}），否则与 want 的 DeepEqual 语义不一致。
+	if cfg.Sensitive.Keys != nil || cfg.Sensitive.Mask != "" {
+		t.Errorf("expected empty sensitive defaults, got keys=%v mask=%q",
+			cfg.Sensitive.Keys, cfg.Sensitive.Mask)
 	}
 }
 
@@ -210,7 +215,7 @@ func TestOptionBuilders(t *testing.T) {
 	}
 }
 
-// ParseFileFormat：yaml 字符串 → FileFormat 枚举。空→JSON、json/text（大小写不敏感+trim）→对应、
+// ParseFileFormat：格式字符串 → FileFormat 枚举。空→JSON、json/text（大小写不敏感+trim）→对应、
 // 其它非空→error（不静默回退）。同时验证 FileFormat.String()。
 func TestParseFileFormat(t *testing.T) {
 	ok := []struct {

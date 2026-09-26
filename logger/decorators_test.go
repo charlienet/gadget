@@ -195,7 +195,7 @@ func TestStackSkipsPlainValues(t *testing.T) {
 	}
 }
 
-// --- Fatal 经异步默认 logger：flushAsync 的 async!=nil 分支 ---
+// --- Fatal 经异步默认 logger：close 释放链的 async 分支 ---
 
 func TestFatalFlushesAsyncDefault(t *testing.T) {
 	t.Cleanup(func() { _ = logger.Close(2 * time.Second) })

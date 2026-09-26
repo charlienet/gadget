@@ -236,19 +236,19 @@ func BenchmarkInit(b *testing.B) {
 	b.Run("console", func(b *testing.B) {
 		b.Cleanup(func() { _ = Close(2 * time.Second) })
 		for b.Loop() {
-			_ = Init(Config{Level: "info", Output: "console"})
+			_ = Init(Config{Level: "info", Outputs: OutputsConfig{Console: &ConsoleConfig{}}})
 		}
 	})
 	b.Run("file", func(b *testing.B) {
 		path := filepath.Join(b.TempDir(), "init.log")
 		b.Cleanup(func() { _ = Close(2 * time.Second) })
 		for b.Loop() {
-			_ = Init(Config{Level: "info", Output: "file", File: path, FileFormat: "json"})
+			_ = Init(Config{Level: "info", Outputs: OutputsConfig{File: &FileConfig{Filename: path, Format: "json"}}})
 		}
 	})
 }
 
-// BenchmarkParseFileFormat ParseFileFormat 各分支成本（yaml 字符串 → 枚举，含归一化与 error 路径）。
+// BenchmarkParseFileFormat ParseFileFormat 各分支成本（格式字符串 → 枚举，含归一化与 error 路径）。
 func BenchmarkParseFileFormat(b *testing.B) {
 	cases := []struct{ name, in string }{
 		{"empty", ""},

@@ -58,7 +58,7 @@ func TestInitConsole(t *testing.T) {
 	got := captureStdout(t, func() {
 		if err := logger.Init(logger.Config{
 			Level:   "warn",
-			Output:  "console",
+			Outputs: logger.OutputsConfig{Console: &logger.ConsoleConfig{}},
 			Service: "pay-svc",
 			Env:     "test",
 			Source:  true,
@@ -110,10 +110,10 @@ func TestInitFileOnly(t *testing.T) {
 	path := filepath.Join(dir, "app.log")
 
 	if err := logger.Init(logger.Config{
-		Level:  "info",
-		Output: "file", // 纯文件：控制台丢弃
-		File:   path,
-		Source: false,
+		Level: "info",
+		// 纯文件：Console 节点 nil → 控制台丢弃
+		Outputs: logger.OutputsConfig{File: &logger.FileConfig{Filename: path}},
+		Source:  false,
 	}); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
@@ -135,7 +135,7 @@ func TestInitFileOnly(t *testing.T) {
 	}
 }
 
-// TestInitFileTextFormat：Config.FileFormat="text" 透传至文件 handler，落地为 TextHandler 文本格式。
+// TestInitFileTextFormat：FileConfig.Format="text" 透传至文件 handler，落地为 TextHandler 文本格式。
 func TestInitFileTextFormat(t *testing.T) {
 	withRestoreDefault(t)
 	t.Cleanup(func() { _ = logger.Close(2 * time.Second) })
@@ -151,10 +151,12 @@ func TestInitFileTextFormat(t *testing.T) {
 	path := filepath.Join(dir, "app.log")
 
 	if err := logger.Init(logger.Config{
-		Level:      "info",
-		Output:     "file", // 纯文件：控制台丢弃
-		File:       path,
-		FileFormat: "text", // 关键：文件用 TextHandler
+		Level: "info",
+		// 纯文件：Console 节点 nil → 控制台丢弃
+		Outputs: logger.OutputsConfig{File: &logger.FileConfig{
+			Filename: path,
+			Format:   "text", // 关键：文件用 TextHandler
+		}},
 	}); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
@@ -204,13 +206,17 @@ func TestInitBoth(t *testing.T) {
 
 	gotConsole := captureStdout(t, func() {
 		if err := logger.Init(logger.Config{
-			Level:      "trace",
-			Output:     "both",
-			File:       path,
-			MaxSize:    5,
-			MaxAge:     1,
-			MaxBackups: 2,
-			Compress:   false,
+			Level: "trace",
+			Outputs: logger.OutputsConfig{
+				Console: &logger.ConsoleConfig{},
+				File: &logger.FileConfig{
+					Filename:   path,
+					MaxSize:    5,
+					MaxAge:     1,
+					MaxBackups: 2,
+					Compress:   false,
+				},
+			},
 		}); err != nil {
 			t.Fatalf("Init: %v", err)
 		}
@@ -236,7 +242,7 @@ func TestInitAsync(t *testing.T) {
 	var buf bytes.Buffer
 	// 直接验证异步 Config 路径：Init 不支持自定义输出，这里用同参数的 New 验证
 	// 异步装配来自 Init 语义；再走一遍 Init 确认不报错且 DefaultLogger 可用。
-	cfg := logger.Config{Level: "info", Output: "console", Async: true, QueueSize: 64}
+	cfg := logger.Config{Level: "info", Outputs: logger.OutputsConfig{Console: &logger.ConsoleConfig{}}, Async: true, QueueSize: 64}
 
 	l := logger.New(logger.WithLevel(logger.ParseLevel(cfg.Level)),
 		logger.WithConsole(logger.WithConsoleWriter(&buf)), logger.WithAsync(cfg.QueueSize), logger.WithConsole(logger.WithConsoleColor(false)))
@@ -266,7 +272,7 @@ func TestInitLevelFromEnvFallback(t *testing.T) {
 	t.Setenv("LOG_LEVEL", "debug")
 
 	got := captureStdout(t, func() {
-		if err := logger.Init(logger.Config{Level: "", Output: "console"}); err != nil {
+		if err := logger.Init(logger.Config{Level: "", Outputs: logger.OutputsConfig{Console: &logger.ConsoleConfig{}}}); err != nil {
 			t.Fatalf("Init: %v", err)
 		}
 		slog.Debug("env debug visible") // LOG_LEVEL=debug → Debug 不被过滤
@@ -279,7 +285,7 @@ func TestInitLevelFromEnvFallback(t *testing.T) {
 	// 环境变量非法 → 回退 Info，Debug 被过滤
 	t.Setenv("LOG_LEVEL", "garbage")
 	got = captureStdout(t, func() {
-		if err := logger.Init(logger.Config{Output: "console"}); err != nil {
+		if err := logger.Init(logger.Config{Outputs: logger.OutputsConfig{Console: &logger.ConsoleConfig{}}}); err != nil {
 			t.Fatalf("Init: %v", err)
 		}
 		slog.Debug("hidden debug")
@@ -303,7 +309,7 @@ func TestInitVariadicOverride(t *testing.T) {
 	// ① Config level=info 打底，opts WithLevel(warn) 覆盖 → Info 被过滤、Warn 可见
 	got := captureStdout(t, func() {
 		if err := logger.Init(
-			logger.Config{Level: "info", Output: "console"},
+			logger.Config{Level: "info", Outputs: logger.OutputsConfig{Console: &logger.ConsoleConfig{}}},
 			logger.WithLevel(logger.Warn),
 		); err != nil {
 			t.Fatalf("Init: %v", err)
@@ -321,7 +327,7 @@ func TestInitVariadicOverride(t *testing.T) {
 	// ② Config 无敏感配置，opts WithSensitiveKeys("mytoken") 叠加生效 → 值被打码
 	got2 := captureStdout(t, func() {
 		if err := logger.Init(
-			logger.Config{Level: "info", Output: "console"},
+			logger.Config{Level: "info", Outputs: logger.OutputsConfig{Console: &logger.ConsoleConfig{}}},
 			logger.WithSensitiveKeys("mytoken"),
 		); err != nil {
 			t.Fatalf("Init: %v", err)
@@ -334,44 +340,50 @@ func TestInitVariadicOverride(t *testing.T) {
 }
 
 // TestInitSinkValidationAfterMerge：黑洞校验后移到合并之后——
-// 反例（file/both 无路径）报错且不改 DefaultLogger；正例（opts WithFile 补路径）通过；
-// 非法 FileFormat（非空未知值）报错不静默回退。
+// 反例（File 节点存在但无 filename）报错且不改 DefaultLogger；正例（opts WithFile 补路径）通过；
+// 非法 Format（非空未知值）报错不静默回退。
 func TestInitSinkValidationAfterMerge(t *testing.T) {
 	withRestoreDefault(t)
 	orig := logger.DefaultLogger
 
-	// 反例1：Output=file 但无路径、无 opts 补 → 报错
-	if err := logger.Init(logger.Config{Output: "file", File: ""}); err == nil ||
-		!strings.Contains(err.Error(), "requires non-empty file path") {
-		t.Errorf(`Init(file, empty) must error, got: %v`, err)
+	// 反例1：File 节点存在但 filename 空、无 opts 补 → 报错
+	if err := logger.Init(logger.Config{
+		Outputs: logger.OutputsConfig{File: &logger.FileConfig{Filename: ""}},
+	}); err == nil ||
+		!strings.Contains(err.Error(), "requires non-empty filename") {
+		t.Errorf(`Init(file node, empty filename) must error, got: %v`, err)
 	}
 	if logger.DefaultLogger != orig {
 		t.Error("failed Init must not touch DefaultLogger")
 	}
-	// 反例2：both 空路径 → 报错
-	if err := logger.Init(logger.Config{Output: "both", File: ""}); err == nil {
-		t.Error(`Init(both, empty) must error`)
+	// 反例2：Console+File 双节点、filename 空 → 报错
+	if err := logger.Init(logger.Config{
+		Outputs: logger.OutputsConfig{Console: &logger.ConsoleConfig{}, File: &logger.FileConfig{Filename: ""}},
+	}); err == nil {
+		t.Error(`Init(console+file node, empty filename) must error`)
 	}
 
-	// 正例：cfg file 空，但用户 opts WithFile 补路径 → 合并后 sink 有效，通过
+	// 正例：cfg File 节点 filename 空，但用户 opts WithFile 补路径 → 合并后 sink 有效，通过
 	dir := t.TempDir()
 	t.Cleanup(func() { _ = logger.Close(2 * time.Second) })
 	if err := logger.Init(
-		logger.Config{Output: "file", File: ""},
+		logger.Config{Outputs: logger.OutputsConfig{File: &logger.FileConfig{Filename: ""}}},
 		logger.WithFile(filepath.Join(dir, "via-opt.log")),
 	); err != nil {
 		t.Errorf("WithFile via opts should satisfy file sink, got: %v", err)
 	}
 
-	// 反例3：非法 FileFormat（非空未知值）→ 报错，不静默回退 JSON
+	// 反例3：非法 Format（非空未知值）→ 报错，不静默回退 JSON
 	if err := logger.Init(logger.Config{
-		Output: "file", File: filepath.Join(dir, "x.log"), FileFormat: "yaml",
+		Outputs: logger.OutputsConfig{File: &logger.FileConfig{
+			Filename: filepath.Join(dir, "x.log"), Format: "yaml",
+		}},
 	}); err == nil || !strings.Contains(err.Error(), "unknown file format") {
-		t.Errorf("Init with illegal FileFormat must error, got: %v", err)
+		t.Errorf("Init with illegal FileConfig.Format must error, got: %v", err)
 	}
 }
 
-// --- Config.NoColor 两态端到端（仅控制台 sink 生效）---
+// --- ConsoleConfig.NoColor 两态端到端（仅控制台 sink 生效）---
 //
 // captureStdout 把 os.Stdout 重定向到管道（非 TTY）。NoColor=true 强制关色、NoColor=false
 // 走自动判定（非 TTY → 关），二者在非 TTY 下输出都无 ANSI——端到端只验证「不涂色」契约；
@@ -382,7 +394,7 @@ func TestInitConfigNoColorForceOff(t *testing.T) {
 	t.Cleanup(func() { _ = logger.Close(2 * time.Second) })
 
 	got := captureStdout(t, func() {
-		if err := logger.Init(logger.Config{Level: "info", Output: "console", NoColor: true}); err != nil {
+		if err := logger.Init(logger.Config{Level: "info", Outputs: logger.OutputsConfig{Console: &logger.ConsoleConfig{NoColor: true}}}); err != nil {
 			t.Fatalf("Init: %v", err)
 		}
 		slog.Info("force color off")
@@ -398,7 +410,7 @@ func TestInitConfigNoColorAuto(t *testing.T) {
 
 	got := captureStdout(t, func() {
 		// NoColor 省略（false 默认）→ 自动判定：管道非 TTY → 关闭颜色
-		if err := logger.Init(logger.Config{Level: "info", Output: "console"}); err != nil {
+		if err := logger.Init(logger.Config{Level: "info", Outputs: logger.OutputsConfig{Console: &logger.ConsoleConfig{}}}); err != nil {
 			t.Fatalf("Init: %v", err)
 		}
 		slog.Info("auto color")
@@ -420,7 +432,10 @@ func TestInitConfigNoColorBothFileNoRegression(t *testing.T) {
 	path := filepath.Join(dir, "app.log")
 
 	got := captureStdout(t, func() {
-		if err := logger.Init(logger.Config{Level: "info", Output: "both", File: path, NoColor: true}); err != nil {
+		if err := logger.Init(logger.Config{Level: "info", Outputs: logger.OutputsConfig{
+			Console: &logger.ConsoleConfig{NoColor: true},
+			File:    &logger.FileConfig{Filename: path},
+		}}); err != nil {
 			t.Fatalf("Init(both): %v", err)
 		}
 		slog.Info("both sinks")
@@ -437,9 +452,9 @@ func TestInitConfigNoColorBothFileNoRegression(t *testing.T) {
 	}
 }
 
-// --- Config.Layout / Sensitive_Keys / Sensitive_Mask 端到端映射 ---
+// --- FileConfig.Layout / Sensitive.Keys / Sensitive.Mask 端到端映射 ---
 
-// TestInitConfigSensitiveKeys：Config.Sensitive_Keys 非空 → 注入 WithSensitiveKeys，
+// TestInitConfigSensitiveKeys：Sensitive.Keys 非空 → 注入 WithSensitiveKeys，
 // console 端命中的属性值被打码为默认掩码 ******。
 func TestInitConfigSensitiveKeys(t *testing.T) {
 	withRestoreDefault(t)
@@ -447,23 +462,23 @@ func TestInitConfigSensitiveKeys(t *testing.T) {
 
 	got := captureStdout(t, func() {
 		if err := logger.Init(logger.Config{
-			Level:          "info",
-			Output:         "console",
-			Sensitive_Keys: []string{"mytoken"},
+			Level:     "info",
+			Outputs:   logger.OutputsConfig{Console: &logger.ConsoleConfig{}},
+			Sensitive: logger.SensitiveConfig{Keys: []string{"mytoken"}},
 		}); err != nil {
 			t.Fatalf("Init: %v", err)
 		}
 		slog.Info("sens", "mytoken", "raw-secret", "safe", "keep-me")
 	})
 	if strings.Contains(got, "raw-secret") || !strings.Contains(got, "******") {
-		t.Errorf("expected Config.Sensitive_Keys to mask value, got: %s", got)
+		t.Errorf("expected Sensitive.Keys to mask value, got: %s", got)
 	}
 	if !strings.Contains(got, "keep-me") {
 		t.Errorf("non-sensitive attr must stay intact, got: %s", got)
 	}
 }
 
-// TestInitConfigSensitiveMask：Config.Sensitive_Mask 非空 → 注入 WithSensitiveMask，
+// TestInitConfigSensitiveMask：Sensitive.Mask 非空 → 注入 WithSensitiveMask，
 // 自定义掩码替换默认 ******。
 func TestInitConfigSensitiveMask(t *testing.T) {
 	withRestoreDefault(t)
@@ -471,10 +486,9 @@ func TestInitConfigSensitiveMask(t *testing.T) {
 
 	got := captureStdout(t, func() {
 		if err := logger.Init(logger.Config{
-			Level:          "info",
-			Output:         "console",
-			Sensitive_Keys: []string{"mytoken"},
-			Sensitive_Mask: "[X]",
+			Level:     "info",
+			Outputs:   logger.OutputsConfig{Console: &logger.ConsoleConfig{}},
+			Sensitive: logger.SensitiveConfig{Keys: []string{"mytoken"}, Mask: "[X]"},
 		}); err != nil {
 			t.Fatalf("Init: %v", err)
 		}
@@ -484,11 +498,11 @@ func TestInitConfigSensitiveMask(t *testing.T) {
 		t.Errorf("expected custom mask [X] applied, got: %s", got)
 	}
 	if strings.Contains(got, "******") {
-		t.Errorf("default mask must be overridden by Sensitive_Mask, got: %s", got)
+		t.Errorf("default mask must be overridden by Sensitive.Mask, got: %s", got)
 	}
 }
 
-// TestInitConfigSensitiveMaskOnly：仅设 Sensitive_Mask 不设 keys → WithSensitiveMask
+// TestInitConfigSensitiveMaskOnly：仅设 Mask 不设 keys → WithSensitiveMask
 // 初始化 Sensitive options，打码走内置词集（与直接用 Option 行为一致，不发明组合规则）。
 func TestInitConfigSensitiveMaskOnly(t *testing.T) {
 	withRestoreDefault(t)
@@ -496,9 +510,9 @@ func TestInitConfigSensitiveMaskOnly(t *testing.T) {
 
 	got := captureStdout(t, func() {
 		if err := logger.Init(logger.Config{
-			Level:          "info",
-			Output:         "console",
-			Sensitive_Mask: "[M]",
+			Level:     "info",
+			Outputs:   logger.OutputsConfig{Console: &logger.ConsoleConfig{}},
+			Sensitive: logger.SensitiveConfig{Mask: "[M]"},
 		}); err != nil {
 			t.Fatalf("Init: %v", err)
 		}
@@ -509,7 +523,7 @@ func TestInitConfigSensitiveMaskOnly(t *testing.T) {
 	}
 }
 
-// TestInitConfigSensitiveKeysAppend：Config.Sensitive_Keys 打底 + opts WithSensitiveKeys
+// TestInitConfigSensitiveKeysAppend：Sensitive.Keys 打底 + opts WithSensitiveKeys
 // 追加（append 语义）→ 两组词都生效。
 func TestInitConfigSensitiveKeysAppend(t *testing.T) {
 	withRestoreDefault(t)
@@ -518,9 +532,9 @@ func TestInitConfigSensitiveKeysAppend(t *testing.T) {
 	got := captureStdout(t, func() {
 		if err := logger.Init(
 			logger.Config{
-				Level:          "info",
-				Output:         "console",
-				Sensitive_Keys: []string{"mytoken"},
+				Level:     "info",
+				Outputs:   logger.OutputsConfig{Console: &logger.ConsoleConfig{}},
+				Sensitive: logger.SensitiveConfig{Keys: []string{"mytoken"}},
 			},
 			logger.WithSensitiveKeys("extra"),
 		); err != nil {
@@ -533,7 +547,7 @@ func TestInitConfigSensitiveKeysAppend(t *testing.T) {
 	}
 }
 
-// TestInitConfigLayoutDateRotate：Config.Layout 非空 + Output both → 构造成功，
+// TestInitConfigLayoutDateRotate：FileConfig.Layout 非空 + Console/File 双节点 → 构造成功，
 // 落地为按日期命名文件（对齐 rotate 命名规则 name.<layout>.ext）。
 func TestInitConfigLayoutDateRotate(t *testing.T) {
 	withRestoreDefault(t)
@@ -544,10 +558,14 @@ func TestInitConfigLayoutDateRotate(t *testing.T) {
 
 	got := captureStdout(t, func() {
 		if err := logger.Init(logger.Config{
-			Level:  "info",
-			Output: "both",
-			File:   path,
-			Layout: "2006-01-02",
+			Level: "info",
+			Outputs: logger.OutputsConfig{
+				Console: &logger.ConsoleConfig{},
+				File: &logger.FileConfig{
+					Filename: path,
+					Layout:   "2006-01-02",
+				},
+			},
 		}); err != nil {
 			t.Fatalf("Init: %v", err)
 		}
