@@ -157,6 +157,17 @@ func TestConsoleNoColorByteIdenticalToFileText(t *testing.T) {
 				}
 			},
 		},
+		{
+			// ⑨ logvaluer：实现 slog.LogValuer 的值（Kind()==KindLogValuer 惰性形态）
+			// 经渲染链 Resolve 后按 Group 展开；双通道整行等同 + want 锚定（P1 回归）
+			name: "logvaluer",
+			build: func() slog.Record {
+				r := slog.NewRecord(fixed, slog.LevelInfo, "m", 0)
+				r.AddAttrs(slog.Any("user", logValUser{Name: "bob", Age: 30}))
+				return r
+			},
+			want: ts + " INFO m user.name=bob user.age=30\n",
+		},
 	}
 
 	for _, tc := range cases {

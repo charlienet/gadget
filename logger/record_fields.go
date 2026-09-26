@@ -47,6 +47,10 @@ func (f frontFields) get(key string) string { return f[key] }
 // frontFieldKeys（out 预置了全部前置 key，故以 out 为准）才写入 out，同名覆盖 → 取最后一次出现
 // 的值（含空串，末次覆盖前次）。scanFrontFields（attrs 切片）与 scanRecordFrontFields（record
 // 遍历）共用此判据，避免两处复制。frontFields 是 map 引用，就地修改，返回无意义。
+//
+// Go 1.27.1 实测：实现 LogValuer 的值 Kind() 返回 KindLogValuer（非 KindString、非 KindGroup），
+// 不命中本判据——即使其解析后为 string 形态也不前置。前置字段契约只认显式 String，
+// 此为既定语义（渲染路径在 console.go appendAttr 入口 Resolve 后按普通 attr 输出）。
 func captureFrontAttr(out frontFields, a slog.Attr) {
 	if a.Value.Kind() == slog.KindGroup || a.Value.Kind() != slog.KindString {
 		return

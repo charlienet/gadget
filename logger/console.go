@@ -128,14 +128,14 @@ func (h *consoleHandler) Handle(_ context.Context, r slog.Record) error {
 	// （两循环均跳过已前置的前置字段，避免消息之后重复；h.attrs 带分组前缀时
 	// 其 key 与前置的裸 key 不同名，不参与去重），均带分组前缀
 	prefix := h.groupPrefix()
-	buf = h.appendAttrs(buf, h.attrs, prefix, picked)
+	buf = h.appendAttrs(buf, h.attrs, prefix, picked, 0)
 	r.Attrs(func(a slog.Attr) bool {
 		// prefixed 传 false：record attr 的 key 恒为裸 key、不随 handler groups 变化，
 		// 故已前置的前置字段必与之同名、须剔除（勿改为传 prefix != ""）。
 		if isPickedFrontAttr(a, picked, false) {
 			return true
 		}
-		buf = h.appendAttr(buf, a, prefix)
+		buf = h.appendAttr(buf, a, prefix, 0)
 		return true
 	})
 
@@ -195,26 +195,42 @@ func (h *consoleHandler) groupPrefix() string {
 	return strings.Join(h.groups, ".") + "."
 }
 
-// appendAttrs 批量输出属性；跳过已前置输出的前置字段（prefixed 见 isPickedFrontAttr）
-func (h *consoleHandler) appendAttrs(buf []byte, attrs []slog.Attr, prefix string, picked frontFields) []byte {
+// maxAttrRenderDepth Group 递归展开深度上限（对齐标准库 maxLogValues=100 量级）。
+// 渲染层必须自设上限：maxLogValues 只在单次 Value.Resolve 调用链内累计，
+// selfGroup 形态（LogValue 返回含自身惰性值的 Group）每次 Resolve 独立计数、
+// 标准库拦不住渲染层递归；无上限时 prefix 逐层拼接为 O(depth²) 内存增长，
+// 可先触发内核 OOM kill 波及同机进程（子进程实测 signal: killed）。
+// 超限分支不再下钻，输出 <prefix+key>=!DEPTH 有界退化单行。
+const maxAttrRenderDepth = 100
+
+// appendAttrs 批量输出属性；跳过已前置输出的前置字段（prefixed 见 isPickedFrontAttr）。
+// depth 为本批 attrs 的渲染起始深度（入口传 0，Group 递归逐级 +1）。
+func (h *consoleHandler) appendAttrs(buf []byte, attrs []slog.Attr, prefix string, picked frontFields, depth int) []byte {
 	prefixed := prefix != ""
 	for _, a := range attrs {
 		if isPickedFrontAttr(a, picked, prefixed) {
 			continue
 		}
-		buf = h.appendAttr(buf, a, prefix)
+		buf = h.appendAttr(buf, a, prefix, depth)
 	}
 
 	return buf
 }
 
-// appendAttr 输出单个属性，Group 类型递归展开
-func (h *consoleHandler) appendAttr(buf []byte, a slog.Attr, prefix string) []byte {
-	if a.Value.Kind() == slog.KindGroup {
+// appendAttr 输出单个属性，Group 类型递归展开（深度受 maxAttrRenderDepth 约束，
+// 达上限不再下钻、输出字面 !DEPTH 退化，病理/程序化超深输入有界不 OOM 不栈爆）。
+// 入口先 Resolve：实现 slog.LogValuer 的值 Kind() 为 KindLogValuer（Go 1.21+），
+// 判 Kind 前不解析会漏进 appendValue 的 default 调 Group() 而 panic（对齐标准库
+// handleState.appendAttr，log/slog/handler.go）。Group 元素递归回本函数逐级解析，
+// 嵌套 LogValuer 由标准库承担（Value.Resolve 内建 maxLogValues，链式自引用超限
+// 退化为 error）；跨 Resolve 调用的渲染层递归深度由本函数 depth 参数守卫。
+func (h *consoleHandler) appendAttr(buf []byte, a slog.Attr, prefix string, depth int) []byte {
+	a.Value = a.Value.Resolve()
+	if a.Value.Kind() == slog.KindGroup && depth < maxAttrRenderDepth {
 		inner := a.Value.Group()
 		next := prefix + a.Key + "."
 		for _, ga := range inner {
-			buf = h.appendAttr(buf, ga, next)
+			buf = h.appendAttr(buf, ga, next, depth+1)
 		}
 
 		return buf
@@ -230,6 +246,12 @@ func (h *consoleHandler) appendAttr(buf []byte, a slog.Attr, prefix string) []by
 	buf = append(buf, '=')
 	if !h.opts.NoColor {
 		buf = append(buf, colorReset...)
+	}
+
+	// 深度上限退化：Group 不再下钻，值输出字面 !DEPTH（无特殊字符，
+	// 按 needsQuoting 规则形态不加引号，此处直接拼接）
+	if a.Value.Kind() == slog.KindGroup {
+		return append(buf, "!DEPTH"...)
 	}
 
 	// 值渲染：string 按 needsQuoting 规则可选加引号，其余 Kind 复用 appendValue
@@ -292,7 +314,14 @@ func appendValue(buf []byte, v slog.Value) []byte {
 	case slog.KindAny:
 		return appendAny(buf, v.Any())
 	default:
-		// KindGroup 理论上已在 appendAttr 展开，此处防御性兜底
+		// KindGroup 理论上已在 appendAttr 展开，此处防御性兜底。
+		// 惰性 LogValuer（KindLogValuer）会落入本分支：先 Resolve（保证返回值
+		// 不再为 KindLogValuer），仍非 Group 则转派对应 Kind，确保任何输入不 panic。
+		v = v.Resolve()
+		if v.Kind() != slog.KindGroup {
+			return appendValue(buf, v)
+		}
+
 		g := v.Group()
 		buf = append(buf, '{')
 		for i, a := range g {
@@ -377,7 +406,10 @@ func appendQuoted(buf []byte, s string) []byte {
 
 // appendTextValue 输出 slog.Value：字符串按 quoting 规则处理，其余 Kind 复用
 // 同包 appendValue（其内部已处理各 Kind）。Group 理论上已在 appendAttr 展开。
+// 入口先 Resolve：惰性 LogValuer 解析后才可能是 KindString 形态，需纳入引号规则；
+// 对已解析值为幂等空操作。
 func appendTextValue(buf []byte, v slog.Value) []byte {
+	v = v.Resolve()
 	if v.Kind() == slog.KindString {
 		return appendQuoted(buf, v.String())
 	}

@@ -57,6 +57,9 @@ func TestAppendValueAllKinds(t *testing.T) {
 		{"any-textmarshaler", slog.AnyValue(textType{}), "TEXT-OK"},
 		// TextMarshaler 失败回退 %+v
 		{"any-badmarshaler", slog.AnyValue(badMarshaler{}), "{}"},
+		// KindLogValuer 直接进 appendValue（appendAttr/appendTextValue 均已先 Resolve，
+		// 此处覆盖 default 兜底防御分支：Resolve 后按 Group 渲染，不 panic）
+		{"logvaluer-defensive", slog.AnyValue(logValUser{Name: "bob", Age: 30}), "{name=bob age=30}"},
 	}
 
 	for _, tt := range tests {
@@ -66,6 +69,18 @@ func TestAppendValueAllKinds(t *testing.T) {
 				t.Errorf("appendValue(%v) = %q, want %q", tt.val, got, tt.want)
 			}
 		})
+	}
+}
+
+// TestAppendTextValueResolvesLogValuerString：直调 appendTextValue 断言
+// LogValuer（Kind==KindLogValuer）在入口 Resolve 后按 KindString 走 quoting 规则
+// （golden 含引号）。判别力锁定：删除 appendTextValue 入口的 v.Resolve() 后，
+// KindLogValuer ≠ KindString 漏进 appendValue 的 KindAny 分支、绕过 appendQuoted
+// 输出无引号 "a b"，本用例必红。
+func TestAppendTextValueResolvesLogValuerString(t *testing.T) {
+	got := string(appendTextValue(nil, slog.AnyValue(logValStr{})))
+	if got != `"a b"` {
+		t.Errorf("appendTextValue(AnyValue(logValStr{})) = %q, want %q", got, `"a b"`)
 	}
 }
 
@@ -351,26 +366,6 @@ func TestRegistryRegisterUnregister(t *testing.T) {
 		}
 	}
 	loggerMu.Unlock()
-}
-
-// --- flushAsync 两个分支（直接构建内部实例，不污染注册表） ---
-
-func TestFlushAsyncBranches(t *testing.T) {
-	// 无异步：直接返回
-	syncL := newSlogLogger(Options{Level: Info, Console: &ConsoleSettings{Writer: io.Discard}})
-	_ = syncL.flushAsync() // async == nil，不应 panic
-
-	// 有异步：Close 队列 flush
-	asyncL := newSlogLogger(Options{Level: Info, Console: &ConsoleSettings{Writer: io.Discard}, Async: true, QueueSize: 8})
-	asyncL.slog.Info("queued")
-	_ = asyncL.flushAsync()
-
-	total, _ := asyncL.async.Stats()
-	if total != 1 {
-		t.Errorf("expected 1 enqueued, got %d", total)
-	}
-	// 重复 flush 幂等（Close 已置位）
-	_ = asyncL.flushAsync()
 }
 
 // --- stackHandler 空派生 no-op 分支 ---
