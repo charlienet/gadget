@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -22,6 +23,12 @@ import (
 //   - 请求体固定 NDJSON：每行一个 JSON 对象、行间单个 \n、**末尾亦以单个 \n 结束**（发送前
 //     统一补齐，见 httpSink.post），不依赖对端在 EOF 刷残余的行为差异。
 //     严禁发送 v2 批格式 {"logs":[{"event","metadata"}]}（会被当作单个不透明事件）；
+//   - 落盘字段契约（对端接入指导 §2/§3.1）：每行帧固定两键
+//     {"src":"<服务归属>","message":"<单行文本>"}——src 决定对端落盘文件名（对端字符
+//     集 [a-zA-Z0-9._-]，构建时 sanitize：越界字节替换为 '-'，保证非空，防落盘文件名
+//     注入/污染）；对端落盘**只保留 message 文本**、其余结构化字段
+//     丢弃，故时间/级别/msg/attrs 必须全部拼进 message 自身（经 text 版式渲染器产出单行文本
+//     后再 JSON 字符串编码，见 httpHandler.Handle）；
 //   - Content-Type 统一发 "application/json"（服务端不强制）；Gzip 开启时置
 //     Content-Encoding: gzip（服务端支持解压）；
 //   - 成功判据：2xx（服务端 response_code 默认 200）；4xx/5xx 视为失败，其中 4xx（排除
@@ -52,6 +59,7 @@ const defaultHTTPTimeout = 5 * time.Second
 // 各字段语义与默认见 HTTPConfig（Config 层）注释；本结构是 Option 精调层的等价形态。
 type HTTPSettings struct {
 	URL           string            // 完整 POST 端点（含路径，必填）
+	Src           string            // 落盘帧 src 字段（服务归属）；空回退 Options.Service，再空回退 os.Hostname()；越界字符构建时 sanitize 为 '-'
 	Headers       map[string]string // 附加请求头（认证等由应用端注入）
 	BatchSize     int               // 每次 POST 最大条数；<=0 由 handler 回退默认 100
 	FlushInterval time.Duration     // 不满批强制投递间隔；<=0 回退默认 500ms
@@ -83,6 +91,13 @@ type HTTPOption func(*HTTPSettings)
 // WithHTTPHeaders 附加请求头（构建时拷贝，此后调用方改动 map 不影响已建 handler）。
 func WithHTTPHeaders(headers map[string]string) HTTPOption {
 	return func(s *HTTPSettings) { s.Headers = headers }
+}
+
+// WithHTTPSrc 落盘帧的 src 字段（服务归属，决定对端落盘文件名）。空串时由 handler
+// 回退链 Src > Options.Service > os.Hostname()（构建时一次性解析）。对端落盘文件名字符
+// 集限 [a-zA-Z0-9._-]：越界字节在构建时被 sanitize 为 '-'（见 newHTTPHandler），非空有保证。
+func WithHTTPSrc(src string) HTTPOption {
+	return func(s *HTTPSettings) { s.Src = src }
 }
 
 // WithHTTPBatchSize 每次 POST 的最大条数（<=0 由 handler 回退默认 100）。
@@ -143,6 +158,7 @@ type httpSink struct {
 	stderr io.Writer // 告警输出（构建时快照 os.Stderr；测试注入 buffer，避免跨 goroutine 改全局变量）
 
 	url       string
+	src       string // 落盘帧 src 字段（构建时解析并 sanitize：Settings.Src > service > os.Hostname()）
 	headers   map[string]string
 	batch     int
 	flush     time.Duration
@@ -428,22 +444,53 @@ func (s *httpSink) Close() error {
 	return nil
 }
 
+// sanitizeHTTPSrc 把 src 收敛到对端落盘文件名白名单 [a-zA-Z0-9._-]：集合外字节一律
+// 替换为 '-'（ASCII 白名单对 UTF-8 自同步，多字节字符逐字节替换为等量 '-'，不产生
+// 非法 UTF-8）。空串（含全越界再全删的场景不存在——替换非删除，仅输入为空才为空）
+// 回退 "-"，保证帧 src 恒非空、确定性。
+func sanitizeHTTPSrc(src string) string {
+	if src == "" {
+		return "-"
+	}
+	b := []byte(src)
+	for i, c := range b {
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		case c == '.', c == '_', c == '-':
+		default:
+			b[i] = '-'
+		}
+	}
+	return string(b)
+}
+
+// httpFrame NDJSON 单行帧（对端落盘字段契约，见文件头注释）：仅 src 与 message 两键，
+// 经 encoding/json 紧凑序列化为一行；两字段均走 JSON 字符串转义，防注入且帧内无裸换行。
+type httpFrame struct {
+	Src     string `json:"src"`
+	Message string `json:"message"`
+}
+
 // httpHandler 实现 slog.Handler：把每条 record 经 inner 渲染器渲染为一行 NDJSON 帧，
 // 追加进 inflight 缓冲批，由 worker 批量 POST。派生（WithAttrs/WithGroup）拷贝结构体、
 // 共享 *httpSink 与 inner 渲染器（其 writer 指向 s.buf），与 syslogHandler 同构。
 type httpHandler struct {
 	s     *httpSink
-	inner slog.Handler // 帧渲染器（写向 s.buf），复用 newFileHandler(FormatJSON)
+	inner slog.Handler // 帧正文渲染器（写向 s.buf），复用 newFileHandler(FormatText)：text 版式（console 渲染器 NoColor 形态）
 	level slog.Leveler
 }
 
 // newHTTPHandler 按 settings 构建 http handler + 共享发送状态（并启动 worker goroutine）。
+// service 供帧 src 字段回退（Settings.Src 空→service→os.Hostname()，构建时一次性解析，
+// 传入方式与 newSyslogHandler 的 service 形参链路一致）；
 // lvl / addSource 与 console/file/syslog 同源传入 inner 渲染器。
 // 返回的 *httpSink 应注册到 Close 链（slogLogger.httpCloser），Close 必停 worker。
 //
-// 渲染格式固定 JSON（NDJSON 的前提），不提供 Format 配置：text 渲染体非 JSON，
-// 对端 json codec 无法逐行解码。
-func newHTTPHandler(settings *HTTPSettings, lvl slog.Leveler, addSource bool) (*httpHandler, *httpSink) {
+// src 白名单防护（对端落盘文件名字符集 [a-zA-Z0-9._-]）：缺省链解析后统一 sanitize，
+// 越界字节替换为 '-'——对端实测 src 含 "/.." 时应答 200 但落盘文件名被污染，故必须
+// 在发送前收敛（确定性、保证非空）；Init 层不校验（值可能来自动态 Config.Service），
+// 由本 sanitize 兜底。
+func newHTTPHandler(settings *HTTPSettings, service string, lvl slog.Leveler, addSource bool) (*httpHandler, *httpSink) {
 	batch := settings.BatchSize
 	if batch <= 0 {
 		batch = defaultHTTPBatchSize // 非法/未设兜底（负值已由 Init 拦截）
@@ -462,9 +509,23 @@ func newHTTPHandler(settings *HTTPSettings, lvl slog.Leveler, addSource bool) (*
 		headers[k] = v
 	}
 
+	// 帧 src 缺省链（构建时一次性解析）：显式 Src > service（Options.Service）> os.Hostname()，
+	// 解析结果统一 sanitize 为对端白名单字符集（保证非空，见 sanitizeHTTPSrc）。
+	src := settings.Src
+	if src == "" {
+		src = service
+	}
+	if src == "" {
+		if h, err := os.Hostname(); err == nil {
+			src = h
+		}
+	}
+	src = sanitizeHTTPSrc(src)
+
 	s := &httpSink{
 		stderr:    os.Stderr,
 		url:       settings.URL,
+		src:       src,
 		headers:   headers,
 		batch:     batch,
 		flush:     flush,
@@ -498,9 +559,11 @@ func newHTTPHandler(settings *HTTPSettings, lvl slog.Leveler, addSource bool) (*
 			return a
 		},
 	}
-	// 帧渲染器与文件 sink 同源（FormatJSON → slog.NewJSONHandler）：JSON handler 本身
-	// 保证单行（消息内 \n 转义为字面量），trim 尾 \n 后即为一个合法的 NDJSON 帧。
-	inner := newFileHandler(&s.buf, FormatJSON, handlerOpts)
+	// 帧正文渲染器与文件 text sink / console 同源（FormatText → console 渲染器 NoColor 形态）：
+	// 裸值版式含 time/level/msg/attrs 全量、单行（appendMessageEscaped 已把裸 \n/\r 转义为
+	// 字面量两字符），trim 尾 \n 后整体作为帧 message 字段做 JSON 字符串编码。
+	// 对端落盘只保留 message 文本，故结构化信息必须全部拼进这一行文本自身。
+	inner := newFileHandler(&s.buf, FormatText, handlerOpts)
 
 	go s.run() // 发送 worker 随 handler 构建启动；Close 必停（见 httpSink.Close）
 
@@ -512,8 +575,11 @@ func (h *httpHandler) Enabled(ctx context.Context, level slog.Level) bool {
 	return h.inner.Enabled(ctx, level)
 }
 
-// Handle 渲染单条 record 为一行 NDJSON 帧并追加进当前缓冲批。全程只做 mutex + 渲染 +
-// append，绝不做网络 IO（网络 IO 在 worker goroutine）；批满则换出踢 worker。
+// Handle 渲染单条 record 为两键帧 {"src":…,"message":…} 并追加进当前缓冲批。
+// 全程只做 mutex + 渲染 + append，绝不做网络 IO（网络 IO 在 worker goroutine）；
+// 批满则换出踢 worker。message 取 text 版式渲染器输出的单行文本（含时间/级别/msg/attrs）；
+// 文本内原有的 \n 字面量两字符经 JSON 编码为 \\n——落盘后 message 含 \n 字面量属预期
+// （对端契约要求正文单行），不做特殊处理。
 func (h *httpHandler) Handle(ctx context.Context, r slog.Record) error {
 	s := h.s
 	s.mu.Lock()
@@ -527,7 +593,11 @@ func (h *httpHandler) Handle(ctx context.Context, r slog.Record) error {
 	if err := h.inner.Handle(ctx, r); err != nil {
 		return err
 	}
-	frame := bytes.TrimRight(s.buf.Bytes(), "\n") // JSON handler 每行带尾 \n，批内改为单 \n 连接
+	text := bytes.TrimRight(s.buf.Bytes(), "\n") // text 渲染器每行带尾 \n，帧正文不含换行
+	frame, err := json.Marshal(httpFrame{Src: s.src, Message: string(text)})
+	if err != nil { // 两字段皆为 string，理论不可达；防御性返回错误、不 panic
+		return err
+	}
 	if len(s.cur) > 0 {
 		s.cur = append(s.cur, '\n')
 	}

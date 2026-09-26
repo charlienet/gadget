@@ -246,9 +246,12 @@ func configOptions(cfg Config) []Option {
 
 	// http 后端：节点存在即启用。Timeout/FlushInterval 经 time.ParseDuration 解析
 	// （非法值由 Init 统一上报，此处跳过不注入 → WithHTTP 的默认值生效）；
-	// BatchSize 仅 >0 时注入（0 = 保持 WithHTTP 默认 100，负值由 Init 拦截）；Headers/Gzip 直接映射。
+	// BatchSize 仅 >0 时注入（0 = 保持 WithHTTP 默认 100，负值由 Init 拦截）；
+	// Src/Headers/Gzip 直接映射（Src 空串不改变语义：handler 内回退 Service→os.Hostname()，
+	// 回退结果同样经白名单 sanitize；Init 不校验 Src，库构建期 sanitize 兜底）。
 	if hc := cfg.Outputs.HTTP; hc != nil {
 		hopts := []HTTPOption{
+			WithHTTPSrc(hc.Src),
 			WithHTTPHeaders(hc.Headers),
 			WithHTTPGzip(hc.Gzip),
 		}

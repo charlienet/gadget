@@ -150,7 +150,7 @@ func newSlogLogger(opt Options) *slogLogger {
 		if opt.Leveler != nil {
 			lvl = opt.Leveler
 		}
-		h, s := newHTTPHandler(opt.HTTP, lvl, opt.Source)
+		h, s := newHTTPHandler(opt.HTTP, opt.Service, lvl, opt.Source)
 		l.httpHandler = h
 		l.httpCloser = s
 	}

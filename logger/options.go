@@ -135,7 +135,7 @@ type SyslogSettings struct {
 	Network  string        // "tcp"(默认)/"udp"
 	Address  string        // 远端地址（必填）
 	Tag      string        // RFC5424 APP-NAME；空回退 Options.Service，再空回退 "gadget"
-	Hostname string        // RFC5424 HOSTNAME；空回退 os.Hostname()
+	Hostname string        // RFC5424 HOSTNAME（对端落盘归属=服务名）；空回退 Options.Service，再空回退 os.Hostname()
 	Facility string        // 设施名；空默认 "user"(1)；非法回退 user
 	Format   FileFormat    // MSG 体渲染格式（FormatJSON 默认 / FormatText）
 	Timeout  time.Duration // 单次 dial/write 超时；<=0 用默认 5s
@@ -147,7 +147,7 @@ const defaultSyslogTimeout = 5 * time.Second
 // WithSyslog 启用 syslog sink（向远端发送 RFC5424 报文）。必须把 o.Syslog 置为非 nil
 // （即使不带子选项），再依次应用 opts。address 为远端 host:port（必填）。
 // 子选项缺省即默认：Network=tcp、Facility=user、Format=json、Timeout=5s、
-// Tag/Hostname 空（分别回退 Service/"gadget"、os.Hostname）。
+// Tag/Hostname 空（Tag 回退 Service→"gadget"；Hostname 回退 Service→os.Hostname()）。
 func WithSyslog(address string, opts ...SyslogOption) Option {
 	return func(o *Options) {
 		s := &SyslogSettings{
@@ -176,7 +176,8 @@ func WithSyslogTag(tag string) SyslogOption {
 	return func(s *SyslogSettings) { s.Tag = tag }
 }
 
-// WithSyslogHostname RFC5424 HOSTNAME。
+// WithSyslogHostname RFC5424 HOSTNAME。对端语义：hostname 位=服务归属（src，决定落盘
+// 归属），建议显式配置服务名；空时 handler 回退 Options.Service，再空回退 os.Hostname()。
 func WithSyslogHostname(hostname string) SyslogOption {
 	return func(s *SyslogSettings) { s.Hostname = hostname }
 }

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 // syslog.go：syslog 后端（slog.Handler），向远端 syslog 服务发送 RFC5424 报文，
@@ -32,10 +33,20 @@ import (
 // 限流告警（同一原因每 5s 最多 1 条，防告警洪泛）。绝不阻塞日志调用方超过 timeout。
 
 // syslogTimeLayout RFC5424 TIMESTAMP 的 RFC3339 带毫秒格式（含时区偏移）。
+// 输出恒为 UTC「Z」或 "+HH:MM" 带冒号形态（Go 的 Z07:00 布局），规避对端实测的
+// "+0800" 无冒号形态被 Vector syslog source 静默丢帧的坑（对端接入指导）。
 const syslogTimeLayout = "2006-01-02T15:04:05.000Z07:00"
 
 // syslogWarnInterval 同一失败原因向 stderr 输出告警的最小间隔（限流，防洪泛）。
 const syslogWarnInterval = 5 * time.Second
+
+// syslogMaxFrame 单帧（整条 RFC5424 报文，含尾部 \n）字节上限 = 对端 Vector syslog
+// source 实配的 max_length。超限帧对端**静默丢帧**，截断责任在客户端（对端接入指导）：
+// 超限时报文 MSG 体截断至整帧恰 ≤ 该值，MSG 尾部保留 syslogTruncMark 标记。
+const syslogMaxFrame = 102400
+
+// syslogTruncMark 截断标记（追加在截断后的 MSG 尾部，其字节数计入 syslogMaxFrame 预算）。
+const syslogTruncMark = "…[truncated]"
 
 // syslogSeverity 把 slog 级别映射为 RFC5424 severity 编号。
 // Debug（及以下，含 trace）→7、Info→6、Warn→4、Error（及以上，含 fatal）→3。
@@ -104,14 +115,24 @@ type syslogConn struct {
 
 	buf bytes.Buffer // 复用的整包落地缓冲（inner 渲染体拷入 pkt 后可安全 Reset）
 
-	lastWarn map[string]time.Time // reason → 上次告警时间（限流）
-	dropped  uint64               // 失败丢弃计数（观测用，见 droppedCount）
+	lastWarn  map[string]time.Time // reason → 上次告警时间（限流）
+	dropped   uint64               // 失败丢弃计数（观测用，见 droppedCount）
+	truncated uint64               // 超限截断计数（观测用，见 truncatedCount；确定性策略非故障，不计 dropped、不告警）
 }
 
 func (sc *syslogConn) droppedCount() uint64 {
 	sc.mu.Lock()
 	defer sc.mu.Unlock()
 	return sc.dropped
+}
+
+// truncatedCount 返回累计截断帧数（包内测试观测点，与 droppedCount 同构）。
+// 截断是对端单帧上限下的确定性策略（超限必须截断否则整帧被对端静默丢弃），
+// 不是故障，故不向 stderr 告警（防洪泛：超长日志每条都截断会产生与日志等量的告警）。
+func (sc *syslogConn) truncatedCount() uint64 {
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+	return sc.truncated
 }
 
 // warnLocked 限流输出告警（须持 sc.mu）。同一 reason 每 syslogWarnInterval 最多 1 条。
@@ -180,7 +201,8 @@ type syslogHandler struct {
 }
 
 // newSyslogHandler 按 settings 构建 syslog handler + 共享连接状态。service 供 appname
-// 回退（Tag 空→service→"gadget"）；lvl / addSource 与 console/file 同源传入 inner 渲染器。
+// 回退（Tag 空→service→"gadget"）与 hostname 回退（Hostname 空→service→os.Hostname()）；
+// lvl / addSource 与 console/file 同源传入 inner 渲染器。
 // 返回的 *syslogConn 应注册到 Close 链（slogLogger.syslogCloser）。
 func newSyslogHandler(settings *SyslogSettings, service string, lvl slog.Leveler, addSource bool) (*syslogHandler, *syslogConn) {
 	network := settings.Network
@@ -197,7 +219,12 @@ func newSyslogHandler(settings *SyslogSettings, service string, lvl slog.Leveler
 			facility = f
 		}
 	}
+	// HOSTNAME 位 = 对端落盘归属（服务名），缺省链：显式 Hostname > service（Options.Service）
+	// > os.Hostname()（构建时一次性解析，与 appname 的 service 回退链路同源）。
 	hostname := settings.Hostname
+	if hostname == "" {
+		hostname = service
+	}
 	if hostname == "" {
 		if h, err := os.Hostname(); err == nil {
 			hostname = h
@@ -244,6 +271,32 @@ func newSyslogHandler(settings *SyslogSettings, service string, lvl slog.Leveler
 	return h, sc
 }
 
+// truncateSyslogFrame 把超限整帧（含尾 \n）的 MSG 体截短至帧长恰 ≤ syslogMaxFrame：
+// 保留 header、截断 MSG 体并在其尾部追加 syslogTruncMark 标记、补回尾 \n。
+// bodyLen 为 MSG 体在帧内的字节长度（header 占 len(pkt)-bodyLen-1 字节）。
+// 截断点若落在 UTF-8 多字节序列中部，回退到最近的 rune 起始处，绝不产出残缺序列。
+// header + 标记 + 尾 \n 本身超预算时返回 nil（丢弃信号；header 为固定字段、理论不可达）。
+func truncateSyslogFrame(pkt []byte, bodyLen int) []byte {
+	hl := len(pkt) - bodyLen - 1 // header 长（"<PRI>1 <ts> <host> <app> <procid> - - "）
+	avail := syslogMaxFrame - hl - 1 - len(syslogTruncMark)
+	if avail < 0 {
+		return nil
+	}
+	body := pkt[hl : hl+bodyLen]
+	cut := avail
+	// 回退到 rune 起始处：body[cut] 为截断点后的首字节，延续字节（0b10xxxxxx）则前移；
+	// cut 递减至 0 终止（空体 + 标记，帧仍在预算内）。
+	for cut > 0 && !utf8.RuneStart(body[cut]) {
+		cut--
+	}
+	out := make([]byte, 0, hl+cut+len(syslogTruncMark)+1)
+	out = append(out, pkt[:hl]...)
+	out = append(out, body[:cut]...)
+	out = append(out, syslogTruncMark...)
+	out = append(out, '\n')
+	return out
+}
+
 // Enabled 级别门槛判断（与 inner 同源 Leveler）。
 func (h *syslogHandler) Enabled(ctx context.Context, level slog.Level) bool {
 	return h.inner.Enabled(ctx, level)
@@ -283,6 +336,21 @@ func (h *syslogHandler) Handle(ctx context.Context, r slog.Record) error {
 	pkt = append(pkt, ' ', '-', ' ', '-', ' ') // msgid="-" sd="-" 后接一个空格到 MSG
 	pkt = append(pkt, body...)
 	pkt = append(pkt, '\n')
+
+	// 2.5) 单帧上限截断（对端 syslog source max_length 实配 102400，超限帧被对端静默
+	// 丢弃，截断归客户端）：截 MSG 体使整帧（含尾 \n）恰 ≤ syslogMaxFrame，MSG 尾部保留
+	// 截断标记；截断点回退到 UTF-8 rune 起始处，绝不产出残缺多字节序列。
+	if len(pkt) > syslogMaxFrame {
+		pkt = truncateSyslogFrame(pkt, len(body))
+		if pkt == nil {
+			// 理论不可达的极端防御：header + 标记 + 尾 \n 本身已超预算（header 固定字段
+			// 最长数百字节 ≪ 102400）→ 丢弃该条计 dropped。
+			sc.dropped++
+			return nil
+		}
+		// 截断是确定性策略而非故障：只计数（包内 truncatedCount 观测），不告警（防洪泛）。
+		sc.truncated++
+	}
 
 	// 3) 写出（懒连接 / 失败限流告警丢弃，不返回错误给日志调用方）。
 	sc.writeLocked(pkt)

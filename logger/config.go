@@ -117,7 +117,8 @@ type SyslogConfig struct {
 	// Tag RFC5424 APP-NAME；空则回退 Config.Service，再空回退 "gadget" → WithSyslogTag
 	Tag string `yaml:"tag" json:"tag" mapstructure:"tag"`
 
-	// Hostname RFC5424 HOSTNAME；空则 os.Hostname() → WithSyslogHostname
+	// Hostname RFC5424 HOSTNAME。对端语义：hostname 位 = 服务归属（决定落盘归属），
+	// 建议显式配置服务名；空则回退 Config.Service，再空回退 os.Hostname() → WithSyslogHostname
 	Hostname string `yaml:"hostname" json:"hostname" mapstructure:"hostname"`
 
 	// Facility syslog 设施名（空默认 "user"(1)；支持 kern/user/daemon/local0-local7 等标准名，
@@ -134,7 +135,9 @@ type SyslogConfig struct {
 
 // HTTPConfig http 后端参数（映射 Option：WithHTTP(url, HTTPOption...)）。
 // 以 NDJSON 批量 POST 到远端 HTTP 收集端（对端 Vector 0.58 sources.http_server，
-// codec = json，逐行解码；每帧含自身换行、批体亦以换行收尾）。连接懒建（首个批次发送时才拨号），
+// codec = json，逐行解码；每帧含自身换行、批体亦以换行收尾）。每帧为落盘字段契约的
+// 两键对象 {"src":"<服务归属>","message":"<text 版式单行文本>"}：对端落盘只保留 message
+// 文本（时间/级别/属性已拼入其中），src 决定落盘文件名。连接懒建（首个批次发送时才拨号），
 // 端点不可达不在 Init 报错（与 file 的 lumberjack 惰性 IO、syslog 的懒 dial 语义一致）。
 // 投递语义：网络错误 / 5xx / 408 / 429 整批退避重试（共 3 次尝试），其余 4xx（对端任一坏帧
 // 即整批 400）不重试直接丢弃；失败均按条计 dropped + stderr 限流告警。Close 与 Fatal 退出前
@@ -143,6 +146,13 @@ type HTTPConfig struct {
 	// URL 完整 POST 端点（含路径，如 "http://127.0.0.1:8080/v1/logs"）；HTTP 节点非 nil
 	// 时必填，Init 经 url.Parse 校验且 scheme 必须 http/https → WithHTTP 首参
 	URL string `yaml:"url" json:"url" mapstructure:"url"`
+
+	// Src 落盘帧 src 字段（服务归属，决定对端落盘文件名）；空则回退 Config.Service，
+	// 再空回退 os.Hostname()（handler 构建时一次性解析）。对端文件名字符集限
+	// [a-zA-Z0-9._-]：越界字符构建时由库 sanitize 为 '-' 兜底（对端实测含 "/.." 会
+	// 200 但文件名被污染，故发送前强制收敛），Init 层不校验（值可能来自动态 Service），
+	// 建议显式配置合规名 → WithHTTPSrc
+	Src string `yaml:"src" json:"src" mapstructure:"src"`
 
 	// Headers 附加请求头（认证 token 等由应用端注入，本库不含鉴权语义）；
 	// 逐条 Set 到请求，后于内置 Content-Type → 可覆写默认头 → WithHTTPHeaders
@@ -183,6 +193,7 @@ type HTTPConfig struct {
 //
 //	cfg.Outputs.HTTP = &HTTPConfig{
 //	    URL:           "http://127.0.0.1:8686/v1/logs", // 必填，完整 POST 端点
+//	    Src:           "order-svc",  // 空回退 Config.Service，再空回退 os.Hostname()
 //	    BatchSize:     100,     // 0 亦回退默认 100
 //	    FlushInterval: "500ms", // 空亦回退默认 500ms
 //	    Timeout:       "5s",    // 空亦回退默认 5s

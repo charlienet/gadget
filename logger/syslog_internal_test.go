@@ -13,6 +13,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // ---- 本地 mock 接收端 ----
@@ -800,6 +801,227 @@ func TestInitFileAndSyslogErrorsMerged(t *testing.T) {
 	joined := err.Error()
 	if !strings.Contains(joined, "requires non-empty filename") || !strings.Contains(joined, "unknown syslog facility") {
 		t.Errorf("应同时含 file 黑洞与 facility 错误, got: %v", joined)
+	}
+}
+
+// ---- 单帧上限截断（G2：对端 syslog source max_length 实配 102400，超限帧被对端
+// 静默丢弃，客户端负责截断）----
+
+// recvRawSyslogFrame 起一个一次性 TCP 监听，返回接收「含尾 \n 的完整原始帧」的函数
+// （syslogMock 会剥掉尾 \n，截断语义要求帧以 \n 收尾，必须走原始字节断言）。
+func recvRawSyslogFrame(t *testing.T) (addr string, recv func(time.Duration) []byte) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	frames := make(chan []byte, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		br := bufio.NewReader(conn)
+		if frame, err := br.ReadBytes('\n'); err == nil {
+			frames <- frame // ReadBytes 成功即含尾 \n（err==nil 保证分隔符命中）
+		}
+	}()
+	return ln.Addr().String(), func(timeout time.Duration) []byte {
+		select {
+		case f := <-frames:
+			return f
+		case <-time.After(timeout):
+			t.Fatal("等待原始帧超时")
+			return nil
+		}
+	}
+}
+
+// 超长 ASCII 消息（~200KB）→ 实收帧 ≤102400、以 …[truncated]\n 收尾、header 完整、
+// truncatedCount==1、UTF-8 有效。
+func TestSyslogTCP_TruncateOversizedFrame(t *testing.T) {
+	addr, recv := recvRawSyslogFrame(t)
+	h, sc := newSyslogHandler(&SyslogSettings{
+		Address: addr, Network: "tcp", Timeout: 5 * time.Second,
+		Hostname: "trunc-host", Tag: "trunc-app", Facility: "local2", Format: FormatJSON,
+	}, "", slog.LevelDebug, false)
+	defer sc.Close()
+
+	big := strings.Repeat("x", 200*1024)
+	if err := h.Handle(t.Context(), slog.NewRecord(time.Now(), Info, big, 0)); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	frame := recv(5 * time.Second)
+
+	if len(frame) > syslogMaxFrame {
+		t.Errorf("帧长 %d 超限 %d", len(frame), syslogMaxFrame)
+	}
+	if len(frame) != syslogMaxFrame {
+		t.Errorf("ASCII 正文截断应恰填满预算 %d, got %d", syslogMaxFrame, len(frame))
+	}
+	if !bytes.HasSuffix(frame, []byte("\n")) {
+		t.Errorf("帧应以 \\n 收尾, got 尾字节 %q", frame[len(frame)-1:])
+	}
+	if !bytes.HasSuffix(frame, []byte(syslogTruncMark+"\n")) {
+		t.Errorf("帧应以截断标记+\\n 收尾, got 尾部 %q", frame[len(frame)-len(syslogTruncMark)-4:])
+	}
+	if !utf8.Valid(frame) {
+		t.Error("截断帧含非法 UTF-8")
+	}
+	p := parseRFC5424(t, string(bytes.TrimSuffix(frame, []byte("\n"))))
+	if p.hostname != "trunc-host" || p.appname != "trunc-app" {
+		t.Errorf("header 字段不完整: host=%q app=%q", p.hostname, p.appname)
+	}
+	if want := 18*8 + 6; p.pri != want { // local2(18)*8 + info(6)
+		t.Errorf("PRI=%d want %d", p.pri, want)
+	}
+	if _, err := time.Parse(syslogTimeLayout, p.ts); err != nil {
+		t.Errorf("TIMESTAMP %q 解析失败: %v", p.ts, err)
+	}
+	if !strings.HasPrefix(p.msg, "{") { // MSG 仍是 JSON 渲染体开头（体被截断、非合法 JSON，不反序列化）
+		t.Errorf("MSG 未从 JSON 起始符开始: %q", p.msg[:min(20, len(p.msg))])
+	}
+	if n := sc.truncatedCount(); n != 1 {
+		t.Errorf("truncatedCount=%d want 1", n)
+	}
+	if n := sc.droppedCount(); n != 0 {
+		t.Errorf("截断非故障，不应计 dropped, got %d", n)
+	}
+}
+
+// 中文多字节内容恰在边界截断：截断点回退到 rune 起始处，不产出残缺序列。
+func TestSyslogTCP_TruncateUTF8Boundary(t *testing.T) {
+	addr, recv := recvRawSyslogFrame(t)
+	h, sc := newSyslogHandler(&SyslogSettings{
+		Address: addr, Network: "tcp", Timeout: 5 * time.Second, Format: FormatJSON,
+	}, "", slog.LevelDebug, false)
+	defer sc.Close()
+
+	// 每字 3 字节、总量远超预算：截断点（非 3 的倍数偏移）必落在多字节序列中部，
+	// 验证 rune 回退。
+	big := strings.Repeat("漢", 60000)
+	_ = h.Handle(t.Context(), slog.NewRecord(time.Now(), Info, big, 0))
+	frame := recv(5 * time.Second)
+
+	if len(frame) > syslogMaxFrame {
+		t.Errorf("帧长 %d 超限 %d", len(frame), syslogMaxFrame)
+	}
+	if !utf8.Valid(frame) {
+		t.Error("截断帧含残缺多字节序列（rune 回退未生效）")
+	}
+	if !bytes.HasSuffix(frame, []byte(syslogTruncMark+"\n")) {
+		t.Error("帧尾缺截断标记")
+	}
+	p := parseRFC5424(t, string(bytes.TrimSuffix(frame, []byte("\n"))))
+	// MSG 体（去标记后）= ASCII JSON 前缀（time/level/msg 键）+ 连续汉字重复体。
+	// 汉字区段必须是完整 3 字节序列的整数倍（验证 rune 回退）。
+	body := strings.TrimSuffix(p.msg, syslogTruncMark)
+	i := strings.Index(body, "漢")
+	if i < 0 {
+		t.Fatal("MSG 截断体未含汉字区段")
+	}
+	rest := body[i:]
+	if len(rest)%3 != 0 {
+		t.Errorf("截断体含残缺序列: 汉字区段长度 %d 非 3 的倍数", len(rest))
+	}
+	for _, r := range rest {
+		if r != '漢' {
+			t.Errorf("截断体出现非预期字符 %q（应为连续完整汉字）", r)
+			break
+		}
+	}
+	if n := sc.truncatedCount(); n != 1 {
+		t.Errorf("truncatedCount=%d want 1", n)
+	}
+}
+
+// 短消息零截断回归：未超限帧原样写出、truncatedCount 不增。
+func TestSyslogTCP_ShortFrameNoTruncate(t *testing.T) {
+	m := newSyslogMock(t)
+	defer m.close()
+
+	h, sc := newTestSyslogHandler(m, &SyslogSettings{Format: FormatJSON})
+	defer sc.Close()
+
+	_ = h.Handle(t.Context(), slog.NewRecord(time.Now(), Info, "short", 0))
+	line, ok := m.recv(2 * time.Second)
+	if !ok {
+		t.Fatal("未收到报文")
+	}
+	if !strings.Contains(line, `"msg":"short"`) {
+		t.Errorf("短消息 MSG 应完整未截断: %q", line)
+	}
+	if strings.Contains(line, syslogTruncMark) {
+		t.Errorf("短消息不应含截断标记: %q", line)
+	}
+	if n := sc.truncatedCount(); n != 0 {
+		t.Errorf("truncatedCount=%d want 0", n)
+	}
+}
+
+// UDP 同路径生效：截断在 Handle 内、与传输协议无关（truncatedCount 可观测）。
+// 注：截断后整帧 102400 字节超出 IPv4 UDP 单数据报协议上限（载荷 ≤65507），
+// sendto 必以 EMSGSIZE 失败并计 dropped——UDP 下超长日志只能截到协议上限以内
+// 或改走 TCP，本用例锁定「截断路径本身对 UDP 同样执行」，不断言数据报收妥。
+func TestSyslogUDP_TruncatePathActive(t *testing.T) {
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen udp: %v", err)
+	}
+	defer pc.Close()
+
+	h, sc := newSyslogHandler(&SyslogSettings{
+		Network: "udp", Address: pc.LocalAddr().String(), Timeout: 2 * time.Second, Format: FormatJSON,
+	}, "", slog.LevelDebug, false)
+	defer sc.Close()
+
+	big := strings.Repeat("u", 200*1024)
+	_ = h.Handle(t.Context(), slog.NewRecord(time.Now(), Info, big, 0))
+
+	if n := sc.truncatedCount(); n != 1 {
+		t.Errorf("UDP 路径 truncatedCount=%d want 1（截断应先于写出、与协议无关）", n)
+	}
+}
+
+// ---- hostname 位缺省链（G3：对端落盘归属取 HOSTNAME 位、应写服务名）----
+
+func TestSyslogTCP_HostnameFallbackChain(t *testing.T) {
+	host, err := os.Hostname()
+	if err != nil {
+		t.Skipf("os.Hostname: %v", err)
+	}
+	cases := []struct {
+		name     string
+		hostname string // SyslogSettings.Hostname
+		service  string // newSyslogHandler service 形参（Options.Service 链路）
+		want     string
+	}{
+		{"显式 Hostname 优先", "explicit-host", "pay-svc", "explicit-host"},
+		{"Hostname 空回退 Service", "", "pay-svc", "pay-svc"},
+		{"皆空回退 os.Hostname", "", "", host},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			m := newSyslogMock(t)
+			defer m.close()
+
+			h, sc := newSyslogHandler(&SyslogSettings{
+				Address: m.addr, Network: "tcp", Timeout: 2 * time.Second,
+				Format: FormatJSON, Hostname: c.hostname,
+			}, c.service, slog.LevelDebug, false)
+			defer sc.Close()
+
+			_ = h.Handle(t.Context(), slog.NewRecord(time.Now(), Info, "x", 0))
+			line, ok := m.recv(2 * time.Second)
+			if !ok {
+				t.Fatal("未收到报文")
+			}
+			if p := parseRFC5424(t, line); p.hostname != c.want {
+				t.Errorf("HOSTNAME=%q want %q", p.hostname, c.want)
+			}
+		})
 	}
 }
 

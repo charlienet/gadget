@@ -177,7 +177,7 @@ l := logger.New(
     logger.WithSyslog("127.0.0.1:6514", // 远端地址（必填）
         logger.WithSyslogNetwork("tcp"),           // "tcp"(默认)/"udp"
         logger.WithSyslogTag("opencode-api"),      // RFC5424 APP-NAME；空回退 Service，再空回退 "gadget"
-        logger.WithSyslogHostname("host-a"),       // 空回退 os.Hostname()
+        logger.WithSyslogHostname("opencode-api"),     // HOSTNAME 位=落盘归属（建议服务名）；空回退 Service，再空回退 os.Hostname()
         logger.WithSyslogFacility("local0"),       // 默认 "user"；见下方设施名表
         logger.WithSyslogFormat(logger.FormatJSON),// MSG 体："json"(默认)/"text"
         logger.WithSyslogTimeout(5*time.Second),   // 单次 dial/write 超时（默认 5s）
@@ -212,7 +212,7 @@ outputs:
     network: "tcp"        #   "tcp"(默认)/"udp"，其它值 Init 报错
     address: "127.0.0.1:6514" # 非空
     tag: "opencode-api"   #   空回退 service，再空回退 "gadget"
-    hostname: ""          #   空回退 os.Hostname()
+    hostname: ""          #   HOSTNAME 位=落盘归属（建议服务名）；空回退 service，再空回退 os.Hostname()
     facility: "local0"    #   空默认 "user"；非法名 Init 报错
     format: "json"        #   json(默认)/text
     timeout: "5s"         #   time.ParseDuration，空默认 5s；非法值 Init 报错
@@ -226,6 +226,11 @@ outputs:
 单条报文：`<PRI>1 <RFC3339毫秒> <HOSTNAME> <APP-NAME> <PROCID> <MSGID> <SD-ID> <MSG>\n`
 
 - **PRI = facility × 8 + severity**；
+- **HOSTNAME 位 = 对端落盘归属（src 语义）**：建议显式配置服务名；缺省链
+  `Hostname` > `Config.Service` > `os.Hostname()`（见上 Option / yaml 注释）；
+- **TIMESTAMP** 采用 Go 布局 `2006-01-02T15:04:05.000Z07:00`：输出恒为 UTC `Z` 或
+  `+HH:MM` **带冒号**形态——规避对端实测的 `+0800` 无冒号形态被 Vector syslog source
+  **静默丢帧**的坑（本机时区非 UTC 时 Go 也只会产出带冒号偏移，无需特殊配置）；
 - **PROCID** 为真实进程号（`os.Getpid()`）、**MSGID/SD-ID** 固定 `-`：三者不会同时为 `-`
   （Vector 实测对「procid/msgid/sd 全 `-`」会拒收，填真实 pid 即规避）；
 - **MSG** 体为单行：`json` 走标准 `slog` JSON、`text` 走 console 渲染器 NoColor 形态，与
@@ -255,11 +260,19 @@ sources:
 ```
 
 - **分帧**：本后端每条报文以 `\n` 结尾，Vector syslog source 按 newline 拆帧、自动解析 RFC5424 头部；
-- **UDP ≤4KB**：UDP 每条报文为**单个数据报**（不拆包），建议 `format: json` + 控制属性体量使整包
-  不超过约 4KB，避免超过 MTU 触发 IP 分片被丢弃（`Timeout` 仅约束读写，不重试 UDP 丢包）；
+- **单帧上限 102400（超限客户端截断）**：对端 syslog source 实配 `max_length: 102400`，
+  超限帧会被对端**静默丢弃**，截断责任在客户端——本后端对整帧（含尾 `\n`）超过 102400 字节的
+  报文自动截短 MSG 体并保留 `…[truncated]` 收尾标记，截断点回退到 UTF-8 字符边界（绝不产出
+  残缺多字节序列）；截断是确定性策略而非故障，不告警、不计 dropped（包内可观测计数）；
+- **UDP ≤4KB**：UDP 每条报文为**单个数据报**（不拆包），且 IPv4 UDP 载荷受协议上限约束
+  （截断到 102400 的极端帧在 UDP 下也会因超过单数据报上限而写失败），建议 `format: json` +
+  控制属性体量使整包不超过约 4KB，避免超过 MTU 触发 IP 分片被丢弃（`Timeout` 仅约束读写，
+  不重试 UDP 丢包）；超长日志场景请走 `network: tcp`；
 - **失败语义**：连接建立或写入失败 → 该条丢弃 + 下次写入重试 dial + stderr 限流告警（每原因每 5s ≤1 条）；
   进程退出调用 `logger.Close` 关闭连接后不再重连写出。日志可靠性为「尽力而为」，需要不丢日志请配
-  `WithAsync` 由异步队列削峰（队列满丢弃策略见「运行时管理」）。
+  `WithAsync` 由异步队列削峰（队列满丢弃策略见「运行时管理」）；
+- **端点与网络可达性**（监听地址、容器网络与服务名解析等部署事实）以**对端接入指导为准**，
+  本文不固定具体地址。
 
 ## http 后端（NDJSON 批量 → 远端 Vector）
 
@@ -273,6 +286,7 @@ sources:
 ```go
 l := logger.New(
     logger.WithHTTP("http://127.0.0.1:8686/v1/logs", // 完整 POST 端点（含路径，必填）
+        logger.WithHTTPSrc("order-svc"),             // 落盘帧 src（服务归属）；空回退 Service，再空回退 os.Hostname()；越界字符 sanitize 为 '-'
         logger.WithHTTPHeaders(map[string]string{     // 附加请求头（认证等由应用端注入）
             "Authorization": "Bearer <token>",        //   logger 库不含鉴权语义，token 从哪来由应用决定
         }),
@@ -294,6 +308,7 @@ cfg := logger.Config{
     Outputs: logger.OutputsConfig{
         HTTP: &logger.HTTPConfig{ // 节点非 nil=启用；置 nil=不启用
             URL:           "http://127.0.0.1:8686/v1/logs", // 必填
+            Src:           "opencode-api", // 落盘帧 src；空回退 Service，再空回退 os.Hostname()
             Headers:       map[string]string{"Authorization": "Bearer <token>"},
             BatchSize:     100,   // 0=默认 100；负数 Init 报错
             FlushInterval: "500ms",
@@ -309,6 +324,7 @@ _ = logger.Init(cfg)
 outputs:
   http:                 # 节存在=启用；缺省=不启用（url 必填，见下方黑洞校验）
     url: "http://127.0.0.1:8686/v1/logs"
+    src: "opencode-api" # 落盘帧 src（服务归属）；空回退 service，再空回退 os.Hostname()；越界字符 sanitize 为 '-'
     headers:
       Authorization: "Bearer <token>"
     batch_size: 100     # 0/缺省=默认 100；负数 Init 报错
@@ -327,16 +343,37 @@ outputs:
   Vector 配 `path: /v1/logs` ↔ 客户端 `url: http://host:8686/v1/logs`。若希望按前缀接收
   （例如同时接 `/v1/logs` 与 `/v1/logs/*`），需按所用 Vector 版本开启 `strict_path: false`
   （该选项并非所有版本都有，以官方文档为准）；本库不做客户端健康检查。
-- **请求体**：NDJSON——每行一个 JSON 对象、行间单个 `\n`、**末尾亦以单个 `\n` 结束**（发送前
-  统一补齐；gzip 压缩的即加尾后的完整体），不依赖对端「EOF 时刷出无尾换行残余」的行为差异。
+- **请求体**：NDJSON——每行一个 JSON 对象（帧形见下「落盘字段契约」）、行间单个 `\n`、
+  **末尾亦以单个 `\n` 结束**（发送前统一补齐；gzip 压缩的即加尾后的完整体），不依赖对端
+  「EOF 时刷出无尾换行残余」的行为差异。
   **不发** v2 批格式
   `{"logs":[{"event","metadata"}]}`（会被 json codec 当作**单个**不透明事件）。
+- **落盘字段契约**（对端接入指导核定，逐帧两键、不多不少）：
+
+  ```json
+  {"src":"order-svc","message":"2026-09-26T08:59:01 INFO order created id=42"}
+  ```
+
+  - **`src`**：服务归属标识，决定对端落盘**文件名**。缺省链 `HTTPConfig.Src` /
+    `WithHTTPSrc` > `Config.Service`（Option 层 `Options.Service`）> `os.Hostname()`，
+    handler 构建时一次性解析。对端落盘文件名字符集限 `[a-zA-Z0-9._-]`——**由库在构建期
+    sanitize 兜底**：越界字节一律替换为 `-`、空值回退 `-`（对端 `:602` 实测：src 含 `/..`
+    时应答 200 但落盘文件名被污染，故发送前强制收敛）；Init 层不校验该字段，**建议显式
+    配置合规名**，不依赖 sanitize 的替换产物做服务名；
+  - 对端接入指导的「发送前行校验 / 剔坏行 / 死信通道」条款对本库**天然满足**：帧每行必为
+    `json.Marshal` 产物（两键、紧凑、单行），不存在自造坏帧路径；对端因任一行解码失败整批
+    回 400 属确定性失败，已由本后端「4xx 不重试、立即丢弃 + 限流告警」短路覆盖，故本库
+    不另行实现死信通道；
+  - **`message`**：日志正文。对端落盘**只保留 message 文本**、其余结构化字段一律丢弃，
+    因此时间/级别/msg/attrs 必须全部拼进 message 自身：本后端用 **text 版式渲染器**
+    （与 console / 文件 `FormatText` 同一实现的裸值版式，含 time/level/msg/attrs 全量、
+    单行、裸 `\n`/`\r` 已转义为字面量）渲染整条 record 得单行文本后，作为 message 字段
+    做 JSON 字符串编码（src 同样经 JSON 转义防注入）。落盘后 message 含 `\n` 字面量两字符
+    属预期（对端契约要求正文单行）；
 - **请求头**：`Content-Type: application/json`（服务端不强制，统一发送）；`Gzip` 开启时追加
   `Content-Encoding: gzip`。用户 `Headers` 在默认头**之后**逐条 `Set`，因此可覆写
   `Content-Type`（例如对端要求 `application/x-ndjson`）。
-- **渲染**：与文件 sink **同源复用** `slog.NewJSONHandler`（含 `time` 定制为
-  `2006-01-02 15:04:05.000`），保证单行、消息内 `\n` 被转义、字段可反序列化；
-  级别门槛与 console / file / syslog 同一 `Leveler`。
+- **级别门槛**与 console / file / syslog 同一 `Leveler`。
 - **响应**：`2xx` 视为成功（Vector 默认 `response_code: 200`），`4xx`/`5xx` 与网络错误同样判失败。
 
 ### 批量、重试与丢弃语义
@@ -385,12 +422,15 @@ sources:
     codec: json           # 逐行解码 NDJSON（与本项目后端输出的帧格式对应）
 ```
 
-- **`codec: json` 的解码粒度**是「一行一个 JSON 对象」，正是本后端的分帧方式；若对端配成
-  `codec: text`，每行会变成一个 `message` 字段而非结构化事件；
-- ** gzip **：对端需支持 `Content-Encoding: gzip`（Vector `http_server` 支持透明解压），
+- **`codec: json` 的解码粒度**是「一行一个 JSON 对象」，正是本后端的分帧方式；解出帧后
+  对端按上「落盘字段契约」取 `src` 定文件名、只落 `message` 文本；若对端配成
+  `codec: text`，每行会连帧 JSON 一起变成正文，违反落盘行格式；
+- **gzip**：对端需支持 `Content-Encoding: gzip`（Vector `http_server` 支持透明解压），
   不确定时把 `gzip` 设为 `false`；
 - **失败反馈**：对端返回非 2xx（如写入下游失败、请求体超限 413）都会触发本后端的整批重试，
-  因此请确保 Vector 的健康应答码路径畅通，避免长期不可用时以 3 次尝试/批的频率反复投递。
+  因此请确保 Vector 的健康应答码路径畅通，避免长期不可用时以 3 次尝试/批的频率反复投递；
+- **端点与网络可达性**（监听地址、容器网络与服务名解析等部署事实）以**对端接入指导为准**，
+  本文不固定具体地址。
 
 ## 身份与链路字段前置（service / env / trace_id / req_id）
 

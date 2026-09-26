@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -187,7 +188,7 @@ func newTestHTTPHandler(t *testing.T, url string, batch int) (*httpHandler, *htt
 		BatchSize:     batch,
 		FlushInterval: 10 * time.Second,
 		Timeout:       2 * time.Second,
-	}, slog.LevelDebug, false)
+	}, "", slog.LevelDebug, false)
 	s.retryBase = 10 * time.Millisecond
 	s.stderr = &stderrBuf{}
 	t.Cleanup(func() { _ = s.Close() })
@@ -228,6 +229,9 @@ func waitDropped(t *testing.T, s *httpSink, n uint64, timeout time.Duration) uin
 	}
 }
 
+// httpSrcWhitelistRE 帧 src 对端落盘文件名白名单（[a-zA-Z0-9._-] 非空全匹配）。
+var httpSrcWhitelistRE = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
+
 // parseNDJSONLine 断言单行是合法 JSON 并返回字段 map。
 func parseNDJSONLine(t *testing.T, line string) map[string]any {
 	t.Helper()
@@ -236,6 +240,41 @@ func parseNDJSONLine(t *testing.T, line string) map[string]any {
 		t.Fatalf("NDJSON 行非法 JSON: %v (line=%q)", err, line)
 	}
 	return body
+}
+
+// parseHTTPFrame 按落盘字段契约解析一行 NDJSON 帧：有且仅有 src + message 两键（均为
+// 非空字符串），返回两值。帧形偏离（多键 / 缺键 / 非字符串）即 t.Fatal。
+func parseHTTPFrame(t *testing.T, line string) (src, message string) {
+	t.Helper()
+	body := parseNDJSONLine(t, line)
+	if len(body) != 2 {
+		t.Fatalf("帧应有且仅有 src+message 两键, got %v (line=%q)", body, line)
+	}
+	s, ok1 := body["src"].(string)
+	m, ok2 := body["message"].(string)
+	if !ok1 || s == "" {
+		t.Fatalf("帧 src 缺失或为空: %v (line=%q)", body, line)
+	}
+	if !ok2 {
+		t.Fatalf("帧 message 缺失或非字符串: %v (line=%q)", body, line)
+	}
+	return s, m
+}
+
+// textTimeLayoutLen / parseFrameTime 断言 message 头部为 text 版式的
+// "2006-01-02 15:04:05.000" 时间裸值（与 console/文件 text 同源渲染）。
+const textTimeLayout = "2006-01-02 15:04:05.000"
+
+// assertFrameTimePrefix 断言 message 以定制时间格式开头，返回去掉时间前缀后的剩余文本。
+func assertFrameTimePrefix(t *testing.T, message string) string {
+	t.Helper()
+	if len(message) <= len(textTimeLayout) {
+		t.Fatalf("message 过短、不含时间前缀: %q", message)
+	}
+	if _, err := time.Parse(textTimeLayout, message[:len(textTimeLayout)]); err != nil {
+		t.Fatalf("message 时间前缀 %q 不可按 %q 解析: %v", message[:len(textTimeLayout)], textTimeLayout, err)
+	}
+	return message[len(textTimeLayout)+1:] // 跳过时间 + 单个空格
 }
 
 // ---- 批量与触发 ----
@@ -259,13 +298,20 @@ func TestHTTP_BatchSizeFlush(t *testing.T) {
 	if len(got.lines) != 3 {
 		t.Fatalf("一个请求应含 3 行 NDJSON, got %d: %q", len(got.lines), got.lines)
 	}
+	host, err := os.Hostname()
+	if err != nil {
+		t.Fatalf("os.Hostname: %v", err)
+	}
 	for i, want := range []string{"l1", "l2", "l3"} {
-		body := parseNDJSONLine(t, got.lines[i])
-		if body["msg"] != want {
-			t.Errorf("第 %d 行 msg=%v want %s", i+1, body["msg"], want)
+		src, message := parseHTTPFrame(t, got.lines[i])
+		if src != sanitizeHTTPSrc(host) {
+			t.Errorf("第 %d 行 src=%q want %q（Src/Service 皆空回退 os.Hostname 经白名单化）", i+1, src, sanitizeHTTPSrc(host))
 		}
-		if body["level"] != "INFO" {
-			t.Errorf("第 %d 行 level=%v want INFO", i+1, body["level"])
+		if !strings.Contains(message, want) {
+			t.Errorf("第 %d 行 message=%q 缺正文 %s", i+1, message, want)
+		}
+		if !strings.Contains(message, "INFO") {
+			t.Errorf("第 %d 行 message=%q 缺级别 INFO", i+1, message)
 		}
 	}
 
@@ -285,7 +331,7 @@ func TestHTTP_IntervalFlush(t *testing.T) {
 		BatchSize:     100, // 永不满批：只能靠 ticker 投递
 		FlushInterval: 50 * time.Millisecond,
 		Timeout:       2 * time.Second,
-	}, slog.LevelDebug, false)
+	}, "", slog.LevelDebug, false)
 	s.retryBase = 10 * time.Millisecond
 	s.stderr = &stderrBuf{}
 	defer s.Close()
@@ -295,12 +341,14 @@ func TestHTTP_IntervalFlush(t *testing.T) {
 	if len(reqs[0].lines) != 1 {
 		t.Fatalf("ticker 应送达 1 行, got %q", reqs[0].lines)
 	}
-	if body := parseNDJSONLine(t, reqs[0].lines[0]); body["msg"] != "tick" {
-		t.Errorf("msg=%v want tick", body["msg"])
+	if _, message := parseHTTPFrame(t, reqs[0].lines[0]); !strings.Contains(message, "tick") {
+		t.Errorf("message=%q want 含 tick", message)
 	}
 }
 
-// NDJSON 帧完整性：批内单 \n 分隔、无空行、无尾随空行；行内无裸换行（含 \n 的消息被转义）。
+// NDJSON 帧完整性与落盘字段契约：批内单 \n 分隔、无空行、无尾随空行；每帧有且仅有
+// src+message 两键，message 为 text 版式单行文本（时间/级别/msg/attrs 全量自包含），
+// 帧 JSON 源内无裸换行（含 \n 的消息先被渲染器转义为字面量、再被 JSON 编码为 \\n）。
 func TestHTTP_NDJSONFraming(t *testing.T) {
 	m := newHTTPMock(t)
 	h, _ := newTestHTTPHandler(t, m.url, 3)
@@ -345,29 +393,95 @@ func TestHTTP_NDJSONFraming(t *testing.T) {
 		}
 	}
 
-	bodies := make([]map[string]any, 3)
+	// 帧形：两键 src+message；message 自包含 text 版式全文（时间/级别/正文/属性）
+	messages := make([]string, 3)
 	for i, line := range rawLines {
-		bodies[i] = parseNDJSONLine(t, line)
+		_, messages[i] = parseHTTPFrame(t, line)
 	}
-	if bodies[0]["msg"] != "multi\nline" {
-		t.Errorf("msg=%q want 含换行的原文被转义还原", bodies[0]["msg"])
+
+	// 第 1 帧：Warn + 含换行消息（落盘正文中 \n 为字面量两字符，属预期）+ k=v + 分组展平
+	if rest := assertFrameTimePrefix(t, messages[0]); !strings.HasPrefix(rest, "WARN ") {
+		t.Errorf("第 1 帧级别段错误（time 后应为 WARN）: %q", messages[0])
 	}
-	if bodies[0]["level"] != "WARN" {
-		t.Errorf("level=%v want WARN", bodies[0]["level"])
+	if !strings.Contains(messages[0], `multi\nline`) {
+		t.Errorf("第 1 帧 message=%q 应含渲染器转义后的字面量 multi\\nline", messages[0])
 	}
-	db, ok := bodies[0]["db"].(map[string]any)
-	if !ok || db["table"] != "users" || db["rows"].(float64) != 3 {
-		t.Errorf("分组结构错误: %v", bodies[0]["db"])
+	for _, want := range []string{"k=v", "db.table=users", "db.rows=3"} {
+		if !strings.Contains(messages[0], want) {
+			t.Errorf("第 1 帧 message=%q 缺属性 %q", messages[0], want)
+		}
 	}
-	if bodies[1]["msg"] != "second" || bodies[1]["level"] != "ERROR" {
-		t.Errorf("第 2 帧错误: %v", bodies[1])
+	if !strings.Contains(messages[1], "ERRO") || !strings.Contains(messages[1], "second") {
+		t.Errorf("第 2 帧错误: %q", messages[1])
 	}
-	if bodies[2]["msg"] != "third" || bodies[2]["level"] != "DEBUG" {
-		t.Errorf("第 3 帧错误: %v", bodies[2])
+	if !strings.Contains(messages[2], "DEBU") || !strings.Contains(messages[2], "third") {
+		t.Errorf("第 3 帧错误: %q", messages[2])
 	}
-	// 时间字段沿用文件 sink 的定制格式（ReplaceAttr：2006-01-02 15:04:05.000）
-	if ts, _ := bodies[0]["time"].(string); !strings.Contains(ts, "-") || len(ts) != len("2006-01-02 15:04:05.000") {
-		t.Errorf("time 字段格式未按 ReplaceAttr 定制, got %v", bodies[0]["time"])
+}
+
+// src 缺省链（对端落盘归属）：显式 Src > Options.Service（newHTTPHandler service 形参）
+// > os.Hostname()。白名单防护：[a-zA-Z0-9._-] 之外字符构建期 sanitize 为 '-'（保证非空、
+// 确定性、防对端落盘文件名污染——实测含 "/.." 会 200 但文件名被污染）。
+func TestHTTP_SrcFallbackChain(t *testing.T) {
+	host, err := os.Hostname()
+	if err != nil {
+		t.Skipf("os.Hostname: %v", err)
+	}
+	hostSanitized := sanitizeHTTPSrc(host)
+	cases := []struct {
+		name    string
+		src     string // HTTPSettings.Src
+		service string // newHTTPHandler service 形参（Options.Service 链路）
+		want    string
+	}{
+		{"显式 Src 优先", "explicit-svc", "pay-svc", "explicit-svc"},
+		{"Src 空回退 Service", "", "pay-svc", "pay-svc"},
+		{"皆空回退 os.Hostname（经白名单化）", "", "", hostSanitized},
+		{"越界字符 sanitize 为连字符", "a/b ..c 中", "", "a-b-..c----"},
+		{"中文 Src 全量替换", "服务 名", "", "----------"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			m := newHTTPMock(t)
+			h, s := newHTTPHandler(&HTTPSettings{
+				URL: m.url, BatchSize: 1, FlushInterval: 10 * time.Second, Timeout: 2 * time.Second,
+				Src: c.src,
+			}, c.service, slog.LevelDebug, false)
+			s.retryBase = 10 * time.Millisecond
+			s.stderr = &stderrBuf{}
+			defer s.Close()
+
+			_ = h.Handle(t.Context(), slog.NewRecord(time.Now(), Info, "m", 0))
+			reqs := m.waitReqs(1, 3*time.Second)
+			gotSrc, message := parseHTTPFrame(t, reqs[0].lines[0])
+			if gotSrc != c.want {
+				t.Errorf("src=%q want %q", gotSrc, c.want)
+			}
+			if !httpSrcWhitelistRE.MatchString(gotSrc) {
+				t.Errorf("帧 src=%q 含白名单 [a-zA-Z0-9._-] 之外字符", gotSrc)
+			}
+			if !strings.Contains(message, "m") {
+				t.Errorf("message=%q want 含正文 m", message)
+			}
+		})
+	}
+}
+
+// sanitizeHTTPSrc 纯函数语义锁定：合规名原样；越界字节逐字节替换为 '-'（不删除、
+// 字节数不变、UTF-8 自同步）；空串回退 '-' 保证帧 src 非空；路径注入样本收敛到白名单。
+func TestSanitizeHTTPSrc(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"order-svc", "order-svc"},           // 合规原样
+		{"a.b_c-D9", "a.b_c-D9"},             // 含全部白名单特殊字符
+		{"", "-"},                            // 空串 → 非空保证
+		{"/../etc/passwd", "-..-etc-passwd"}, // 对端实测污染样本 → 白名单化（200+污染不再可能）
+		{"a/b ..c 中", "a-b-..c----"},         // 斜杠/空格/多字节（中=3 字节→3 个 '-'）
+		{"服务 名", "----------"},               // 全越界：3+3+1+3 字节 → 10 个 '-'，非空
+	}
+	for _, c := range cases {
+		if got := sanitizeHTTPSrc(c.in); got != c.want {
+			t.Errorf("sanitizeHTTPSrc(%q)=%q want %q", c.in, got, c.want)
+		}
 	}
 }
 
@@ -376,7 +490,7 @@ func TestHTTP_EnabledLevelGate(t *testing.T) {
 	m := newHTTPMock(t)
 	h, hs := newHTTPHandler(&HTTPSettings{
 		URL: m.url, BatchSize: 10, FlushInterval: 50 * time.Millisecond, Timeout: time.Second,
-	}, slog.LevelInfo, false)
+	}, "", slog.LevelInfo, false)
 	hs.stderr = &stderrBuf{}
 	defer hs.Close()
 
@@ -396,13 +510,13 @@ func TestHTTP_EnabledLevelGate(t *testing.T) {
 
 	lg.Info("kept")
 	reqs := m.waitReqs(1, 3*time.Second)
-	body := parseNDJSONLine(t, reqs[0].lines[0])
-	if body["msg"] != "kept" {
-		t.Errorf("msg=%v want kept", body["msg"])
+	if _, message := parseHTTPFrame(t, reqs[0].lines[0]); !strings.Contains(message, "kept") {
+		t.Errorf("message=%q want 含 kept", message)
 	}
 }
 
-// WithAttrs / WithGroup 派生：组外预设属性、组内属性与 record 属性按 JSONHandler 语义分层。
+// WithAttrs / WithGroup 派生：组外/组内预设属性与 record 属性按 text 版式（分组以
+// 点前缀展平）拼入 message，帧仍为 src+message 两键。
 func TestHTTP_WithAttrsAndGroup(t *testing.T) {
 	m := newHTTPMock(t)
 	h, _ := newTestHTTPHandler(t, m.url, 1)
@@ -415,19 +529,17 @@ func TestHTTP_WithAttrsAndGroup(t *testing.T) {
 	_ = dh.Handle(t.Context(), rec)
 
 	reqs := m.waitReqs(1, 3*time.Second)
-	body := parseNDJSONLine(t, reqs[0].lines[0])
-	if body["svc"] != "pay" {
-		t.Errorf("WithAttrs 组外预设属性丢失: %v", body)
+	_, message := parseHTTPFrame(t, reqs[0].lines[0])
+	if !strings.Contains(message, "derived") {
+		t.Errorf("message=%q 缺 record 正文 derived", message)
 	}
-	if body["msg"] != "derived" {
-		t.Errorf("msg=%v want derived（record 消息恒在顶层）", body["msg"])
+	if !strings.Contains(message, "svc=pay") {
+		t.Errorf("WithAttrs 组外预设属性丢失: %q", message)
 	}
-	g, ok := body["g"].(map[string]any)
-	if !ok {
-		t.Fatalf("WithGroup 分组未生效: %v", body)
-	}
-	if g["inner"] != "iv" || g["rk"] != "rv" {
-		t.Errorf("组内属性错误: %v", g)
+	for _, want := range []string{"g.inner=iv", "g.rk=rv"} {
+		if !strings.Contains(message, want) {
+			t.Errorf("message=%q 缺组内属性 %q", message, want)
+		}
 	}
 }
 
@@ -438,7 +550,7 @@ func TestHTTP_HeadersAndContentType(t *testing.T) {
 	h, _ := newHTTPHandler(&HTTPSettings{
 		URL: m.url, BatchSize: 1, FlushInterval: 10 * time.Second, Timeout: 2 * time.Second,
 		Headers: map[string]string{"Authorization": "Bearer tok-42", "X-Extra": "e1"},
-	}, slog.LevelDebug, false)
+	}, "", slog.LevelDebug, false)
 	h.s.stderr = &stderrBuf{}
 	defer h.s.Close()
 
@@ -465,7 +577,7 @@ func TestHTTP_UserHeaderOverridesContentType(t *testing.T) {
 	h, _ := newHTTPHandler(&HTTPSettings{
 		URL: m.url, BatchSize: 1, FlushInterval: 10 * time.Second, Timeout: 2 * time.Second,
 		Headers: map[string]string{"Content-Type": "application/x-ndjson"},
-	}, slog.LevelDebug, false)
+	}, "", slog.LevelDebug, false)
 	h.s.stderr = &stderrBuf{}
 	defer h.s.Close()
 
@@ -482,7 +594,7 @@ func TestHTTP_Gzip(t *testing.T) {
 	m := newHTTPMock(t)
 	h, _ := newHTTPHandler(&HTTPSettings{
 		URL: m.url, BatchSize: 2, FlushInterval: 10 * time.Second, Timeout: 2 * time.Second, Gzip: true,
-	}, slog.LevelDebug, false)
+	}, "", slog.LevelDebug, false)
 	h.s.stderr = &stderrBuf{}
 	defer h.s.Close()
 
@@ -499,8 +611,9 @@ func TestHTTP_Gzip(t *testing.T) {
 	if len(reqs[0].lines) != 2 {
 		t.Fatalf("gunzip 后应得 2 行, got %q", reqs[0].lines)
 	}
-	if parseNDJSONLine(t, reqs[0].lines[0])["msg"] != "g1" ||
-		parseNDJSONLine(t, reqs[0].lines[1])["msg"] != "g2" {
+	_, message0 := parseHTTPFrame(t, reqs[0].lines[0])
+	_, message1 := parseHTTPFrame(t, reqs[0].lines[1])
+	if !strings.Contains(message0, "g1") || !strings.Contains(message1, "g2") {
 		t.Errorf("gunzip 内容错误: %q", reqs[0].lines)
 	}
 	// 非空 body 均经 post 补尾换行 → 压缩的是**加尾后**的完整体（无旁路）
@@ -672,7 +785,7 @@ func TestHTTP_CloseFlushesRemaining(t *testing.T) {
 	if len(reqs[0].lines) != 2 {
 		t.Fatalf("Close 应把 2 条残余批送达, got %q", reqs[0].lines)
 	}
-	if parseNDJSONLine(t, reqs[0].lines[0])["msg"] != "tail1" {
+	if _, message := parseHTTPFrame(t, reqs[0].lines[0]); !strings.Contains(message, "tail1") {
 		t.Errorf("收尾批内容错误: %q", reqs[0].lines)
 	}
 	// worker 已停：stopped 通道应已关闭
@@ -715,6 +828,7 @@ func TestConfigOptionsHTTPMapping(t *testing.T) {
 		Outputs: OutputsConfig{
 			HTTP: &HTTPConfig{
 				URL:           "https://collector.internal:8686/v1/logs",
+				Src:           "order-svc",
 				Headers:       map[string]string{"Authorization": "Bearer x"},
 				BatchSize:     7,
 				FlushInterval: "250ms",
@@ -730,6 +844,9 @@ func TestConfigOptionsHTTPMapping(t *testing.T) {
 	s := o.HTTP
 	if s.URL != "https://collector.internal:8686/v1/logs" {
 		t.Errorf("URL=%q", s.URL)
+	}
+	if s.Src != "order-svc" {
+		t.Errorf("Src=%q want order-svc", s.Src)
 	}
 	if s.Headers["Authorization"] != "Bearer x" {
 		t.Errorf("Headers=%v want 含 Authorization", s.Headers)
@@ -912,9 +1029,16 @@ func TestInitConsoleAndHTTPEndToEnd(t *testing.T) {
 		t.Errorf("显式声明 Console 时 stdout 应仍有输出, got: %q", got)
 	}
 	reqs := m.waitReqs(1, 5*time.Second)
-	body := parseNDJSONLine(t, reqs[0].lines[0])
-	if body["msg"] != "fanout-both" {
-		t.Errorf("http 侧 msg=%v want fanout-both", body["msg"])
+	host, err := os.Hostname()
+	if err != nil {
+		t.Fatalf("os.Hostname: %v", err)
+	}
+	src, message := parseHTTPFrame(t, reqs[0].lines[0])
+	if src != sanitizeHTTPSrc(host) {
+		t.Errorf("src=%q want %q（Src/Service 皆空回退 os.Hostname 经白名单化）", src, sanitizeHTTPSrc(host))
+	}
+	if !strings.Contains(message, "fanout-both") || !strings.Contains(message, "k=v") {
+		t.Errorf("http 侧 message=%q want 含 fanout-both 与 k=v", message)
 	}
 }
 
@@ -949,15 +1073,19 @@ func TestInitHTTPEndToEnd(t *testing.T) {
 	if len(reqs[0].lines) != 1 {
 		t.Fatalf("应收到 1 帧, got %q", reqs[0].lines)
 	}
-	body := parseNDJSONLine(t, reqs[0].lines[0])
-	if body["msg"] != "wire-ndjson" {
-		t.Errorf("msg=%v want wire-ndjson", body["msg"])
+	src, message := parseHTTPFrame(t, reqs[0].lines[0])
+	// Src 未显式配置 → 缺省链回退 Config.Service（落盘归属=服务名，对端契约）
+	if src != "svc-http-e2e" {
+		t.Errorf("src=%q want svc-http-e2e（Src 空回退 Service）", src)
 	}
-	if body["service"] != "svc-http-e2e" {
-		t.Errorf("service=%v want svc-http-e2e", body["service"])
+	if !strings.Contains(message, "wire-ndjson") {
+		t.Errorf("message=%q want 含 wire-ndjson", message)
 	}
-	if v, _ := body["z"].(float64); v != 9 {
-		t.Errorf("z=%v want 9", body["z"])
+	if !strings.Contains(message, "svc-http-e2e") {
+		t.Errorf("message=%q want 含前置 service 值 svc-http-e2e", message)
+	}
+	if !strings.Contains(message, "z=9") {
+		t.Errorf("message=%q want 含属性 z=9", message)
 	}
 	if reqs[0].contentType != "application/json" {
 		t.Errorf("Content-Type=%q want application/json", reqs[0].contentType)
@@ -1006,15 +1134,15 @@ func TestFatalFlushesHTTPBatch(t *testing.T) {
 	if len(reqs[0].lines) != 1 {
 		t.Fatalf("Fatal 应把未满批的残余送达 1 帧, got %q (child out:\n%s)", reqs[0].lines, out)
 	}
-	body := parseNDJSONLine(t, reqs[0].lines[0])
-	if body["msg"] != "fatal-must-arrive" {
-		t.Errorf("msg=%v want fatal-must-arrive", body["msg"])
+	_, message := parseHTTPFrame(t, reqs[0].lines[0])
+	if !strings.Contains(message, "fatal-must-arrive") {
+		t.Errorf("message=%q want 含 fatal-must-arrive (child out:\n%s)", message, out)
 	}
-	if v, _ := body["n"].(float64); v != 1 {
-		t.Errorf("n=%v want 1", body["n"])
+	if !strings.Contains(message, "n=1") {
+		t.Errorf("message=%q want 含属性 n=1 (child out:\n%s)", message, out)
 	}
-	if body["level"] != "ERROR+4" {
-		t.Errorf("level=%v want ERROR+4（FatalLevel=Error+4 的标准渲染）", body["level"])
+	if !strings.Contains(message, "FATA") {
+		t.Errorf("message=%q want 含级别词 FATA（text 版式 FatalLevel 渲染）(child out:\n%s)", message, out)
 	}
 	// 收尾投递为快速单次尝试：不应有重试造成的重复请求
 	time.Sleep(300 * time.Millisecond)

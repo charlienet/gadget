@@ -46,14 +46,23 @@
 //     子选项 WithFormat(logger.FormatText) 切换 text 输出（console 渲染器 NoColor 形态，默认 FormatJSON）。
 //   - WithSyslog(address, opts...) 启用 syslog sink：逐条发送 RFC5424 报文、\n 分帧，适配对端
 //     Vector syslog source（自动识别 5424）。连接懒建 / 断线后台重连，失败期间该条丢弃 + stderr
-//     限流告警，绝不阻塞调用方超过 Timeout。子选项 WithSyslogNetwork/Tag/Hostname/Facility/Format/Timeout。
+//     限流告警，绝不阻塞调用方超过 Timeout。HOSTNAME 位=对端落盘归属（建议服务名），缺省链
+//     Hostname > Options.Service > os.Hostname()。单帧上限 102400 字节（对端 max_length 实配，
+//     超限帧被对端静默丢弃）：超限自动截断 MSG 体、保留 …[truncated] 标记并回退到 UTF-8 字符边界。
+//     TIMESTAMP 恒为 UTC Z 或 +HH:MM 带冒号形态（规避对端 +0800 无冒号静默丢帧坑）。
+//     子选项 WithSyslogNetwork/Tag/Hostname/Facility/Format/Timeout。
 //   - WithHTTP(url, opts...) 启用 http sink：以 NDJSON 批量 POST 到远端 HTTP 收集端（适配对端
-//     Vector sources.http_server，codec=json 逐行解码，每行含末尾换行）。攒满 BatchSize 或 FlushInterval 到点即换出，
+//     Vector sources.http_server，codec=json 逐行解码，每行含末尾换行）。每帧为落盘字段契约的
+//     两键对象 {"src":"<服务归属>","message":"<text 版式单行文本>"}：对端落盘只保留 message 文本
+//     （时间/级别/属性已拼入其中，渲染与 console/文件 FormatText 同源），src 决定落盘文件名、
+//     缺省链 Src > Options.Service > os.Hostname()，对端字符集 [a-zA-Z0-9._-] 由库构建期
+//     sanitize 兜底（越界字符替换为 '-'、保证非空），建议显式配置合规名。
+//     攒满 BatchSize 或 FlushInterval 到点即换出，
 //     由独立发送 worker 做网络 IO（日志调用方只缓冲，永不受网络耗时阻塞）；网络错误 / 5xx / 408 / 429
 //     整批指数退避重试（含首次共 3 次尝试），其余 4xx（对端任一坏帧即整批 400）为确定性失败**不重试**；
 //     最终失败丢弃该批 + stderr 限流告警（同原因每 5s ≤1 条）。语义为
 //     at-least-once，重试可致对端重复。Close / Fatal 退出前会收尾投递残余缓冲批（限时、不重试）。
-//     子选项 WithHTTPHeaders/BatchSize/FlushInterval/Timeout/Gzip。
+//     子选项 WithHTTPSrc/Headers/BatchSize/FlushInterval/Timeout/Gzip。
 //
 // 均未声明时兜底一个 stdout 控制台，保证 logger.New() 零配置开箱即用、包级日志不静默；
 // 仅声明非 console sink（WithFile / WithSyslog / WithHTTP）则不写 stdout；WithConsole + 其它即多端输出。
