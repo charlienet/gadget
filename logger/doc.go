@@ -41,7 +41,9 @@
 //
 // 控制台、文件、syslog 是多路独立 sink，各自开关，多路经同一 MultiHandler 扇出：
 //   - WithConsole(opts...) 启用彩色控制台；子选项 WithConsoleWriter(w) 指定 writer
-//     （缺省 os.Stdout）、WithConsoleColor(b) 控制颜色（缺省自动：NO_COLOR + 是否 TTY）。
+//     （缺省 os.Stdout）、WithConsoleColor(b) 控制颜色（缺省自动：NO_COLOR + 是否 TTY）、
+//     WithConsoleFormat(f) 版式（FormatText 默认裸值行 / FormatJSON 标准 JSON 记录写 writer、
+//     颜色语义失效）。
 //   - WithFile(path, opts...) 启用文件 sink（lumberjack 按大小 / 按日期轮换）；
 //     子选项 WithFormat(logger.FormatText) 切换 text 输出（console 渲染器 NoColor 形态，默认 FormatJSON）。
 //   - WithSyslog(address, opts...) 启用 syslog sink：逐条发送 RFC5424 报文、\n 分帧，适配对端
@@ -53,8 +55,10 @@
 //     子选项 WithSyslogNetwork/Tag/Hostname/Facility/Format/Timeout。
 //   - WithHTTP(url, opts...) 启用 http sink：以 NDJSON 批量 POST 到远端 HTTP 收集端（适配对端
 //     Vector sources.http_server，codec=json 逐行解码，每行含末尾换行）。每帧为落盘字段契约的
-//     两键对象 {"src":"<服务归属>","message":"<text 版式单行文本>"}：对端落盘只保留 message 文本
-//     （时间/级别/属性已拼入其中，渲染与 console/文件 FormatText 同源），src 决定落盘文件名、
+//     两键对象 {"src":"<服务归属>","message":"<单行正文>"}：对端落盘只保留 message 文本
+//     （时间/级别/属性已拼入其中，正文版式经 WithHTTPFormat 可选：FormatText 默认裸值行、
+//     与 console/文件 text 同源；FormatJSON 为整条 JSON 记录串、可被对端再解析——信封与
+//     单行帧形两种版式下恒定），src 决定落盘文件名、
 //     缺省链 Src > Options.Service > os.Hostname()，对端字符集 [a-zA-Z0-9._-] 由库构建期
 //     sanitize 兜底（越界字符替换为 '-'、保证非空），建议显式配置合规名。
 //     攒满 BatchSize 或 FlushInterval 到点即换出，
@@ -62,7 +66,7 @@
 //     整批指数退避重试（含首次共 3 次尝试），其余 4xx（对端任一坏帧即整批 400）为确定性失败**不重试**；
 //     最终失败丢弃该批 + stderr 限流告警（同原因每 5s ≤1 条）。语义为
 //     at-least-once，重试可致对端重复。Close / Fatal 退出前会收尾投递残余缓冲批（限时、不重试）。
-//     子选项 WithHTTPSrc/Headers/BatchSize/FlushInterval/Timeout/Gzip。
+//     子选项 WithHTTPSrc/Format/Headers/BatchSize/FlushInterval/Timeout/Gzip。
 //
 // 均未声明时兜底一个 stdout 控制台，保证 logger.New() 零配置开箱即用、包级日志不静默；
 // 仅声明非 console sink（WithFile / WithSyslog / WithHTTP）则不写 stdout；WithConsole + 其它即多端输出。
@@ -74,6 +78,8 @@
 // 且为 TTY 且无 NO_COLOR 才涂色）、true=强制关色；Config 层不提供强制开色，该能力留在 Option 精调层
 // WithConsoleColor(true)。
 // FileConfig.Layout 非空→WithDateRotate 启用按日期轮换（空则维持 lumberjack 按大小轮换，仅 File 节点消费）；
+// ConsoleConfig.Format / HTTPConfig.Format 为各后端版式（"text" 默认 / "json"；**空串=默认 text**，
+// 不走 ParseFileFormat 的 JSON 回退，非法非空值 Init 报错），SyslogConfig.Format 空=默认 json；
 // SyslogConfig 的 Address 非空、Network/Facility/Timeout/Format 合法性在 Init 合并后校验（不可达地址
 // 不在 Init 报错，连接为懒建）；HTTPConfig 的 URL 非空且 scheme 必须 http/https、BatchSize 非负、
 // Timeout / FlushInterval 非空时可解析且非负，同样在 Init 合并后校验（端点不可达不在 Init 报错，

@@ -74,8 +74,14 @@ type ConsoleConfig struct {
 	// true = 强制关闭颜色。Config 层不提供「强制开色」——该能力留在 Option 精调层
 	// WithConsoleColor(true)。
 	// 映射：nil Console 节点不启用控制台；非 nil 且 NoColor=false → WithConsole()；
-	// NoColor=true → WithConsole(WithConsoleColor(false))。
+	// NoColor=true → WithConsole(WithConsoleColor(false))。仅作用于 text 版式。
 	NoColor bool `yaml:"no_color" json:"no_color" mapstructure:"no_color"`
+
+	// Format 控制台输出版式："text"(默认，自研 console 渲染器裸值版式 + NoColor/颜色自动
+	// 判定) / "json"（JSON 记录写 console writer，与 file/syslog/http 的 json 渲染同源，
+	// 颜色语义失效）。经 ParseFileFormat 转枚举（大小写不敏感、trim，非法非空值 Init 报错；
+	// 空串 = 默认 text，不走 ParseFileFormat 的 JSON 回退）→ WithConsoleFormat。
+	Format string `yaml:"format" json:"format" mapstructure:"format"`
 }
 
 // FileConfig 文件后端参数（映射 Option：WithFile(path, FileOption...)）。
@@ -153,6 +159,12 @@ type HTTPConfig struct {
 	// 200 但文件名被污染，故发送前强制收敛），Init 层不校验（值可能来自动态 Service），
 	// 建议显式配置合规名 → WithHTTPSrc
 	Src string `yaml:"src" json:"src" mapstructure:"src"`
+
+	// Format message 正文版式："text"(默认，裸值单行，接入契约推荐) / "json"
+	// （message=整条 JSON 记录渲染串，对端落盘为一行 JSON 文本、可被再解析）。
+	// 传输信封 {"src","message"} 两种版式下均不变、帧恒单行。
+	// 经 ParseFileFormat 转枚举（空 = 默认 text，不注入；非法非空值 Init 报错）→ WithHTTPFormat
+	Format string `yaml:"format" json:"format" mapstructure:"format"`
 
 	// Headers 附加请求头（认证 token 等由应用端注入，本库不含鉴权语义）；
 	// 逐条 Set 到请求，后于内置 Content-Type → 可覆写默认头 → WithHTTPHeaders

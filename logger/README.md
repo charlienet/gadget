@@ -39,8 +39,9 @@ l := logger.New(
     logger.WithService("opencode-api"),   // 全局 service 字段（非空才注入）
     logger.WithEnv("prod"),               // 全局 env 字段
     logger.WithLevel(slog.LevelDebug),    // 静态级别
-    logger.WithConsole(                   // 控制台 sink：writer 缺省 os.Stdout、颜色自动
+    logger.WithConsole(                   // 控制台 sink：writer 缺省 os.Stdout、颜色自动、版式 text
         logger.WithConsoleColor(true),    //   可选强制彩色；亦可 WithConsoleWriter(w) 指定 writer
+        // logger.WithConsoleFormat(logger.FormatJSON), // 可选：JSON 记录写 console（颜色失效，见「输出格式支持矩阵」）
     ),
     logger.WithFile("./logs/app.log",     // 文件 sink（默认 JSON）
         logger.WithMaxSize(100),          // MB，默认 100
@@ -86,6 +87,7 @@ cfg := logger.Config{
     Outputs: logger.OutputsConfig{
         Console: &logger.ConsoleConfig{}, // 指针非 nil=启用控制台；置 nil=不启用
         // NoColor: true 强制关闭颜色；默认 false=自动（终端支持 ANSI 即应用，跟随 NO_COLOR）
+        // Format: "json" 可切 JSON 记录版式；默认空=text（注意：与 file 的空=json 相反，见「输出格式支持矩阵」）
         File: &logger.FileConfig{ // File 节点非 nil=启用文件；置 nil=不启用（启用时 Filename 必填，见下方黑洞校验）
             Filename:   "logs/app.log",
             Format:     "json", // json(默认)/text（大小写不敏感，非法非空值报错）
@@ -129,6 +131,7 @@ sensitive:            # 可选：横切打码（console/file 双端生效），�
 outputs:
   console:            # 节存在=启用控制台；缺省=不启用
     no_color: false   #   true 强制关闭颜色；默认 false=自动（ANSI + TTY + 无 NO_COLOR）
+    format: "text"    #   text(默认)/json；空=text（与 file 的空=json 相反！），非法非空值 Init 报错
   file:               # 节存在=启用文件；缺省=不启用（存在时 filename 必填，见下方黑洞校验）
     filename: "logs/app.log"
     format: "json"    #   json(默认)/text（大小写不敏感，非法非空值报错）
@@ -145,6 +148,7 @@ outputs:
     flush_interval: 500ms #  不满批强制投递间隔，空默认 500ms；非法/负值 Init 报错
     timeout: 5s         #   整请求超时（含重试单次尝试），空默认 5s；非法/负值 Init 报错
     gzip: false         #   请求体 gzip 压缩（置 Content-Encoding: gzip）
+    format: "text"      #   message 正文版式 text(默认)/json；空=text，非法非空值 Init 报错（信封不变，见「输出格式支持矩阵」）
 ```
 
 > **控制台颜色 `ConsoleConfig.NoColor` 两态**：`true` 强制关闭颜色；**`false`（默认零值）** 走自动判定（终端支持 ANSI、输出为 TTY 且无 `NO_COLOR` 环境变量三者同时满足才涂色，管道 / 重定向到文件自动无 ANSI）。仅作用于非 nil 的 `Console` 节点；`Console` 为 nil（不启用控制台）不受影响。
@@ -157,11 +161,36 @@ outputs:
 > `Timeout` 非空但无法 `time.ParseDuration` 解析、`Format` 非法 → 一并报错。任一失败均**不**改动 `DefaultLogger`。
 > 注意 syslog 连接为**懒建 / 后台重连**，地址不可达**不在** `Init` 报错（与 file 的 lumberjack 惰性 IO 语义一致）。
 > `Outputs.HTTP` 节点非 nil 时：合并后 `URL` 为空、`URL` 无法 `url.Parse` 解析或 scheme 非 `http`/`https`、
-> `BatchSize` 负数、`Timeout` / `FlushInterval` 非空但无法解析或为负值 → 一并报错。http 连接同样**懒建**
+> `BatchSize` 负数、`Timeout` / `FlushInterval` 非空但无法解析或为负值、`Format` 非法非空值 → 一并报错。http 连接同样**懒建**
 > （首个批次发送时才拨号），端点不可达**不在** `Init` 报错。
+> `Outputs.Console` 节点非 nil 且 `Format` 为非法非空值 → 报错（**空 = 默认 text**，与 `File`/`Syslog`
+> 的「空 = json」缺省语义相反，见「输出格式支持矩阵」）。
 > `Init` / `New` 每次替换默认实例前会关闭（flush + 释放句柄）上一个默认实例，见「设计说明」。
 
 > **Config 能力映射**：`FileConfig.Layout` 非空 → `WithDateRotate(layout)`（按日期轮换，仅 `File` 节点消费，空则维持 lumberjack 按大小轮换）；`Sensitive.Keys` 非空 → `WithSensitiveKeys(...)`（追加词、与内置词集合并）、`Sensitive.Mask` 非空 → `WithSensitiveMask(...)`——敏感打码为横切能力，console/file 双端生效。二者**零值均不注入**对应 Option（默认行为不变，`DefaultConfig` 敏感配置 nil/空）；Init 打底后用户 opts 可再追加（`WithSensitiveKeys` 为 append 语义，两组词都生效）。
+
+## 输出格式支持矩阵（Format per-backend）
+
+四类后端各自独立可选 `Format`（`FileFormat` 为**通用输出格式枚举**，`FormatText` / `FormatJSON`，
+类型名沿用历史不表示"仅文件"）。**全部默认值即历史行为**，不配置零变化：
+
+| 后端 | Config 字段 | Option 子选项 | 默认 | 可选值 | 作用范围 |
+| --- | --- | --- | --- | --- | --- |
+| console | `ConsoleConfig.Format` | `WithConsoleFormat` | `text` | text / json | 整行版式；json=标准 JSON 记录写 console writer，**颜色语义失效**（NoColor/自动判定不参与） |
+| file | `FileConfig.Format` | `WithFormat` | `json` | json / text | 整行版式（text 即 console 渲染器 NoColor 形态） |
+| syslog | `SyslogConfig.Format` | `WithSyslogFormat` | `json` | json / text | 仅 **MSG 体**；RFC5424 报文头（PRI/TIMESTAMP/HOSTNAME/…）恒定 |
+| http | `HTTPConfig.Format` | `WithHTTPFormat` | `text` | text / json | 仅帧内 **message 正文**；传输信封 `{"src","message"}` 与单行 NDJSON 帧形**恒定** |
+
+- **默认值不对称是有意为之**：console / http 的空串 = `text`（接入契约推荐形态），file / syslog 的
+  空串 = `json`（历史默认）；`ParseFileFormat` 的空串 JSON 回退不适用于 console / http 的 Config
+  映射——两节点空串**不注入** Format Option，非法非空值一律 `Init` 报错（不静默回退）；
+- **console json 形态**：与 file / syslog / http 的 json 渲染同源（`slog.NewJSONHandler` + time 定制
+  `2006-01-02 15:04:05.000`），字段为 `msg/level/time/attrs` 标准记录；零 sink 兜底的 stdout
+  控制台保持 text 版式不受影响；
+- **http json 形态**：`message` 变为整条 JSON 记录的渲染串（外层信封 Marshal 自动二次转义，
+  帧仍恒单行）。对端落盘内容随之是一行 JSON 文本而非裸值行——这是**发送方的内容选择**，
+  `src` 归属、两键信封、NDJSON 分帧等**传输契约均不变**，对端仍可把 message 文本再
+  `json.Unmarshal` 还原结构化记录；默认 text 仍是接入指导推荐形态。
 
 ## syslog 后端（RFC5424 → 远端 Vector）
 
@@ -369,7 +398,9 @@ outputs:
     （与 console / 文件 `FormatText` 同一实现的裸值版式，含 time/level/msg/attrs 全量、
     单行、裸 `\n`/`\r` 已转义为字面量）渲染整条 record 得单行文本后，作为 message 字段
     做 JSON 字符串编码（src 同样经 JSON 转义防注入）。落盘后 message 含 `\n` 字面量两字符
-    属预期（对端契约要求正文单行）；
+    属预期（对端契约要求正文单行）。message 正文版式可经 `format: "json"` /
+    `WithHTTPFormat(FormatJSON)` 切换为整条 JSON 记录串（落盘为一行 JSON 文本、可被对端
+    再解析；信封与帧形不变，见「输出格式支持矩阵」）；
 - **请求头**：`Content-Type: application/json`（服务端不强制，统一发送）；`Gzip` 开启时追加
   `Content-Encoding: gzip`。用户 `Headers` 在默认头**之后**逐条 `Set`，因此可覆写
   `Content-Type`（例如对端要求 `application/x-ndjson`）。

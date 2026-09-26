@@ -590,6 +590,68 @@ func TestHTTP_UserHeaderOverridesContentType(t *testing.T) {
 
 // ---- Gzip ----
 
+// Format=json：帧信封不变（两键 src+message），message 为整条 JSON 记录渲染串、可被
+// 再反序列化（msg/level/time/attrs 齐备）——对端落盘为一行 JSON 文本（发送方内容选择）。
+func TestHTTP_FrameFormatJSON(t *testing.T) {
+	m := newHTTPMock(t)
+	h, _ := newHTTPHandler(&HTTPSettings{
+		URL: m.url, BatchSize: 3, FlushInterval: 10 * time.Second, Timeout: 2 * time.Second,
+		Src: "json-src", Format: FormatJSON,
+	}, "", slog.LevelDebug, false)
+	h.s.stderr = &stderrBuf{}
+	defer h.s.Close()
+
+	rec := slog.NewRecord(time.Now(), Warn, "jf-1", 0)
+	rec.AddAttrs(slog.String("k", "v"), slog.Int("n", 42))
+	_ = h.Handle(t.Context(), rec)
+	_ = h.Handle(t.Context(), slog.NewRecord(time.Now(), Error, `quote"and\nnewline`, 0))
+	_ = h.Handle(t.Context(), slog.NewRecord(time.Now(), Info, "jf-3", 0))
+
+	reqs := m.waitReqs(1, 3*time.Second)
+	if len(reqs[0].lines) != 3 {
+		t.Fatalf("应收到 3 帧, got %q", reqs[0].lines)
+	}
+	for i, line := range reqs[0].lines {
+		src, message := parseHTTPFrame(t, line)
+		if src != "json-src" {
+			t.Errorf("第 %d 帧 src=%q want json-src", i+1, src)
+		}
+		var body map[string]any
+		if err := json.Unmarshal([]byte(message), &body); err != nil {
+			t.Fatalf("第 %d 帧 message 应为可再解析的 JSON 记录: %v (message=%q)", i+1, err, message)
+		}
+		if _, ok := body["time"]; !ok {
+			t.Errorf("第 %d 帧 JSON 记录缺 time: %v", i+1, body)
+		}
+	}
+	body0, _ := parseJSONMessage(t, reqs[0].lines[0])
+	if body0["msg"] != "jf-1" || body0["level"] != "WARN" {
+		t.Errorf("第 1 帧记录错误: %v", body0)
+	}
+	if body0["k"] != "v" {
+		t.Errorf("attr k=%v want v", body0["k"])
+	}
+	if v, _ := body0["n"].(float64); v != 42 {
+		t.Errorf("attr n=%v want 42", body0["n"])
+	}
+	// 特殊字符消息：内层 JSON 引号/转义由外层 Marshal 自动处理，帧仍恒单行
+	body1, _ := parseJSONMessage(t, reqs[0].lines[1])
+	if body1["msg"] != `quote"and\nnewline` || body1["level"] != "ERROR" {
+		t.Errorf("第 2 帧记录错误: %v", body1)
+	}
+}
+
+// parseJSONMessage 解析帧并二次反序列化 message（Format=json 断言辅助）。
+func parseJSONMessage(t *testing.T, line string) (map[string]any, string) {
+	t.Helper()
+	_, message := parseHTTPFrame(t, line)
+	var body map[string]any
+	if err := json.Unmarshal([]byte(message), &body); err != nil {
+		t.Fatalf("message 非合法 JSON 记录: %v (message=%q)", err, message)
+	}
+	return body, message
+}
+
 func TestHTTP_Gzip(t *testing.T) {
 	m := newHTTPMock(t)
 	h, _ := newHTTPHandler(&HTTPSettings{
@@ -629,6 +691,33 @@ func TestHTTP_Gzip(t *testing.T) {
 	}
 }
 
+// Format=json + Gzip：gunzip 后逐帧信封两键、message 可再解析——压缩管道对 json 帧同样生效。
+func TestHTTP_GzipJSONFrame(t *testing.T) {
+	m := newHTTPMock(t)
+	h, _ := newHTTPHandler(&HTTPSettings{
+		URL: m.url, BatchSize: 2, FlushInterval: 10 * time.Second, Timeout: 2 * time.Second,
+		Gzip: true, Format: FormatJSON, Src: "gz-js",
+	}, "", slog.LevelDebug, false)
+	h.s.stderr = &stderrBuf{}
+	defer h.s.Close()
+
+	_ = h.Handle(t.Context(), slog.NewRecord(time.Now(), Info, "gj1", 0))
+	_ = h.Handle(t.Context(), slog.NewRecord(time.Now(), Info, "gj2", 0))
+
+	reqs := m.waitReqs(1, 3*time.Second)
+	if !reqs[0].gzipped {
+		t.Fatal("Gzip=true 应置 Content-Encoding: gzip")
+	}
+	if len(reqs[0].lines) != 2 {
+		t.Fatalf("gunzip 后应得 2 行, got %q", reqs[0].lines)
+	}
+	b0, _ := parseJSONMessage(t, reqs[0].lines[0])
+	b1, _ := parseJSONMessage(t, reqs[0].lines[1])
+	if b0["msg"] != "gj1" || b1["msg"] != "gj2" {
+		t.Errorf("gunzip JSON 内容错误: %v / %v", b0, b1)
+	}
+}
+
 // ---- 重试与丢弃 ----
 
 // 前 2 次 500、第 3 次 200 → 服务端收到同一批的 3 次尝试，批内容逐字节一致。
@@ -650,6 +739,36 @@ func TestHTTP_RetrySameBatch(t *testing.T) {
 		}
 		if reqs[i].lines[0] != reqs[0].lines[0] || reqs[i].lines[1] != reqs[0].lines[1] {
 			t.Errorf("第 %d 次尝试的批内容与首次不一致（重试应发整批）: %q", i+1, reqs[i].lines)
+		}
+	}
+	if d := h.s.droppedCount(); d != 0 {
+		t.Errorf("第 3 次成功后不应有丢弃, got %d", d)
+	}
+}
+
+// Format=json 走重试路径：前 2 次 500 后成功——同一 json 批 3 次尝试逐字节一致、
+// message 均可再解析（重试管道对 json 帧零特殊化）。
+func TestHTTP_RetryJSONFrame(t *testing.T) {
+	m := newHTTPMockOpts(t, httpMockOpts{failures: 2})
+	h, _ := newHTTPHandler(&HTTPSettings{
+		URL: m.url, BatchSize: 2, FlushInterval: 10 * time.Second, Timeout: 2 * time.Second,
+		Format: FormatJSON, Src: "rt-js",
+	}, "", slog.LevelDebug, false)
+	h.s.retryBase = 10 * time.Millisecond
+	h.s.stderr = &stderrBuf{}
+	defer h.s.Close()
+
+	_ = h.Handle(t.Context(), slog.NewRecord(time.Now(), Info, "rj1", 0))
+	_ = h.Handle(t.Context(), slog.NewRecord(time.Now(), Info, "rj2", 0))
+
+	reqs := m.waitReqs(3, 3*time.Second)
+	for i := range 3 {
+		if reqs[i].lines[0] != reqs[0].lines[0] || reqs[i].lines[1] != reqs[0].lines[1] {
+			t.Errorf("第 %d 次尝试批内容不一致: %q", i+1, reqs[i].lines)
+		}
+		b0, _ := parseJSONMessage(t, reqs[i].lines[0])
+		if b0["msg"] != "rj1" {
+			t.Errorf("第 %d 次尝试 message=%v want rj1", i+1, b0["msg"])
 		}
 	}
 	if d := h.s.droppedCount(); d != 0 {
@@ -829,6 +948,7 @@ func TestConfigOptionsHTTPMapping(t *testing.T) {
 			HTTP: &HTTPConfig{
 				URL:           "https://collector.internal:8686/v1/logs",
 				Src:           "order-svc",
+				Format:        "json",
 				Headers:       map[string]string{"Authorization": "Bearer x"},
 				BatchSize:     7,
 				FlushInterval: "250ms",
@@ -847,6 +967,9 @@ func TestConfigOptionsHTTPMapping(t *testing.T) {
 	}
 	if s.Src != "order-svc" {
 		t.Errorf("Src=%q want order-svc", s.Src)
+	}
+	if s.Format != FormatJSON {
+		t.Errorf("Format=%q want json", s.Format)
 	}
 	if s.Headers["Authorization"] != "Bearer x" {
 		t.Errorf("Headers=%v want 含 Authorization", s.Headers)
@@ -880,6 +1003,10 @@ func TestConfigOptionsHTTPDefaults(t *testing.T) {
 	}
 	if o.HTTP.Timeout != 5*time.Second {
 		t.Errorf("空 Timeout 应回退默认 5s, got %v", o.HTTP.Timeout)
+	}
+	// Format 空 = 默认 text（不注入 WithHTTPFormat，WithHTTP 填 FormatText）
+	if o.HTTP.Format != FormatText {
+		t.Errorf("空 Format 应默认 text, got %q", o.HTTP.Format)
 	}
 }
 
@@ -930,6 +1057,11 @@ func TestInitHTTPValidation(t *testing.T) {
 			name:    "FlushInterval 负值",
 			cfg:     Config{Outputs: OutputsConfig{HTTP: &HTTPConfig{URL: "http://h/p", FlushInterval: "-5ms"}}},
 			wantSub: "invalid http flush_interval",
+		},
+		{
+			name:    "Format 非法",
+			cfg:     Config{Outputs: OutputsConfig{HTTP: &HTTPConfig{URL: "http://h/p", Format: "yaml"}}},
+			wantSub: "unknown file format",
 		},
 	}
 

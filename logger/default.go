@@ -197,18 +197,35 @@ func (l *slogLogger) rebuild() {
 		if l.opt.Console != nil && l.opt.Console.Writer != nil {
 			writer = l.opt.Console.Writer
 		}
-		noColor := false
-		if l.opt.Console != nil && l.opt.Console.Color != nil {
-			noColor = !*l.opt.Console.Color
+		if l.opt.Console != nil && l.opt.Console.Format == FormatJSON {
+			// json 版式：与 file/syslog/http 的 json 渲染同源（newFileHandler(FormatJSON)，
+			// 含 time 定制 2006-01-02 15:04:05.000）；writer 沿用现逻辑，级别同源，
+			// 颜色设置失效（JSON handler 无 ANSI 语义）。
+			handlers = append(handlers, newFileHandler(writer, FormatJSON, &slog.HandlerOptions{
+				Level:     lvl,
+				AddSource: l.opt.Source,
+				ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
+					if a.Key == slog.TimeKey && len(groups) == 0 {
+						a.Value = slog.StringValue(a.Value.Time().Format("2006-01-02 15:04:05.000"))
+					}
+					return a
+				},
+			}))
 		} else {
-			// 自动模式：NO_COLOR 环境变量或非 TTY 输出（管道/文件）时禁用颜色
-			noColor = !ShouldColor() || !IsTerminal(writer)
+			// text 版式（默认，含未声明/零值）：现逻辑逐字不动（颜色自动判定、NoColor 两态）。
+			noColor := false
+			if l.opt.Console != nil && l.opt.Console.Color != nil {
+				noColor = !*l.opt.Console.Color
+			} else {
+				// 自动模式：NO_COLOR 环境变量或非 TTY 输出（管道/文件）时禁用颜色
+				noColor = !ShouldColor() || !IsTerminal(writer)
+			}
+			handlers = append(handlers, NewConsoleHandler(writer, &ConsoleOptions{
+				Level:     lvl,
+				AddSource: l.opt.Source,
+				NoColor:   noColor,
+			}))
 		}
-		handlers = append(handlers, NewConsoleHandler(writer, &ConsoleOptions{
-			Level:     lvl,
-			AddSource: l.opt.Source,
-			NoColor:   noColor,
-		}))
 	}
 
 	// 文件 handler（JSON/text + 轮换），复用 New 时构建的 fileWriter；

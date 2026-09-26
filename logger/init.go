@@ -45,7 +45,8 @@ func ParseFileFormat(s string) (FileFormat, error) {
 //
 // 返回错误（合并上报，任一失败都不改动 DefaultLogger）：
 //   - 黑洞：File 节点存在但合并用户 opts 后文件路径仍为空（用户可用 WithFile(path) 补路径消除）；
-//   - 非法格式：FileConfig.Format 为非空未知值（不静默回退）；
+//   - 非法格式：FileConfig.Format / ConsoleConfig.Format / SyslogConfig.Format / HTTPConfig.Format
+//     为非法非空值（不静默回退；console / http 的空串 = 默认 text，不参与 ParseFileFormat）；
 //   - syslog：Address 为空（合并用户 opts 后）、Network 非法（仅允许 ""/tcp/udp）、
 //     Facility 非法名、Timeout 非空但无法 time.ParseDuration 解析、Format 非法。
 //     注意连接是懒建/后台重连，地址不可达不在 Init 报错（与 file 的 lumberjack 惰性 IO 语义一致）。
@@ -76,6 +77,13 @@ func Init(cfg Config, opts ...Option) error {
 	}
 	if hc := cfg.Outputs.HTTP; hc != nil {
 		problems = append(problems, validateHTTPConfig(hc, buildOptions(finalOpts...).HTTP)...)
+	}
+	if cc := cfg.Outputs.Console; cc != nil && cc.Format != "" {
+		// 控制台版式校验（与 file/syslog Format 同判据、同合并风格）：空 = 默认 text
+		// 不校验（ParseFileFormat 空串回退 JSON，与 console 缺省语义相反，故空串不进本分支）。
+		if _, err := ParseFileFormat(cc.Format); err != nil {
+			problems = append(problems, err)
+		}
 	}
 	if len(problems) > 0 {
 		return errors.Join(problems...)
@@ -159,6 +167,14 @@ func validateHTTPConfig(hc *HTTPConfig, resolved *HTTPSettings) []error {
 	problems = append(problems, validateHTTPDuration("http timeout", hc.Timeout, defaultHTTPTimeout)...)
 	problems = append(problems, validateHTTPDuration("http flush_interval", hc.FlushInterval, defaultHTTPFlushInterval)...)
 
+	// Format 校验与 file/syslog 同判据（复用 ParseFileFormat）；空 = 默认 text 合法
+	// （http 缺省语义为 text，ParseFileFormat 的空串 JSON 回退不适用于本节点，判空即跳过）。
+	if hc.Format != "" {
+		if _, err := ParseFileFormat(hc.Format); err != nil {
+			problems = append(problems, err)
+		}
+	}
+
 	return problems
 }
 
@@ -197,13 +213,21 @@ func configOptions(cfg Config) []Option {
 		base = append(base, WithEnv(cfg.Env))
 	}
 
-	// 控制台后端：节点存在即启用；颜色两态映射——NoColor=true → 追加
+	// 控制台后端：节点存在即启用。颜色两态映射——NoColor=true → 追加
 	// WithConsoleColor(false) 强制关色；NoColor=false（默认）→ 不追加子选项，
 	// WithConsole() 走自动判定（NO_COLOR + TTY）。
+	// 版式映射：Format 空 = 默认 text（**不注入**——注意 ParseFileFormat 空串回退 JSON，
+	// console 的缺省语义与之相反，故仅非空且解析成功才注入）；"json"/"text" →
+	// WithConsoleFormat；非法非空值的报错由 Init 校验统一上报。
 	if cfg.Outputs.Console != nil {
 		var consoleOpts []ConsoleOption
 		if cfg.Outputs.Console.NoColor {
 			consoleOpts = append(consoleOpts, WithConsoleColor(false))
+		}
+		if s := cfg.Outputs.Console.Format; s != "" {
+			if f, err := ParseFileFormat(s); err == nil {
+				consoleOpts = append(consoleOpts, WithConsoleFormat(f))
+			}
 		}
 		base = append(base, WithConsole(consoleOpts...))
 	}
@@ -249,11 +273,18 @@ func configOptions(cfg Config) []Option {
 	// BatchSize 仅 >0 时注入（0 = 保持 WithHTTP 默认 100，负值由 Init 拦截）；
 	// Src/Headers/Gzip 直接映射（Src 空串不改变语义：handler 内回退 Service→os.Hostname()，
 	// 回退结果同样经白名单 sanitize；Init 不校验 Src，库构建期 sanitize 兜底）。
+	// Format 空 = 默认 text 不注入（ParseFileFormat 空串回退 JSON，与 http 缺省语义相反，
+	// 仅非空且解析成功才 WithHTTPFormat）；非法非空值由 Init 校验统一上报。
 	if hc := cfg.Outputs.HTTP; hc != nil {
 		hopts := []HTTPOption{
 			WithHTTPSrc(hc.Src),
 			WithHTTPHeaders(hc.Headers),
 			WithHTTPGzip(hc.Gzip),
+		}
+		if s := hc.Format; s != "" {
+			if f, err := ParseFileFormat(s); err == nil {
+				hopts = append(hopts, WithHTTPFormat(f))
+			}
 		}
 		if hc.BatchSize > 0 {
 			hopts = append(hopts, WithHTTPBatchSize(hc.BatchSize))

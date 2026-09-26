@@ -39,8 +39,9 @@ type Options struct {
 // ConsoleSettings 控制台 sink 的可选覆盖；nil（Options.Console）表示调用方未声明 WithConsole。
 // 与 sink 存在性解耦：WithConsole() 即便不带子选项也会把 Console 置为非 nil，用于「启用控制台」。
 type ConsoleSettings struct {
-	Writer io.Writer // nil → 默认 os.Stdout
-	Color  *bool     // nil → 自动（NO_COLOR 环境变量 + IsTerminal(Writer)）
+	Writer io.Writer  // nil → 默认 os.Stdout
+	Color  *bool      // nil → 自动（NO_COLOR 环境变量 + IsTerminal(Writer)）
+	Format FileFormat // 输出版式：FormatText（默认，裸值版式 + 颜色自动判定）/ FormatJSON（JSON 记录写 writer，颜色语义失效）
 }
 
 func WithLevel(lvl slog.Level) Option {
@@ -55,12 +56,13 @@ func WithLevel(lvl slog.Level) Option {
 type ConsoleOption func(*ConsoleSettings)
 
 // WithConsole 启用控制台 sink。必须把 o.Console 置为非 nil（即使不带子选项），
-// 再依次应用 opts。多次调用会叠加到同一个 ConsoleSettings（精调 writer/color 而非重置），
+// 再依次应用 opts。多次调用会叠加到同一个 ConsoleSettings（精调 writer/color/format 而非重置），
 // 因此 WithConsole(WithConsoleWriter(w)) + WithConsole(WithConsoleColor(false)) 组合成立。
+// 版式默认 FormatText（自研 console 渲染器）；WithConsoleFormat(FormatJSON) 切标准 JSON 记录。
 func WithConsole(opts ...ConsoleOption) Option {
 	return func(o *Options) {
 		if o.Console == nil {
-			o.Console = &ConsoleSettings{}
+			o.Console = &ConsoleSettings{Format: FormatText}
 		}
 		for _, opt := range opts {
 			opt(o.Console)
@@ -75,10 +77,20 @@ func WithConsoleWriter(w io.Writer) ConsoleOption {
 	}
 }
 
-// WithConsoleColor 控制台颜色显式开关（覆盖自动判定）。
+// WithConsoleColor 控制台颜色显式开关（覆盖自动判定）。仅作用于 text 版式；
+// FormatJSON 形态走标准 JSON handler，无颜色语义。
 func WithConsoleColor(enabled bool) ConsoleOption {
 	return func(c *ConsoleSettings) {
 		c.Color = &enabled
+	}
+}
+
+// WithConsoleFormat 控制台输出版式：FormatText（默认，自研 console 渲染器裸值版式，
+// 颜色按 Color 设置/自动判定）或 FormatJSON（slog.NewJSONHandler 写 console writer，
+// 与文件/syslog/http 的 json 渲染同源，颜色语义失效）。
+func WithConsoleFormat(format FileFormat) ConsoleOption {
+	return func(c *ConsoleSettings) {
+		c.Format = format
 	}
 }
 
@@ -274,8 +286,10 @@ func WithSampling(first, thereafter int) Option {
 
 // ---- 文件轮换选项 ----
 
-// FileFormat 文件输出格式枚举（string 基类型，与 FileConfig.Format 的字符串值同源）。
-// 零值 ""（等价 FormatJSON）保证「未设置 = JSON」向后兼容；typed 参数防止调用方误传裸 string。
+// FileFormat 输出格式枚举（string 基类型，与 FileConfig.Format 等格式字符串值同源）。
+// **通用输出格式枚举**：console / file / syslog / http 四类后端的 Format 配置共用本类型
+// （见各 *Settings.Format / *Config.Format 字段），不因名称含 File 而仅文件后端可用。
+// 零值 ""（语义等同 FormatJSON）保证「未设置 = JSON」向后兼容；typed 参数防止调用方误传裸 string。
 type FileFormat string
 
 const (

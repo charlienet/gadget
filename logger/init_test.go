@@ -3,6 +3,7 @@ package logger_test
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"os"
@@ -582,5 +583,107 @@ func TestInitConfigLayoutDateRotate(t *testing.T) {
 	// 原始 app.log 不应产生：Layout 非空走日期轮换 writer，文件名已插入日期段
 	if _, err := os.Stat(path); err == nil {
 		t.Errorf("plain app.log must not be created under date rotate, found at %s", path)
+	}
+}
+
+// --- ⑧ Console Format 可选（text/json，F1）---
+
+// Init 路径 Console{Format:"json"}：console writer 收到合法 JSON 记录
+// （msg/level/time/attrs、单行、无 ANSI）。
+func TestInitConsoleJSONFormat(t *testing.T) {
+	withRestoreDefault(t)
+	t.Cleanup(func() { _ = logger.Close(2 * time.Second) })
+
+	got := captureStdout(t, func() {
+		if err := logger.Init(logger.Config{
+			Level:   "info",
+			Service: "console-json",
+			Outputs: logger.OutputsConfig{Console: &logger.ConsoleConfig{Format: "json"}},
+		}); err != nil {
+			t.Fatalf("Init: %v", err)
+		}
+		logger.DefaultLogger.Info("json-console-msg", "k", "v")
+	})
+
+	line := strings.TrimSuffix(got, "\n")
+	if strings.Contains(line, "\n") {
+		t.Fatalf("JSON 版式 console 应单行, got %q", got)
+	}
+	if strings.Contains(got, "\033[") {
+		t.Errorf("JSON 版式不应含 ANSI 颜色, got %q", got)
+	}
+	var rec map[string]any
+	if err := json.Unmarshal([]byte(line), &rec); err != nil {
+		t.Fatalf("console JSON 记录反序列化失败: %v (line=%q)", err, line)
+	}
+	if rec["msg"] != "json-console-msg" {
+		t.Errorf("msg=%v want json-console-msg", rec["msg"])
+	}
+	if rec["level"] != "INFO" {
+		t.Errorf("level=%v want INFO", rec["level"])
+	}
+	if rec["k"] != "v" {
+		t.Errorf("attr k=%v want v", rec["k"])
+	}
+	if _, ok := rec["time"]; !ok {
+		t.Errorf("JSON 记录缺 time 字段: %v", rec)
+	}
+	if rec["service"] != "console-json" {
+		t.Errorf("service=%v want console-json", rec["service"])
+	}
+}
+
+// Option 路径 WithConsoleFormat(FormatJSON)：JSON 记录写注入的 writer；
+// 同时锁定默认（不带 WithConsoleFormat）仍为 text 版式——F1 零破坏回归锚。
+func TestNewConsoleJSONFormatOption(t *testing.T) {
+	var jsonBuf bytes.Buffer
+	l := logger.New(
+		logger.WithConsole(logger.WithConsoleWriter(&jsonBuf), logger.WithConsoleFormat(logger.FormatJSON)),
+		logger.WithConsole(logger.WithConsoleColor(true)), // 颜色设置对 JSON 版式失效（无 ANSI）
+	)
+	l.Info("opt-json", "n", 7)
+
+	line := strings.TrimSuffix(jsonBuf.String(), "\n")
+	var rec map[string]any
+	if err := json.Unmarshal([]byte(line), &rec); err != nil {
+		t.Fatalf("Option 路径 JSON 记录反序列化失败: %v (line=%q)", err, line)
+	}
+	if rec["msg"] != "opt-json" {
+		t.Errorf("msg=%v want opt-json", rec["msg"])
+	}
+	if v, _ := rec["n"].(float64); v != 7 {
+		t.Errorf("n=%v want 7", rec["n"])
+	}
+	if strings.Contains(line, "\033[") {
+		t.Errorf("JSON 版式即使 Color=true 也不应有 ANSI, got %q", line)
+	}
+
+	// 默认（未声明 WithConsoleFormat）→ text 版式：非 JSON 起始、裸值级别词存在
+	var textBuf bytes.Buffer
+	l2 := logger.New(logger.WithConsole(logger.WithConsoleWriter(&textBuf)))
+	l2.Info("default-text")
+	if strings.HasPrefix(strings.TrimSpace(textBuf.String()), "{") {
+		t.Errorf("默认 console 应为 text 版式, got %q", textBuf.String())
+	}
+	if !strings.Contains(textBuf.String(), "INFO default-text") {
+		t.Errorf("默认 text 版式行为回归: %q", textBuf.String())
+	}
+}
+
+// Console.Format 非法非空值 Init 报错（与 file/syslog Format 同判据），DefaultLogger 不动。
+func TestInitConsoleFormatInvalid(t *testing.T) {
+	withRestoreDefault(t)
+	orig := logger.DefaultLogger
+	err := logger.Init(logger.Config{Outputs: logger.OutputsConfig{
+		Console: &logger.ConsoleConfig{Format: "yaml"},
+	}})
+	if err == nil {
+		t.Fatal("非法 console format 应报错")
+	}
+	if !strings.Contains(err.Error(), "unknown file format") {
+		t.Errorf("错误应含 unknown file format, got: %v", err)
+	}
+	if logger.DefaultLogger != orig {
+		t.Error("校验失败不得改动 DefaultLogger")
 	}
 }

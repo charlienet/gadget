@@ -60,6 +60,7 @@ const defaultHTTPTimeout = 5 * time.Second
 type HTTPSettings struct {
 	URL           string            // 完整 POST 端点（含路径，必填）
 	Src           string            // 落盘帧 src 字段（服务归属）；空回退 Options.Service，再空回退 os.Hostname()；越界字符构建时 sanitize 为 '-'
+	Format        FileFormat        // message 正文版式：FormatText（默认，裸值单行）/ FormatJSON（message=整条 JSON 记录渲染串）；传输信封两键形态不随版式变化
 	Headers       map[string]string // 附加请求头（认证等由应用端注入）
 	BatchSize     int               // 每次 POST 最大条数；<=0 由 handler 回退默认 100
 	FlushInterval time.Duration     // 不满批强制投递间隔；<=0 回退默认 500ms
@@ -69,11 +70,13 @@ type HTTPSettings struct {
 
 // WithHTTP 启用 http sink（向远端批量 POST NDJSON）。必须把 o.HTTP 置为非 nil
 // （即使不带子选项），再依次应用 opts。url 为完整 POST 端点（含路径，必填）。
-// 子选项缺省即默认：BatchSize=100、FlushInterval=500ms、Timeout=5s、Headers=nil、Gzip=false。
+// 子选项缺省即默认：Format=FormatText、BatchSize=100、FlushInterval=500ms、Timeout=5s、
+// Headers=nil、Gzip=false。
 func WithHTTP(url string, opts ...HTTPOption) Option {
 	return func(o *Options) {
 		s := &HTTPSettings{
 			URL:           url,
+			Format:        FormatText,
 			BatchSize:     defaultHTTPBatchSize,
 			FlushInterval: defaultHTTPFlushInterval,
 			Timeout:       defaultHTTPTimeout,
@@ -118,6 +121,14 @@ func WithHTTPTimeout(d time.Duration) HTTPOption {
 // WithHTTPGzip 请求体 gzip 压缩（置 Content-Encoding: gzip）。
 func WithHTTPGzip(enabled bool) HTTPOption {
 	return func(s *HTTPSettings) { s.Gzip = enabled }
+}
+
+// WithHTTPFormat message 正文版式：FormatText（默认，裸值单行、与 console/文件 text 同源，
+// 接入契约推荐形态）或 FormatJSON（message=整条 JSON 记录渲染串，与 file/syslog json 同源；
+// 对端落盘为一行 JSON 文本、可被再解析）。两种版式下传输信封 {"src","message"} 与
+// 单行 NDJSON 帧形均不变。
+func WithHTTPFormat(format FileFormat) HTTPOption {
+	return func(s *HTTPSettings) { s.Format = format }
 }
 
 // ---- 发送节奏常量（不对外配置，见「不做项」）----
@@ -559,11 +570,19 @@ func newHTTPHandler(settings *HTTPSettings, service string, lvl slog.Leveler, ad
 			return a
 		},
 	}
-	// 帧正文渲染器与文件 text sink / console 同源（FormatText → console 渲染器 NoColor 形态）：
-	// 裸值版式含 time/level/msg/attrs 全量、单行（appendMessageEscaped 已把裸 \n/\r 转义为
-	// 字面量两字符），trim 尾 \n 后整体作为帧 message 字段做 JSON 字符串编码。
-	// 对端落盘只保留 message 文本，故结构化信息必须全部拼进这一行文本自身。
-	inner := newFileHandler(&s.buf, FormatText, handlerOpts)
+	// 帧正文渲染器按 settings.Format 选择，与文件 sink 同源（newFileHandler）：
+	//   - FormatText（默认，含零值回退）：console 渲染器 NoColor 形态的裸值版式，含
+	//     time/level/msg/attrs 全量、单行（appendMessageEscaped 已把裸 \n/\r 转义为
+	//     字面量两字符）；
+	//   - FormatJSON：slog.NewJSONHandler 渲染整条记录（本就单行、引号/转义完备），
+	//     作为 message 串——外层 Marshal 自动二次转义，帧仍恒单行。
+	// 两种版式下 trim 尾 \n 后整体作为帧 message 字段做 JSON 字符串编码；对端落盘只保留
+	// message 文本，故结构化信息必须全部拼进这一行文本自身。
+	format := settings.Format
+	if format != FormatJSON {
+		format = FormatText // text 为默认版式（零值/未设一律 text，维持 G1 现行为与字段引入前兼容）
+	}
+	inner := newFileHandler(&s.buf, format, handlerOpts)
 
 	go s.run() // 发送 worker 随 handler 构建启动；Close 必停（见 httpSink.Close）
 

@@ -46,3 +46,31 @@ func TestConfigOptionsNoColorMapping(t *testing.T) {
 		t.Errorf("DefaultConfig: want Console.Color==nil（自动）, got %+v", o.Console)
 	}
 }
+
+// TestConfigOptionsConsoleFormatMapping 锁定 ConsoleConfig.Format → ConsoleSettings.Format：
+// 空 = 默认 FormatText（WithConsole 填默认，映射层不注入——ParseFileFormat 空串回退 JSON，
+// 与 console 缺省语义相反）；"json"/"text"（大小写不敏感）→ 对应枚举。
+func TestConfigOptionsConsoleFormatMapping(t *testing.T) {
+	cases := []struct {
+		name string
+		cfg  Config
+		want FileFormat
+	}{
+		{"空=默认 text", Config{Outputs: OutputsConfig{Console: &ConsoleConfig{}}}, FormatText},
+		{"json→FormatJSON", Config{Outputs: OutputsConfig{Console: &ConsoleConfig{Format: "json"}}}, FormatJSON},
+		{"text→FormatText", Config{Outputs: OutputsConfig{Console: &ConsoleConfig{Format: "text"}}}, FormatText},
+		{"大小写不敏感 JSON", Config{Outputs: OutputsConfig{Console: &ConsoleConfig{Format: "JSON"}}}, FormatJSON},
+		{"DefaultConfig→text", DefaultConfig(), FormatText},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			o := buildOptions(configOptions(c.cfg)...)
+			if o.Console == nil {
+				t.Fatalf("Console 节点应声明, got nil")
+			}
+			if o.Console.Format != c.want {
+				t.Errorf("Console.Format=%q want %q", o.Console.Format, c.want)
+			}
+		})
+	}
+}
